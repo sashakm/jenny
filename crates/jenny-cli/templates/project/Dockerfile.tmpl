@@ -1,0 +1,24 @@
+# Build in a full toolchain image, ship a distroless runtime.
+FROM rust:1-slim AS build
+WORKDIR /src
+
+# Cache dependencies separately from sources.
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir -p src && \
+    echo 'fn main() {}' > src/main.rs && \
+    : > src/lib.rs && \
+    cargo build --release && rm -rf src
+
+COPY . .
+RUN touch src/lib.rs src/main.rs && cargo build --release
+
+FROM gcr.io/distroless/cc-debian12 AS runtime
+WORKDIR /app
+COPY --from=build /src/target/release/{{project_kebab}} /app/{{project_kebab}}
+COPY config.yaml /app/config.yaml
+
+# Health and metrics live under `server.framework_path`.
+EXPOSE 8000
+USER nonroot:nonroot
+ENTRYPOINT ["/app/{{project_kebab}}"]
+CMD ["--config-path", "/app/config.yaml"]

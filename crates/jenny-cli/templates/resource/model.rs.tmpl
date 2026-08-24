@@ -1,0 +1,188 @@
+//! The {{resource_pascal}} aggregate. Invariants live in the types.
+
+use jenny::{DomainError, DomainResult};
+use uuid::Uuid;
+
+use crate::domain::event::{{resource_snake}}::{{resource_pascal}}Created;
+
+/// A {{resource_pascal}}'s identity. A newtype rather than a bare `Uuid`, so it can
+/// never be passed where some other id was meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct {{resource_pascal}}Id(Uuid);
+
+impl {{resource_pascal}}Id {
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn from_uuid(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl std::fmt::Display for {{resource_pascal}}Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A {{resource_pascal}}'s name, guaranteed non-empty and bounded.
+///
+/// "Make illegal states unrepresentable" at work: because the only way to obtain one is
+/// through [`new`]({{resource_pascal}}Name::new), no code downstream ever has to
+/// re-check whether a name is blank. The check happens once, and the type carries the
+/// proof afterwards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct {{resource_pascal}}Name(String);
+
+impl {{resource_pascal}}Name {
+    pub const MAX_LEN: usize = 120;
+
+    pub fn new(raw: impl Into<String>) -> DomainResult<Self> {
+        let raw = raw.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(DomainError::invalid("name must not be empty"));
+        }
+        if trimmed.chars().count() > Self::MAX_LEN {
+            return Err(DomainError::invalid(format!(
+                "name must be at most {} characters",
+                Self::MAX_LEN
+            )));
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for {{resource_pascal}}Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The aggregate.
+///
+/// State changes go through methods that enforce the rules and hand back the event they
+/// raised. The aggregate does not publish anything — raising and publishing are separate
+/// jobs, and publishing is the application layer's, after the state change is persisted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct {{resource_pascal}} {
+    id: {{resource_pascal}}Id,
+    name: {{resource_pascal}}Name,
+    archived: bool,
+}
+
+impl {{resource_pascal}} {
+    /// Create one, returning it together with the event that says so.
+    pub fn create(name: {{resource_pascal}}Name) -> (Self, {{resource_pascal}}Created) {
+        let entity = Self {
+            id: {{resource_pascal}}Id::generate(),
+            name,
+            archived: false,
+        };
+        let event = {{resource_pascal}}Created {
+            id: entity.id,
+            name: entity.name.clone(),
+        };
+        (entity, event)
+    }
+
+    /// Reconstitute from storage. Only a driven persistence adapter should call this:
+    /// it raises no event, which is correct when loading something that already happened.
+    pub fn rehydrate(id: {{resource_pascal}}Id, name: {{resource_pascal}}Name, archived: bool) -> Self {
+        Self { id, name, archived }
+    }
+
+    pub fn id(&self) -> {{resource_pascal}}Id {
+        self.id
+    }
+
+    pub fn name(&self) -> &{{resource_pascal}}Name {
+        &self.name
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archived
+    }
+
+    /// Rename. Archived entities are immutable.
+    pub fn rename(&mut self, name: {{resource_pascal}}Name) -> DomainResult<()> {
+        if self.archived {
+            return Err(DomainError::conflict("an archived {{resource_snake}} cannot be edited"));
+        }
+        self.name = name;
+        Ok(())
+    }
+
+    /// Archive. Archiving twice is a conflict, not a silent no-op — the caller asked for
+    /// a state change that cannot happen, and deserves to hear about it.
+    pub fn archive(&mut self) -> DomainResult<()> {
+        if self.archived {
+            return Err(DomainError::conflict("{{resource_snake}} is already archived"));
+        }
+        self.archived = true;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(raw: &str) -> {{resource_pascal}}Name {
+        {{resource_pascal}}Name::new(raw).unwrap()
+    }
+
+    #[test]
+    fn a_name_must_carry_something() {
+        assert!({{resource_pascal}}Name::new("").is_err());
+        assert!({{resource_pascal}}Name::new("   ").is_err());
+    }
+
+    #[test]
+    fn a_name_is_trimmed_and_bounded() {
+        assert_eq!(name("  hello  ").as_str(), "hello");
+        assert!({{resource_pascal}}Name::new("x".repeat({{resource_pascal}}Name::MAX_LEN)).is_ok());
+        assert!({{resource_pascal}}Name::new("x".repeat({{resource_pascal}}Name::MAX_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn creating_raises_the_matching_event() {
+        let (entity, event) = {{resource_pascal}}::create(name("first"));
+        assert_eq!(event.id, entity.id());
+        assert_eq!(event.name.as_str(), "first");
+        assert!(!entity.is_archived());
+    }
+
+    #[test]
+    fn archiving_twice_is_a_conflict() {
+        let (mut entity, _) = {{resource_pascal}}::create(name("first"));
+        entity.archive().unwrap();
+        assert!(entity.is_archived());
+        assert!(matches!(
+            entity.archive().unwrap_err(),
+            DomainError::Conflict { .. }
+        ));
+    }
+
+    #[test]
+    fn an_archived_entity_cannot_be_renamed() {
+        let (mut entity, _) = {{resource_pascal}}::create(name("first"));
+        entity.rename(name("second")).unwrap();
+        assert_eq!(entity.name().as_str(), "second");
+
+        entity.archive().unwrap();
+        assert!(matches!(
+            entity.rename(name("third")).unwrap_err(),
+            DomainError::Conflict { .. }
+        ));
+    }
+}

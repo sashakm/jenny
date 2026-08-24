@@ -1,0 +1,51 @@
+# Development dependencies only. The service itself runs from `just run`, so a code
+# change does not mean an image rebuild.
+services:
+{{#if persistence}}
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: {{project_snake}}
+      POSTGRES_PASSWORD: {{project_snake}}
+      POSTGRES_DB: {{project_snake}}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{project_snake}}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+{{/if}}
+{{#if messaging}}
+  nats:
+    image: nats:2-alpine
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+{{/if}}
+{{#if telemetry}}
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+{{/if}}
+{{#if no_services}}
+  # Nothing to run yet. Regenerate with --features persistence,messaging to get
+  # Postgres and NATS here.
+  placeholder:
+    image: alpine:3
+    command: ["true"]
+    profiles: ["never"]
+{{/if}}
+{{#if persistence}}
+
+volumes:
+  postgres-data:
+{{/if}}

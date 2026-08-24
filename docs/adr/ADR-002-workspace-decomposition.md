@@ -1,0 +1,124 @@
+# ADR-002: Workspace Decomposition and Feature Gating
+
+**Status:** Accepted
+**Date:** 2026-08-24
+
+## Context
+
+ADR-001 says a jenny *service* is one crate. The *framework* is a different question: it
+ships a domain core, several transport adapters, persistence helpers, security
+mechanisms and a runtime. A service that exposes REST and nothing else should not
+compile sqlx, `async-nats` and `jsonwebtoken` to get there.
+
+So the framework is a workspace, and the split is drawn along the rings from ADR-001
+rather than along topics.
+
+## Decision
+
+### The crates
+
+| Crate | Ring | Contains |
+|---|---|---|
+| `jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `DomainEvent`; `UseCase`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; tasks; telemetry |
+| `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, `Ctx`, auth and CORS layers |
+| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
+| `jenny-persistence` | driven adapter | Postgres/sqlx statement building and row mapping |
+| `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, RBAC |
+| `jenny-server` | composition root | runtime, configuration, health, hosting |
+| `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`; internal, not published separately |
+| `jenny-cli` | — | `cargo jenny` — scaffolding (ADR-009) |
+| `jenny` | — | facade of feature-gated re-exports |
+
+### The dependency graph
+
+```
+jenny (facade)
+├── jenny-core                      (always)
+├── jenny-macros                    (always; proc-macro only)
+├── jenny-rest        → jenny-core
+├── jenny-messaging   → jenny-core
+├── jenny-persistence → jenny-core, jenny-macros
+├── jenny-security    → jenny-core
+└── jenny-server      → jenny-core, jenny-rest
+                       → jenny-messaging   (feature `messaging`)
+
+jenny-cli                           (standalone binary; depends on none of the above)
+```
+
+Every arrow points at `jenny-core` or at `jenny-server`. Two properties fall out of
+that, and both are load-bearing:
+
+- **No adapter depends on another adapter.** `jenny-rest` does not depend on
+  `jenny-persistence` or `jenny-security`. It converts `DomainError` into HTTP
+  statuses; `jenny-persistence` converts its own failures into `DomainError`. The two
+  meet in the core and never see each other. An inbound adapter that knew about an
+  outbound one would be an arrow pointing outward.
+- **Only `jenny-server` depends on more than the core.** It is the composition root, and
+  ADR-001 grants it exactly that privilege.
+
+`jenny-core` keeps a deliberately small dependency set — `tokio`, `async-trait`,
+`serde`, `uuid`, `chrono`, `thiserror`, `tracing`, `cron`, and the OTel SDK. No web
+framework, no database driver, no broker client.
+
+### Features
+
+```toml
+default = []
+rest         = ["dep:jenny-rest"]
+server       = ["dep:jenny-server", "rest"]     # the runtime hosts REST adapters
+messaging    = ["dep:jenny-messaging", "jenny-server?/messaging"]
+persistence  = ["dep:jenny-persistence"]
+security     = ["dep:jenny-security"]
+openapi      = ["jenny-macros/openapi", "jenny-rest?/openapi", "jenny-server?/openapi"]
+swagger-ui   = ["openapi", "jenny-server?/swagger-ui"]
+telemetry-otlp / telemetry-prometheus / telemetry-loki
+full         = ["rest", "server", "messaging", "persistence", "security", "openapi"]
+```
+
+Nothing is on by default. Compile time and binary size stay proportional to what a
+service actually uses. `openapi` is opt-in because `utoipa` is a real dependency;
+`swagger-ui` is separate again because its vendored assets cost roughly two megabytes of
+binary, which is a different order of decision.
+
+### Every combination is compiled, not just `--all-features`
+
+`just features` builds each feature set on its own. This is not ceremony: `--all-features`
+cannot catch a `#[cfg]` that only holds when two features are enabled together, and the
+telemetry backends were broken in exactly that way — with only `telemetry-otlp` on, the
+subscriber composition was gated on `all(otlp, loki)`, so the OTLP layers were built and
+then dropped. It compiled and tested green under `--all-features` while exporting
+nothing for anyone who enabled one backend. Two neighbouring bugs (`telemetry-loki`
+alone, and `telemetry-prometheus` alone) did not even compile.
+
+### The facade mirrors the rings
+
+`jenny` re-exports `domain`, `port`, `task` and `telemetry` as modules, plus the
+everyday items flat so ordinary code reads `use jenny::{Context, DomainError};`.
+Adapters appear as `jenny::rest`, `jenny::messaging`, … behind their features.
+
+Both paths exist on purpose: `jenny::domain::DomainError` when the ring matters to the
+reader, `jenny::DomainError` when it does not.
+
+`jenny-rest` additionally re-exports `axum` and `tower_http`, so a service that wants
+`axum::extract::Path` or a `tower_http` layer does not have to add and version-match
+those crates itself.
+
+### Not created yet
+
+- **`jenny-grpc`.** The design is settled — ADR-005 chose axum precisely so a tonic
+  adapter can share middleware with REST — but nothing is built. It gets its own ADR
+  when work starts.
+
+## Consequences
+
+- A REST-only service depends on `jenny` with `features = ["server"]` and never
+  compiles a database driver.
+- The rule "no adapter depends on another adapter" is a reviewable property of the
+  manifests, not just of the source.
+- `jenny-macros` stays internal; `#[derive(Dto)]` reaches users through the facade and
+  `#[derive(QueryFormat)]` through `jenny-persistence`.
+- `jenny-cli` depends on none of the framework crates. It emits text, and coupling the
+  generator to the thing it generates would mean a breaking change in the framework
+  breaks the tool that is supposed to help you adopt it.
+- Adding a transport means adding a crate that depends on `jenny-core` and a feature on
+  the facade. Nothing existing changes.

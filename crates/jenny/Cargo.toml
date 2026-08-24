@@ -1,0 +1,70 @@
+[package]
+name = "jenny"
+version = "0.1.0"
+homepage = "https://crates.io/crates/jenny"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories = ["web-programming"]
+description = "A pragmatic hexagonal webservice framework"
+readme = "../../README.md"
+
+[dependencies]
+jenny-core = { workspace = true }
+jenny-macros = { workspace = true }
+jenny-persistence = { workspace = true, optional = true }
+jenny-security = { workspace = true, optional = true }
+jenny-messaging = { workspace = true, optional = true }
+jenny-rest = { workspace = true, optional = true }
+jenny-server = { workspace = true, optional = true }
+
+[features]
+default = []
+# REST driving adapter (axum/tower).
+rest = ["dep:jenny-rest"]
+# The jenny server runtime (implies the REST adapter).
+server = ["dep:jenny-server", "rest"]
+# Messaging driving adapter (NATS; interface only for now).
+messaging = ["dep:jenny-messaging", "jenny-server?/messaging"]
+# Postgres/sqlx persistence helpers (driven adapter).
+persistence = ["dep:jenny-persistence"]
+# Authentication (JWT, API key) and RBAC authorization components.
+security = ["dep:jenny-security"]
+# OpenAPI schema generation for the REST wire types.
+openapi = ["jenny-macros/openapi", "jenny-rest?/openapi", "jenny-server?/openapi"]
+# A browsable Swagger UI, assets compiled in.
+swagger-ui = ["openapi", "jenny-server?/swagger-ui"]
+# Telemetry backends (forwarded to jenny-core / jenny-server).
+telemetry-otlp = ["jenny-core/telemetry-otlp"]
+telemetry-prometheus = [
+    "jenny-core/telemetry-prometheus",
+    "jenny-server?/telemetry-prometheus",
+]
+telemetry-loki = ["jenny-core/telemetry-loki"]
+# Everything.
+full = ["rest", "server", "messaging", "persistence", "security", "openapi"]
+
+[dev-dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+fake = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+utoipa = { workspace = true }
+uuid = { workspace = true }
+
+[[example]]
+name = "basic"
+path = "../../examples/basic/main.rs"
+required-features = ["server"]
+test = true
+
+[[example]]
+name = "tasks"
+path = "../../examples/tasks/main.rs"

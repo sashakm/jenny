@@ -1,0 +1,138 @@
+[
+  {
+    "Customers": {
+      "path": "/customers",
+      "tags": [
+        "version:1",
+        "public"
+      ],
+      "items": [
+        {
+          "customers::0": {
+            "/": [
+              "get",
+              "post"
+            ]
+          }
+        },
+        {
+          "customers::1": {
+            "/{id}": [
+              "get",
+              "put",
+              "patch"
+            ]
+          }
+        },
+        {
+          "customers::2": {
+            "/{id}:delete": [
+              "delete"
+            ]
+          }
+        },
+        {
+          "customers::purchases::0": {
+            "/{id}/purchases": [
+              "post",
+              "get"
+            ]
+          }
+        },
+        {
+          "customers::purchases::1": {
+            "/{id}/purchases/{pid}": [
+              "get",
+              "patch"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "Products": {
+      "path": "/products",
+      "tags": [
+        "version:1",
+        "public"
+      ],
+      "items": [
+        {
+          "products::0": {
+            "/": [
+              "get",
+              "post"
+            ]
+          }
+        },
+        {
+          "products::1": {
+            "/{id}": [
+              "get",
+              "put"
+            ]
+          }
+        },
+        {
+          "products::2": {
+            "/{id}:delete": [
+              "delete"
+            ]
+          }
+        },
+        {
+          "products::reviews::0": {
+            "/{id}/reviews": [
+              "get",
+              "post"
+            ]
+          }
+        },
+        {
+          "products::reviews::1": {
+            "/{id}/reviews/{rid}": [
+              "get",
+              "patch",
+              "delete"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "Vendors": {
+      "path": "/vendors",
+      "tags": [
+        "internal"
+      ],
+      "items": [
+        {
+          "vendors::0": {
+            "/": [
+              "get",
+              "post"
+            ]
+          }
+        },
+        {
+          "vendors::1": {
+            "/{id}": [
+              "get",
+              "put",
+              "patch"
+            ]
+          }
+        },
+        {
+          "vendors::2": {
+            "/{id}:delete": [
+              "delete"
+            ]
+          }
+        }
+      ]
+    }
+  }
+]

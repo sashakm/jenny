@@ -1,0 +1,8 @@
+//! Adapters, by direction.
+//!
+//! `in` and `out` would have been the names to match the usual hexagonal diagrams, but
+//! `in` is a Rust keyword and `mod r#in` is not a trade worth making. `inbound` and
+//! `outbound` say the same thing and read better at every use site.
+
+pub mod inbound;
+pub mod outbound;

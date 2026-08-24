@@ -1,0 +1,32 @@
+# Configuration for {{project_kebab}}.
+#
+# The runtime reads `server`, `telemetry` and `messaging`. Everything under
+# `applications.<name>` is yours, passed through untouched.
+#
+# Any value can be overridden by an environment variable
+# (JENNY__SERVER__ADDRESS=[::]:9000) or a CLI flag (--address).
+server:
+  address: "[::]:8000"
+  # Where REST adapters mount unless one chose a path in code.
+  api_path: /api
+  # Where health, metrics and OpenAPI live, namespaced away from your API.
+  framework_path: /j
+  # metrics:
+  #   auth:
+  #     username: prometheus
+  #     password: change-me
+
+telemetry:
+  service_name: {{project_kebab}}
+  log_format: pretty
+  # otlp_endpoint: "http://localhost:4317"
+  # prometheus_port: 9090
+{{#if messaging}}
+
+messaging:
+  buffer_size: 64
+{{/if}}
+
+applications:
+  {{project_kebab}}:
+    greeting: "hello from config.yaml"

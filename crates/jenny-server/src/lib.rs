@@ -1,0 +1,54 @@
+//! The runtime a jenny service boots through — and the only place that knows every
+//! layer.
+//!
+//! [`JennyServer`] is the composition root. It is deliberately the one crate allowed
+//! to depend on everything: it reads configuration, brings telemetry up, constructs
+//! concrete driven adapters, hands them to use cases, hands those to driving adapters,
+//! and hosts the lot on a single axum server. Every other crate points inward; this
+//! one closes the circle.
+//!
+//! ### What the runtime brings
+//!
+//! - **Configuration** — YAML, then environment, then CLI ([`ServerConfig`], [`ConfigSource`]).
+//! - **Telemetry** — logs, traces and metrics initialised before anything else runs.
+//! - **Health** — `/health/live`, `/health/ready`, `/health/status` ([`HealthCheck`]).
+//! - **Metrics** — `/metrics`, with the `telemetry-prometheus` feature.
+//! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the background.
+//! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
+//!
+//! ### No injection container
+//!
+//! [`ServerContext`] hands applications their configuration section and any shared
+//! resources during wiring, and then gets out of the way. After `main` returns, use
+//! cases own their `Arc`s outright — there is no registry to look things up in at
+//! runtime, because a dependency graph you can read top-to-bottom in one function is
+//! worth more than one you have to trace through a container.
+//!
+//! ```no_run
+//! use jenny_server::JennyServer;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     JennyServer::from_args()?.run().await
+//! }
+//! ```
+
+mod config;
+mod context;
+mod health;
+#[cfg(feature = "telemetry-prometheus")]
+mod metrics;
+#[cfg(feature = "openapi")]
+mod openapi;
+mod server;
+
+pub use config::{
+    BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
+    DEFAULT_EVENT_BUFFER, DEFAULT_EVENT_NAMESPACE, DEFAULT_FRAMEWORK_PATH, HttpConfig,
+    MessagingConfig, MetricsConfig, ServerArgs, ServerConfig,
+};
+pub use context::ServerContext;
+pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};
+#[cfg(feature = "telemetry-prometheus")]
+pub use metrics::metrics_handler;
+pub use server::{JennyServer, ServerHandle, ServerParts};

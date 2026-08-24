@@ -1,0 +1,58 @@
+[package]
+name = "jenny-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+config = { workspace = true }
+futures = { workspace = true }
+jenny-core = { workspace = true }
+jenny-rest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["net", "signal"] }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+
+# Optional: the in-process event bus and messaging adapters.
+jenny-messaging = { workspace = true, optional = true }
+topmesys = { workspace = true, optional = true }
+
+# Optional telemetry backends
+prometheus = { workspace = true, optional = true }
+
+# Optional API description
+utoipa = { workspace = true, optional = true }
+utoipa-swagger-ui = { workspace = true, optional = true }
+
+[features]
+default = []
+# The in-process event bus, started and stopped by the runtime.
+messaging = ["dep:jenny-messaging", "dep:topmesys"]
+# Serve the OpenAPI document at <framework_path>/openapi.json.
+openapi = ["dep:utoipa", "jenny-rest/openapi"]
+# Serve a browsable Swagger UI, with its assets compiled in.
+swagger-ui = ["openapi", "dep:utoipa-swagger-ui"]
+telemetry-otlp = ["jenny-core/telemetry-otlp"]
+telemetry-prometheus = ["jenny-core/telemetry-prometheus", "dep:prometheus"]
+telemetry-loki = ["jenny-core/telemetry-loki"]
+
+[dev-dependencies]
+base64 = { workspace = true }
+http = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true, features = ["util"] }
+utoipa = { workspace = true }
+uuid = { workspace = true }

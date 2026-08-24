@@ -1,0 +1,45 @@
+# {{project_kebab}}
+
+A [jenny](https://github.com/sashakm/jenny) service.
+
+## Layout
+
+Dependencies point inward. The domain depends on nothing external.
+
+```
+src/
+  domain/          the hexagon — entities, value objects, events, the ports it owns
+    model/         invariants enforced by types and smart constructors
+    event/         domain event definitions, no dispatch
+    port/          the outbound traits the domain owns
+  application/     use cases — orchestration, and nothing else
+  adapter/
+    inbound/rest/  HTTP in: DTOs, TryFrom, status codes
+    outbound/      the driven side: repositories, event publishing
+  main.rs          the composition root — the only file that knows every layer
+```
+
+## Running
+
+```sh
+just up      # development dependencies, if any
+just run     # the service
+just test
+```
+
+| Endpoint | |
+|---|---|
+| `GET /j/health/live` | is the process alive |
+| `GET /j/health/ready` | should it get traffic |
+| `GET /j/health/status` | what is mounted, and both versions |
+| `GET /api/{{resource_plural}}` | the API |
+
+Listings accept `?page=`, `?page_size=`, repeatable `?sort=` (`field`, `-field`,
+`field:desc`) and repeatable `?filter=` (`field:check:value`, checks `eq`, `begins`,
+`ends`, `contains`, `gt`, `st`).
+
+## Adding a resource
+
+```sh
+cargo jenny add resource order
+```

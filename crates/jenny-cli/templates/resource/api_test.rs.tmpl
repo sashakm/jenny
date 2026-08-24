@@ -1,0 +1,146 @@
+//! End-to-end: boots the real service and drives it over HTTP.
+//!
+//! It goes through the same `build` that `main` uses, so what is exercised is the actual
+//! composition root. And it binds port `0` and asks the listener what it got, so the
+//! test never races another process for a fixed port.
+
+use jenny::server::{JennyServer, ServerArgs};
+use reqwest::{Client, StatusCode};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+struct Api {
+    client: Client,
+    base: String,
+}
+
+impl Api {
+    async fn get(&self, path: &str) -> (StatusCode, Value) {
+        self.read(self.client.get(self.url(path))).await
+    }
+
+    async fn post(&self, path: &str, body: Value) -> (StatusCode, Value) {
+        self.read(self.client.post(self.url(path)).json(&body)).await
+    }
+
+    async fn post_empty(&self, path: &str) -> StatusCode {
+        self.client
+            .post(self.url(path))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn delete(&self, path: &str) -> (StatusCode, Value) {
+        self.read(self.client.delete(self.url(path))).await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
+    async fn read(&self, request: reqwest::RequestBuilder) -> (StatusCode, Value) {
+        let response = request.send().await.unwrap();
+        let status = response.status();
+        let body = response.json().await.unwrap_or(Value::Null);
+        (status, body)
+    }
+}
+
+#[tokio::test]
+async fn the_service_works_end_to_end() {
+    let args = ServerArgs {
+        // Port 0: let the OS pick, then ask what it picked.
+        address: Some("127.0.0.1:0".to_string()),
+        config_path: Some(format!("{}/config.yaml", env!("CARGO_MANIFEST_DIR"))),
+        ..Default::default()
+    };
+
+    let parts = {{project_snake}}::build(JennyServer::from_parsed_args(args).unwrap())
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+
+    let api = Api {
+        client: Client::new(),
+        base: format!("http://{}", parts.local_addr().unwrap()),
+    };
+    let handle = parts.handle();
+    let serving = tokio::spawn(parts.serve());
+
+    // --- the framework's own endpoints, under `server.framework_path` ---------------
+    let (status, live) = api.get("/j/health/live").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(live, json!({ "status": "up" }));
+
+    let (status, ready) = api.get("/j/health/ready").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ready["status"], "up");
+
+    let (_, info) = api.get("/j/health/status").await;
+    assert_eq!(info["service"], "{{project_kebab}}");
+    assert_eq!(info["service_version"], env!("CARGO_PKG_VERSION"));
+    assert!(info["framework_version"].as_str().is_some_and(|v| !v.is_empty()));
+
+    // --- the API -------------------------------------------------------------------
+    let (status, id) = api
+        .post("/api/{{resource_plural}}", json!({ "name": "first" }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id: Uuid = serde_json::from_value(id).unwrap();
+
+    let (status, found) = api.get(&format!("/api/{{resource_plural}}/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(found["name"], "first");
+
+    // --- listings ------------------------------------------------------------------
+    api.post("/api/{{resource_plural}}", json!({ "name": "second" }))
+        .await;
+
+    let (_, listed) = api.get("/api/{{resource_plural}}?sort=name").await;
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["first", "second"]);
+
+    let (_, filtered) = api
+        .get("/api/{{resource_plural}}?filter=name:begins:f")
+        .await;
+    assert_eq!(filtered.as_array().unwrap().len(), 1);
+
+    // A path outside the allowlist is refused rather than reaching storage.
+    let (status, _) = api.get("/api/{{resource_plural}}?sort=secret").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // --- domain rules become the right statuses ------------------------------------
+    assert_eq!(
+        api.post_empty(&format!("/api/{{resource_plural}}/{id}/archive"))
+            .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        api.post_empty(&format!("/api/{{resource_plural}}/{id}/archive"))
+            .await,
+        StatusCode::CONFLICT,
+        "archiving twice is a conflict the domain raised, mapped to 409"
+    );
+
+    // --- failures are problem documents ---------------------------------------------
+    let (status, problem) = api.post("/api/{{resource_plural}}", json!({ "name": "  " })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(problem["type"], "urn:jenny:problem:invalid");
+
+    let (status, problem) = api.get("/api/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(problem["type"], "urn:jenny:problem:not-found");
+
+    api.delete(&format!("/api/{{resource_plural}}/{id}")).await;
+
+    handle.shutdown();
+    serving.await.unwrap().unwrap();
+}

@@ -1,0 +1,17 @@
+# Configuration for the `basic` example.
+#
+# `server` and `telemetry` are the only sections the jenny runtime interprets.
+# Everything under `applications.<name>` is passed through untouched and read by the
+# service itself — see `NotesConfig` in main.rs.
+#
+# Any value can be overridden by an environment variable
+# (JENNY__SERVER__ADDRESS=[::]:9000) or a CLI flag (--address), in that order of
+# increasing precedence.
+server:
+  address: "[::]:8000"
+telemetry:
+  service_name: basic-example
+  log_format: pretty
+applications:
+  my-notes:
+    greeting: "hello from config.yaml"

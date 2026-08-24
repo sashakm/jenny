@@ -1,0 +1,323 @@
+//! The {{resource_pascal}} use cases.
+
+use std::sync::Arc;
+
+use jenny::domain::query::{Check, Criteria, Ordering};
+use jenny::{Context, DomainError, DomainEvent, DomainResult, EventEnvelope, EventPublisher};
+
+use crate::domain::model::{{resource_snake}}::{
+    {{resource_pascal}}, {{resource_pascal}}Id, {{resource_pascal}}Name,
+};
+use crate::domain::port::{{resource_snake}}_repository::{{resource_pascal}}Repository;
+
+/// The types every inbound adapter converges on.
+///
+/// A REST DTO, a protobuf message and a CLI argument struct all differ — they should.
+/// What makes them interchangeable *drivers* of the same behaviour is that each converts
+/// into one of these. The fields are already domain types: turning a `String` into a
+/// [`{{resource_pascal}}Name`] is the adapter's job, on the way in.
+pub struct Create{{resource_pascal}} {
+    pub name: {{resource_pascal}}Name,
+}
+
+pub struct Rename{{resource_pascal}} {
+    pub id: {{resource_pascal}}Id,
+    pub name: {{resource_pascal}}Name,
+}
+
+/// Everything you can do with a {{resource_pascal}}.
+///
+/// Generic over its two outbound ports, so the compiler sees straight through to the
+/// concrete adapters the composition root picked. `P: ?Sized` is what lets that root
+/// pass an `Arc<dyn EventPublisher>` instead of a concrete type — one word, and both
+/// dispatch strategies are on the table.
+pub struct {{resource_pascal}}s<R, P: ?Sized> {
+    repository: Arc<R>,
+    events: Arc<P>,
+}
+
+impl<R, P> {{resource_pascal}}s<R, P>
+where
+    R: {{resource_pascal}}Repository,
+    P: EventPublisher + ?Sized,
+{
+    /// The attribute paths a listing may be sorted and filtered on.
+    ///
+    /// The allowlist is the security boundary for client-supplied criteria: a path
+    /// outside it is refused rather than reaching storage. A database-backed repository
+    /// passes the equivalent `Columns` table to `jenny::persistence::SqlCriteria`, which
+    /// requires one for the same reason.
+    pub const QUERYABLE: &'static [&'static str] = &["name", "archived"];
+
+    pub fn new(repository: Arc<R>, events: Arc<P>) -> Self {
+        Self { repository, events }
+    }
+
+    pub async fn create(
+        &self,
+        cmd: Create{{resource_pascal}},
+        cx: &Context,
+    ) -> DomainResult<{{resource_pascal}}Id> {
+        let (entity, event) = {{resource_pascal}}::create(cmd.name);
+        let id = entity.id();
+
+        self.repository.save(entity).await?;
+        // Publish only after the state change has been committed. See below on dual writes.
+        self.publish(&event, cx).await;
+
+        Ok(id)
+    }
+
+    pub async fn list(
+        &self,
+        criteria: &Criteria,
+        _cx: &Context,
+    ) -> DomainResult<Vec<{{resource_pascal}}>> {
+        criteria.ensure_allowed(Self::QUERYABLE)?;
+
+        let mut found = self.repository.list().await?;
+        found.retain(|entity| criteria.filter.iter().all(|f| matches(entity, f)));
+        sort(&mut found, criteria);
+
+        // Paging last, so it slices the result the client actually asked for.
+        if criteria.page.limit() > 0 {
+            found = found
+                .into_iter()
+                .skip(criteria.page.offset() as usize)
+                .take(criteria.page.limit() as usize)
+                .collect();
+        }
+        Ok(found)
+    }
+
+    pub async fn fetch(
+        &self,
+        id: {{resource_pascal}}Id,
+        _cx: &Context,
+    ) -> DomainResult<{{resource_pascal}}> {
+        self.repository
+            .fetch(id)
+            .await?
+            .ok_or_else(DomainError::not_found)
+    }
+
+    pub async fn rename(&self, cmd: Rename{{resource_pascal}}, cx: &Context) -> DomainResult<()> {
+        let mut entity = self.fetch(cmd.id, cx).await?;
+        // The rule about editing archived entities lives in the aggregate, not here.
+        entity.rename(cmd.name)?;
+        self.repository.save(entity).await
+    }
+
+    pub async fn archive(&self, id: {{resource_pascal}}Id, cx: &Context) -> DomainResult<()> {
+        let mut entity = self.fetch(id, cx).await?;
+        entity.archive()?;
+        self.repository.save(entity).await
+    }
+
+    pub async fn delete(
+        &self,
+        id: {{resource_pascal}}Id,
+        _cx: &Context,
+    ) -> DomainResult<{{resource_pascal}}> {
+        self.repository
+            .delete(id)
+            .await?
+            .ok_or_else(DomainError::not_found)
+    }
+
+    /// Encode a raised event and hand it to the outbound port.
+    ///
+    /// Serde appears *here*, one ring out from the domain, mirroring how a DTO becomes a
+    /// command on the way in. The domain event stayed a plain struct.
+    ///
+    /// A publish failure is logged rather than returned: the state change already
+    /// succeeded, and failing the caller's request would misreport what happened. That is
+    /// the dual-write problem in miniature. When consistency requires more, put a
+    /// transactional outbox behind [`EventPublisher`] — write the event inside the same
+    /// transaction as the state change and let a relay drain it. This method does not change.
+    async fn publish(&self, event: &(impl DomainEvent + EventPayload), cx: &Context) {
+        let envelope = match EventEnvelope::json(event.name(), &event.payload()) {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                tracing::error!(request_id = %cx.request_id(), "could not encode event: {e}");
+                return;
+            }
+        };
+        if let Err(e) = self.events.publish(envelope).await {
+            tracing::error!(request_id = %cx.request_id(), "could not publish event: {e}");
+        }
+    }
+}
+
+/// How a domain event is rendered for the wire.
+///
+/// Kept in the application layer so the domain's event structs need no serde derive —
+/// the same reason DTOs live in the inbound adapters rather than in `domain/`.
+pub trait EventPayload {
+    fn payload(&self) -> serde_json::Value;
+}
+
+impl EventPayload for crate::domain::event::{{resource_snake}}::{{resource_pascal}}Created {
+    fn payload(&self) -> serde_json::Value {
+        serde_json::json!({ "id": self.id.as_uuid(), "name": self.name.as_str() })
+    }
+}
+
+/// Read one filterable attribute.
+fn attribute(entity: &{{resource_pascal}}, path: &str) -> Option<String> {
+    match path {
+        "name" => Some(entity.name().to_string()),
+        "archived" => Some(entity.is_archived().to_string()),
+        // Unreachable: `ensure_allowed` ran first.
+        _ => None,
+    }
+}
+
+fn matches(entity: &{{resource_pascal}}, filter: &jenny::domain::query::Filter) -> bool {
+    let Some(value) = attribute(entity, filter.path()) else {
+        return false;
+    };
+    let (value, wanted) = (value.to_lowercase(), filter.value().to_lowercase());
+    match filter.check() {
+        Check::Eq => value == wanted,
+        Check::Begins => value.starts_with(&wanted),
+        Check::Ends => value.ends_with(&wanted),
+        Check::Contains => value.contains(&wanted),
+        Check::Gt => value > wanted,
+        Check::St => value < wanted,
+    }
+}
+
+fn sort(entities: &mut [{{resource_pascal}}], criteria: &Criteria) {
+    // Later keys applied first, so earlier ones win under a stable sort — which is what
+    // a client listing `sort=a&sort=b` expects.
+    for key in criteria.sort.iter().rev() {
+        entities.sort_by(|left, right| {
+            let ordering = attribute(left, key.path()).cmp(&attribute(right, key.path()));
+            match key.ordering() {
+                Ordering::Asc => ordering,
+                Ordering::Desc => ordering.reverse(),
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::outbound::{{resource_snake}}_repository::InMemory{{resource_pascal}}s;
+    use std::sync::Mutex;
+
+    /// A test double for the event port — the point of owning the port at all.
+    #[derive(Default)]
+    struct RecordedEvents(Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl EventPublisher for RecordedEvents {
+        async fn publish(&self, event: EventEnvelope) -> Result<(), jenny::PublishError> {
+            self.0.lock().unwrap().push(event.name().to_string());
+            Ok(())
+        }
+    }
+
+    fn subject() -> (
+        {{resource_pascal}}s<InMemory{{resource_pascal}}s, RecordedEvents>,
+        Arc<RecordedEvents>,
+    ) {
+        let events = Arc::new(RecordedEvents::default());
+        let service = {{resource_pascal}}s::new(
+            Arc::new(InMemory{{resource_pascal}}s::default()),
+            events.clone(),
+        );
+        (service, events)
+    }
+
+    fn create(name: &str) -> Create{{resource_pascal}} {
+        Create{{resource_pascal}} {
+            name: {{resource_pascal}}Name::new(name).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn creating_stores_and_publishes() {
+        let (service, events) = subject();
+        let cx = Context::new();
+
+        let id = service.create(create("first"), &cx).await.unwrap();
+
+        assert_eq!(service.fetch(id, &cx).await.unwrap().name().as_str(), "first");
+        assert_eq!(events.0.lock().unwrap().as_slice(), ["{{resource_snake}}.created"]);
+    }
+
+    #[tokio::test]
+    async fn fetching_something_absent_is_not_found() {
+        let (service, _) = subject();
+        let err = service
+            .fetch({{resource_pascal}}Id::generate(), &Context::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn archiving_twice_conflicts() {
+        let (service, _) = subject();
+        let cx = Context::new();
+        let id = service.create(create("first"), &cx).await.unwrap();
+
+        service.archive(id, &cx).await.unwrap();
+        assert!(matches!(
+            service.archive(id, &cx).await.unwrap_err(),
+            DomainError::Conflict { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn listings_are_filtered_sorted_and_paged() {
+        let (service, _) = subject();
+        let cx = Context::new();
+        for name in ["gamma", "alpha", "beta"] {
+            service.create(create(name), &cx).await.unwrap();
+        }
+
+        let names = |found: Vec<{{resource_pascal}}>| -> Vec<String> {
+            found.into_iter().map(|e| e.name().to_string()).collect()
+        };
+
+        let sorted = service
+            .list(&Criteria::new().with_sort("name".parse().unwrap()), &cx)
+            .await
+            .unwrap();
+        assert_eq!(names(sorted), ["alpha", "beta", "gamma"]);
+
+        let filtered = service
+            .list(
+                &Criteria::new().with_filter("name:begins:a".parse().unwrap()),
+                &cx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(names(filtered), ["alpha"]);
+    }
+
+    #[tokio::test]
+    async fn a_path_outside_the_allowlist_is_refused() {
+        let (service, _) = subject();
+        let criteria = Criteria::new().with_sort("secret".parse().unwrap());
+        let err = service.list(&criteria, &Context::new()).await.unwrap_err();
+        assert!(matches!(err, DomainError::Invalid { .. }));
+    }
+
+    #[tokio::test]
+    async fn deleting_returns_what_was_removed() {
+        let (service, _) = subject();
+        let cx = Context::new();
+        let id = service.create(create("first"), &cx).await.unwrap();
+
+        assert_eq!(service.delete(id, &cx).await.unwrap().id(), id);
+        assert!(matches!(
+            service.delete(id, &cx).await.unwrap_err(),
+            DomainError::NotFound
+        ));
+    }
+}

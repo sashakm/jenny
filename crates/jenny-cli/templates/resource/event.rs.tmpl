@@ -1,0 +1,34 @@
+//! What happened to a {{resource_pascal}}. Definitions only — nothing here knows about
+//! a bus.
+
+use jenny::DomainEvent;
+
+use crate::domain::model::{{resource_snake}}::{{resource_pascal}}Id;
+use crate::domain::model::{{resource_snake}}::{{resource_pascal}}Name;
+
+/// A {{resource_pascal}} was created.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct {{resource_pascal}}Created {
+    pub id: {{resource_pascal}}Id,
+    pub name: {{resource_pascal}}Name,
+}
+
+impl DomainEvent for {{resource_pascal}}Created {
+    fn name(&self) -> &str {
+        "{{resource_snake}}.created"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_name_themselves_in_past_tense() {
+        let event = {{resource_pascal}}Created {
+            id: {{resource_pascal}}Id::generate(),
+            name: {{resource_pascal}}Name::new("first").unwrap(),
+        };
+        assert_eq!(event.name(), "{{resource_snake}}.created");
+    }
+}

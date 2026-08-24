@@ -1,0 +1,30 @@
+//! The outbound port for {{resource_pascal}} storage — declared by the domain.
+//!
+//! This is the half of hexagonal architecture that inverts the dependency. The domain
+//! says what it needs in its own vocabulary, and a driven adapter in
+//! `adapter/outbound/` supplies it. Postgres, an in-memory map and a test double are
+//! then interchangeable, and none of them appears inside the hexagon.
+//!
+//! Note what this is *not*: a generic `Repository<T, Id>`. It talks about
+//! {{resource_plural}}, returns {{resource_plural}}, and fails with domain errors. A
+//! generic one would drag storage concepts back across the boundary it exists to defend.
+
+use async_trait::async_trait;
+use jenny::DomainResult;
+
+use crate::domain::model::{{resource_snake}}::{{resource_pascal}};
+use crate::domain::model::{{resource_snake}}::{{resource_pascal}}Id;
+
+#[async_trait]
+pub trait {{resource_pascal}}Repository: Send + Sync + 'static {
+    /// Insert or replace.
+    async fn save(&self, entity: {{resource_pascal}}) -> DomainResult<()>;
+
+    /// `None` when there is no such {{resource_snake}}.
+    async fn fetch(&self, id: {{resource_pascal}}Id) -> DomainResult<Option<{{resource_pascal}}>>;
+
+    async fn list(&self) -> DomainResult<Vec<{{resource_pascal}}>>;
+
+    /// Returns what was removed, or `None` when there was nothing to remove.
+    async fn delete(&self, id: {{resource_pascal}}Id) -> DomainResult<Option<{{resource_pascal}}>>;
+}

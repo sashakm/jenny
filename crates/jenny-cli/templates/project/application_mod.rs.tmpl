@@ -1,0 +1,11 @@
+//! Use cases: orchestration, and nothing else.
+//!
+//! Each method does the same few things in the same order — check permission, call the
+//! domain, persist, then publish what the domain raised. The business rules themselves
+//! are one ring in, in `domain/`. If a rule starts being written *here*, it has leaked
+//! out of the hexagon.
+//!
+//! These are plain methods rather than `jenny::UseCase` impls. A use case is a unit of
+//! behaviour, and in Rust that is a function; the trait earns its keep only when you
+//! need the indirection — several driving adapters that must not know the concrete
+//! type, a heterogeneous set behind `Arc<dyn …>`, a decorator wrapping any of them.

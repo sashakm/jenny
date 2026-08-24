@@ -1,0 +1,158 @@
+{
+  "resources": [
+    {
+      "name": "ApiFull",
+      "ident": "/api/**"
+    },
+    {
+      "name": "OrderCollection",
+      "ident": "/api/orders"
+    },
+    {
+      "name": "OrderItems",
+      "ident": "/api/orders/*[0-9]"
+    },
+    {
+      "name": "OrderStatus",
+      "ident": "/api/orders/*[0-9]/status"
+    },
+    {
+      "name": "PaymentCollection",
+      "ident": "/api/payments"
+    },
+    {
+      "name": "PaymentItems",
+      "ident": "/api/payments/*[0-9]"
+    },
+    {
+      "name": "ProductCollection",
+      "ident": "/api/products"
+    },
+    {
+      "name": "ProductItems",
+      "ident": "/api/products/*[0-9]"
+    },
+    {
+      "name": "CustomerCollection",
+      "ident": "/api/customers"
+    },
+    {
+      "name": "CustomerItems",
+      "ident": "/api/customers/*[a-z,A-Z,0-9-]"
+    },
+    {
+      "name": "CustomerAccount",
+      "ident": "/api/customers/*[a-z,A-Z,0-9-]/account"
+    }
+  ],
+  "roles": [
+    {
+      "Admin": {
+        "resourceAccess": {
+          "ApiFull": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        }
+      }
+    },
+    {
+      "Dispatch": {
+        "resourceAccess": {
+          "OrderCollection": [
+            "GET"
+          ],
+          "OrderItems": [
+            "GET"
+          ],
+          "OrderStatus": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH"
+          ],
+          "PaymentItems": [
+            "GET"
+          ]
+        }
+      }
+    },
+    {
+      "Purchasing": {
+        "resourceAccess": {
+          "ProductCollection": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ],
+          "ProductItems": [
+            "GET",
+            "POST",
+            "PATCH",
+            "PUT",
+            "DELETE"
+          ]
+        }
+      }
+    },
+    {
+      "CustomerSupport": {
+        "inheritedRoles": [
+          "Dispatch"
+        ],
+        "resourceAccess": {
+          "PaymentItems": [
+            "POST",
+            "PUT",
+            "PATCH"
+          ],
+          "OrderItems": [
+            "DELETE"
+          ],
+          "CustomerCollection": [
+            "GET"
+          ],
+          "CustomerItems": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        }
+      }
+    },
+    {
+      "Customer": {
+        "resourceAccess": {
+          "OrderCollection": [
+            "POST"
+          ],
+          "PaymentCollection": [
+            "POST"
+          ],
+          "ProductCollection": [
+            "GET"
+          ],
+          "ProductItems": [
+            "GET"
+          ],
+          "CustomerCollection": [
+            "POST"
+          ],
+          "CustomerAccount": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH"
+          ]
+        }
+      }
+    }
+  ]
+}

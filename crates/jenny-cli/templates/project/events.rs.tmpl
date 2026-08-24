@@ -1,0 +1,62 @@
+//! The driven side of event publishing.
+{{#if messaging}}
+//!
+//! The runtime starts an in-process bus and hands the
+//! [`EventPublisher`](jenny::EventPublisher) port back from `server.events()`.
+//! Publishing fans out to every subscribed listener, and this is one such listener.
+//!
+//! Each listener is its own small outbound effect. A real service would sit an
+//! audit-log writer, a NATS forwarder and a mailer beside this one. Each is added
+//! independently, and nothing that publishes learns about any of them.
+
+use async_trait::async_trait;
+use jenny::messaging::topmesys;
+
+#[derive(Debug)]
+pub struct EventLogListener;
+
+#[async_trait]
+impl topmesys::EventConsumer for EventLogListener {
+    /// Every event in this service's namespace.
+    fn consumes(&self) -> &str {
+        "{{project_kebab}}.*"
+    }
+
+    async fn handle_event(
+        &self,
+        event: std::sync::Arc<topmesys::EventMessage>,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            topic = event.topic().text(),
+            payload = %String::from_utf8_lossy(event.content()),
+            "domain event"
+        );
+        Ok(())
+    }
+}
+{{else}}
+//!
+//! The simplest thing that satisfies the [`EventPublisher`] port. Enabling the
+//! `messaging` feature swaps this for the runtime's in-process bus, where one publish
+//! fans out to many independent listeners — and the application layer cannot tell the
+//! difference, because it only ever sees the port.
+
+use async_trait::async_trait;
+use jenny::{EventEnvelope, EventPublisher, PublishError};
+
+#[derive(Debug, Default)]
+pub struct EventLog;
+
+#[async_trait]
+impl EventPublisher for EventLog {
+    async fn publish(&self, event: EventEnvelope) -> Result<(), PublishError> {
+        tracing::info!(
+            event = event.name(),
+            at = %event.timestamp(),
+            payload = %String::from_utf8_lossy(event.payload()),
+            "domain event"
+        );
+        Ok(())
+    }
+}
+{{/if}}

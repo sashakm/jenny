@@ -1,0 +1,10 @@
+//! The binary. Everything it does lives in the library beside it, so the integration
+//! tests can drive the same wiring.
+
+use anyhow::Result;
+use jenny::server::JennyServer;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    {{project_snake}}::build(JennyServer::from_args()?)?.run().await
+}

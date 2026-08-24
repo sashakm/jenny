@@ -1,0 +1,194 @@
+//! An in-memory `{{resource_pascal}}Repository`.
+//!
+//! Stands in for what would be a database-backed adapter, and keeps the same two-part
+//! structure one has, because that structure is the point:
+//!
+//! 1. a **storage-shaped** row type ([`{{resource_pascal}}Row`]) — flat, primitive fields,
+//! 2. **mappers** between it and the aggregate, in both directions.
+//!
+//! The store never holds a [`{{resource_pascal}}`]. That is what keeps storage concerns
+//! out of the domain: a column rename changes the row type and the two conversions, and
+//! nothing inside the hexagon notices.
+{{#if persistence}}
+//!
+//! For Postgres, swap the body for `sqlx` and translate listing criteria with
+//! `jenny::persistence::SqlCriteria`, which requires a `Columns` allowlist so a
+//! client-supplied filter path can never reach the statement:
+//!
+//! ```ignore
+//! use jenny::persistence::criteria::{ColumnKind, Columns, SqlCriteria};
+//! use sqlx::AssertSqlSafe;
+//!
+//! let columns = Columns::new([
+//!     ("name", "name", ColumnKind::Text),
+//!     ("archived", "archived", ColumnKind::Bool),
+//! ]);
+//! let sql = SqlCriteria::build(criteria, &columns)?;
+//! let statement = format!("SELECT id, name, archived FROM {{resource_plural}}{}", sql.tail());
+//!
+//! let mut query = sqlx::query_as::<_, {{resource_pascal}}Row>(AssertSqlSafe(statement));
+//! for binding in sql.bindings() {
+//!     query = query.bind(binding);
+//! }
+//! ```
+{{/if}}
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use jenny::{DomainError, DomainResult};
+use uuid::Uuid;
+
+use crate::domain::model::{{resource_snake}}::{
+    {{resource_pascal}}, {{resource_pascal}}Id, {{resource_pascal}}Name,
+};
+use crate::domain::port::{{resource_snake}}_repository::{{resource_pascal}}Repository;
+
+/// The storage shape — what a database row would look like.
+#[derive(Clone, Debug)]
+struct {{resource_pascal}}Row {
+    id: Uuid,
+    name: String,
+    archived: bool,
+}
+
+/// Aggregate to row, on the way out.
+impl From<&{{resource_pascal}}> for {{resource_pascal}}Row {
+    fn from(entity: &{{resource_pascal}}) -> Self {
+        Self {
+            id: entity.id().as_uuid(),
+            name: entity.name().to_string(),
+            archived: entity.is_archived(),
+        }
+    }
+}
+
+/// Row to aggregate, on the way back in.
+///
+/// Fallible, and deliberately so: stored data can violate an invariant the code now
+/// enforces — an older release wrote a blank name, or someone edited the table by hand.
+/// That is an internal failure, not the caller's fault, so it maps to
+/// [`DomainError::Internal`] rather than to a 400.
+impl TryFrom<{{resource_pascal}}Row> for {{resource_pascal}} {
+    type Error = DomainError;
+
+    fn try_from(row: {{resource_pascal}}Row) -> Result<Self, Self::Error> {
+        let name = {{resource_pascal}}Name::new(row.name).map_err(|e| {
+            DomainError::internal(format!("stored {{resource_snake}} {} is unusable: {e}", row.id))
+        })?;
+        Ok({{resource_pascal}}::rehydrate(
+            {{resource_pascal}}Id::from_uuid(row.id),
+            name,
+            row.archived,
+        ))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InMemory{{resource_pascal}}s {
+    rows: Mutex<HashMap<Uuid, {{resource_pascal}}Row>>,
+}
+
+impl InMemory{{resource_pascal}}s {
+    /// Whether the store is reachable — the readiness signal `main` registers, in place
+    /// of the connection-pool ping a real repository would do.
+    pub fn is_healthy(&self) -> bool {
+        self.rows.lock().is_ok()
+    }
+
+    fn lock(&self) -> DomainResult<std::sync::MutexGuard<'_, HashMap<Uuid, {{resource_pascal}}Row>>> {
+        // A poisoned lock means another thread panicked mid-write. Internal failure, not
+        // something the caller got wrong.
+        self.rows
+            .lock()
+            .map_err(|e| DomainError::internal(format!("store is poisoned: {e}")))
+    }
+}
+
+#[async_trait]
+impl {{resource_pascal}}Repository for InMemory{{resource_pascal}}s {
+    async fn save(&self, entity: {{resource_pascal}}) -> DomainResult<()> {
+        let row = {{resource_pascal}}Row::from(&entity);
+        self.lock()?.insert(row.id, row);
+        Ok(())
+    }
+
+    async fn fetch(&self, id: {{resource_pascal}}Id) -> DomainResult<Option<{{resource_pascal}}>> {
+        let row = self.lock()?.get(&id.as_uuid()).cloned();
+        row.map({{resource_pascal}}::try_from).transpose()
+    }
+
+    async fn list(&self) -> DomainResult<Vec<{{resource_pascal}}>> {
+        let rows: Vec<{{resource_pascal}}Row> = self.lock()?.values().cloned().collect();
+        rows.into_iter().map({{resource_pascal}}::try_from).collect()
+    }
+
+    async fn delete(&self, id: {{resource_pascal}}Id) -> DomainResult<Option<{{resource_pascal}}>> {
+        let row = self.lock()?.remove(&id.as_uuid());
+        row.map({{resource_pascal}}::try_from).transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entity(name: &str) -> {{resource_pascal}} {
+        {{resource_pascal}}::create({{resource_pascal}}Name::new(name).unwrap()).0
+    }
+
+    #[tokio::test]
+    async fn saved_entities_come_back_through_the_mappers() {
+        let repo = InMemory{{resource_pascal}}s::default();
+        let entity = entity("first");
+        let id = entity.id();
+
+        repo.save(entity).await.unwrap();
+
+        let found = repo.fetch(id).await.unwrap().unwrap();
+        assert_eq!(found.id(), id);
+        assert_eq!(found.name().as_str(), "first");
+        assert_eq!(repo.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn saving_the_same_id_replaces_rather_than_duplicates() {
+        let repo = InMemory{{resource_pascal}}s::default();
+        let mut entity = entity("first");
+        let id = entity.id();
+        repo.save(entity.clone()).await.unwrap();
+
+        entity.rename({{resource_pascal}}Name::new("second").unwrap()).unwrap();
+        repo.save(entity).await.unwrap();
+
+        assert_eq!(repo.list().await.unwrap().len(), 1);
+        assert_eq!(repo.fetch(id).await.unwrap().unwrap().name().as_str(), "second");
+    }
+
+    #[tokio::test]
+    async fn missing_entities_are_none_not_errors() {
+        let repo = InMemory{{resource_pascal}}s::default();
+        let id = {{resource_pascal}}Id::generate();
+        assert!(repo.fetch(id).await.unwrap().is_none());
+        assert!(repo.delete(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stored_row_that_breaks_an_invariant_is_an_internal_error() {
+        let repo = InMemory{{resource_pascal}}s::default();
+        let id = Uuid::new_v4();
+        // As if an older release, or a hand-edited table, had written this.
+        repo.lock().unwrap().insert(
+            id,
+            {{resource_pascal}}Row {
+                id,
+                name: "   ".to_string(),
+                archived: false,
+            },
+        );
+
+        let err = repo.fetch({{resource_pascal}}Id::from_uuid(id)).await.unwrap_err();
+        assert!(matches!(err, DomainError::Internal { .. }));
+    }
+}

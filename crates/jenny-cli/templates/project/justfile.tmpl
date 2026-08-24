@@ -1,0 +1,26 @@
+default: check test
+
+# Compile everything, including tests.
+check:
+    cargo clippy --all-targets -- -D warnings
+    cargo fmt --all --check
+
+test:
+    cargo test
+
+run:
+    cargo run -- --config-path config.yaml
+
+# Development dependencies (Postgres, collector, ...).
+up:
+    docker compose up -d
+
+down:
+    docker compose down -v
+
+# Rebuild the release image.
+image:
+    docker build -t {{project_kebab}}:dev .
+
+fmt:
+    cargo fmt --all
