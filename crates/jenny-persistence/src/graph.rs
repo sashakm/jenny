@@ -118,6 +118,7 @@ impl Graph {
         self
     }
 
+    /// The graph's name in `ag_catalog.ag_graph`.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -187,8 +188,9 @@ impl Graph {
     }
 
     /// What every statement needs, inside the caller's transaction: AGE loaded, and
-    /// `ag_catalog` on the search path. Local to the transaction, so a pooled
-    /// connection goes back the way it came.
+    /// `ag_catalog` on the search path. The search path is local to the transaction, so
+    /// a pooled connection goes back with its own; a `LOAD` lasts for the connection,
+    /// which only spares the next transaction one.
     async fn enter(&self, connection: &mut PgConnection) -> sqlx::Result<()> {
         let load = *self
             .load

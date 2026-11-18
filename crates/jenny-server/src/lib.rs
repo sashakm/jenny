@@ -18,8 +18,9 @@
 //! - **Metrics** — `<framework_path>/metrics`, with the `telemetry-prometheus` feature.
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the background.
 //! - **Postgres** — with the `persistence` feature, a pool from `persistence.postgres`
-//!   ([`JennyServer::postgres`]), migrated, its document tables created and its
-//!   readiness checked before the socket is bound; with `outbox: true`, the relay that
+//!   ([`JennyServer::postgres`]), migrated, its document tables (and, with jenny's
+//!   `graph` feature, its AGE graphs) created and its readiness checked before the
+//!   socket is bound; with `outbox: true`, the relay that
 //!   forwards committed events to the bus, until shutdown.
 //! - **NATS key-value buckets** — with `messaging`, a connection from `messaging.nats.url`
 //!   ([`JennyServer::nats`]), its buckets opened and its readiness checked before the

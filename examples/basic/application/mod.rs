@@ -14,7 +14,7 @@
 //! use-case trait: every driving adapter calls the methods directly, and the struct is
 //! concrete, so nothing has to be erased to share it. `#[jenny::use_cases]` on the
 //! `impl` block gives each method a span and a duration measurement and generates
-//! nothing else — the dependency graph is still the struct's two fields.
+//! nothing else — the dependency graph is still the struct's fields.
 
 pub mod command;
 pub mod notes;

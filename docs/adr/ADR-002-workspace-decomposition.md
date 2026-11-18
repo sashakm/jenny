@@ -62,7 +62,7 @@ that, and both are load-bearing:
 
 `jenny-core` keeps a deliberately small dependency set — `tokio`, `tokio-util`,
 `futures`, `async-trait`, `serde`, `serde_json`, `json-patch`, `uuid`, `chrono`,
-`thiserror`, `anyhow`, `tracing` and `cron`. No web framework, no
+`thiserror`, `anyhow`, `tracing`, `cron` and `bytes`. No web framework, no
 database driver, no broker client, and no exporter: telemetry setup (the OTel SDK,
 `tracing-subscriber`, the backends) lives in `jenny-server`, the only crate that starts it.
 
@@ -75,11 +75,12 @@ server       = ["dep:jenny-server", "rest"]     # the runtime hosts REST adapter
 messaging    = ["dep:jenny-messaging", "jenny-server?/messaging"]
 persistence  = ["dep:jenny-persistence", "jenny-server?/persistence"]
 graph        = ["persistence", "jenny-persistence/graph"]
+objects      = ["dep:jenny-objects", "jenny-server?/objects"]
 security     = ["dep:jenny-security"]
 openapi      = ["jenny-macros/openapi", "jenny-rest?/openapi", "jenny-server?/openapi"]
 swagger-ui   = ["openapi", "jenny-server?/swagger-ui"]
 telemetry-otlp / telemetry-prometheus / telemetry-loki   # each implies `server`
-full         = ["rest", "server", "messaging", "persistence", "graph", "security", "openapi"]
+full         = ["rest", "server", "messaging", "persistence", "graph", "objects", "security", "openapi"]
 ```
 
 Nothing is on by default. Compile time and binary size stay proportional to what a

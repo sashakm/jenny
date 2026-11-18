@@ -15,7 +15,7 @@ Check each of these, citing `file:line` for every finding:
    topmesys, reqwest, utoipa or any other transport, storage or broker crate. New entries
    in `crates/jenny-core/Cargo.toml` `[dependencies]` need a reason.
 2. **Adapters do not depend on adapters.** `jenny-rest`, `jenny-messaging`,
-   `jenny-persistence` and `jenny-security` may depend on `jenny-core` (and
+   `jenny-persistence`, `jenny-objects` and `jenny-security` may depend on `jenny-core` (and
    `jenny-macros`) only. A dev-dependency between them is acceptable for tests. Confirm
    with `cargo tree -e normal -p <crate> --depth 1`.
 3. **Only the composition root wires.** `jenny-server` may depend on more than the core;

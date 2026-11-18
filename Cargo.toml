@@ -18,7 +18,7 @@ members = [
 version = "0.1.0"
 rust-version = "1.94"
 authors = ["Sasha Kleine-Möllhoff <sashakm@bricknet.de>"]
-repository = "https://github.com/sashakm/jenny-framework"
+repository = "https://github.com/sashakm/jenny"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 

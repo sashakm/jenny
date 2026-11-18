@@ -129,7 +129,7 @@ jobs:
         env:
           JENNY__PERSISTENCE__POSTGRES__URL: postgres://jenny:jenny@localhost:5433/jenny
       # Where AGE is not preloaded, every transaction loads it: the other code path.
-      - name: Run the graph tests against AGE without the preload
+      - name: Run the graph tests and the example against AGE without the preload
         run: |
           docker run -d --name age-unloaded -p 5434:5432 -e POSTGRES_USER=jenny \
             -e POSTGRES_PASSWORD=jenny -e POSTGRES_DB=jenny apache/age:release_PG18_1.8.0 postgres
@@ -138,8 +138,10 @@ jobs:
             sleep 1
           done
           cargo test -p jenny-persistence --features graph --test graph_test
+          cargo test -p jenny --features server,graph --example basic
         env:
           JENNY_TEST_AGE_URL: postgres://jenny:jenny@localhost:5434/jenny
+          JENNY__PERSISTENCE__POSTGRES__URL: postgres://jenny:jenny@localhost:5434/jenny
       - name: Run the example against Postgres, its events through the outbox
         run: cargo test -p jenny --features server,persistence,messaging --example basic
         env:

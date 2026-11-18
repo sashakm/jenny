@@ -6,7 +6,8 @@
 //!
 //! There is no note store here: `jenny::memory::Memory`, the Postgres document store and
 //! the NATS key-value store already are one each, chosen in `main.rs` from
-//! configuration. A module appears here when the domain declares a query of its own
+//! configuration. Nor an attachment store: `MemoryBlobs` and the object store are
+//! jenny's too. A module appears here when the domain declares a query of its own
 //! that a generic store cannot answer — as `links` does, for which notes refer to
 //! which.
 

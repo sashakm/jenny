@@ -30,7 +30,3 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-
-# Everything is feature-gated, so docs.rs would otherwise show next to nothing.
-[package.metadata.docs.rs]
-all-features = true

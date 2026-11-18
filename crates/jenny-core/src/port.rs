@@ -10,9 +10,10 @@
 //!   the inside, the implementation lives in a driven adapter.
 //!
 //! The framework ships the driven ports whose shape does not vary between applications.
-//! [`Store<A>`] is the storage one: load by id, save with a version check. Anything
-//! phrased in your domain's own language — `archived_before(cutoff)` — goes on a port
-//! of yours that extends it, in `domain/port/` (ADR-012).
+//! [`Store<A>`] is the one for aggregates: load by id, save with a version check.
+//! Anything phrased in your domain's own language — `archived_before(cutoff)` — goes on
+//! a port of yours that extends it, in `domain/port/` (ADR-012). [`Blobs`] is the one
+//! for files (ADR-018).
 //!
 //! ### Dispatch
 //!

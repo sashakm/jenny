@@ -1,8 +1,8 @@
 //! Where the links between notes live.
 //!
 //! With the `graph` feature and a database, [`GraphLinks`] keeps them in an Apache AGE
-//! graph in the same Postgres as the notes: each note a vertex, each link an edge,
-//! each question one Cypher query. Without, [`MemoryLinks`] answers the same port from
+//! graph in the same Postgres as the notes: each linked note a vertex, each link an
+//! edge, each question one Cypher query. Without, [`MemoryLinks`] answers the same port from
 //! a set. `main.rs` picks one; the use cases cannot tell which.
 
 use std::collections::BTreeSet;
@@ -66,7 +66,8 @@ impl NoteLinks for MemoryLinks {
 
 /// Links as edges between `Note` vertices in an AGE graph. A vertex holds only the
 /// note's id: the note itself lives in its store, and the graph knows what it needs to
-/// traverse.
+/// traverse. Linking makes the vertices it needs; unlinking leaves them, and deleting
+/// the note removes its vertex and every edge on it.
 ///
 /// AGE has no uniqueness constraints, so two concurrent `MERGE`s of the same link can
 /// both create it. Reading with `DISTINCT` and deleting every match makes a duplicate

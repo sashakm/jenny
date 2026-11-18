@@ -43,7 +43,8 @@ A `Blob` is bytes and an optional media type. Blobs are read and written whole: 
 use case attaches, exports or renders fits in memory, and streaming would put a stream
 type from some runtime crate into the port. For anything larger, the answer is
 `signed_url`: the client uploads or downloads directly from the store, and the bytes
-never pass through the service.
+never pass through the service. What does pass through is bounded by
+`server.body_limit` (256 KiB by default), like every request body.
 
 The failures are domain failures, so the HTTP layer already knows them:
 `put_if_absent` on an existing key is `Conflict` (409), and `put_if_match` against a
