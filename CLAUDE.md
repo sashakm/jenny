@@ -9,12 +9,12 @@ changes are fine, and removing a low-value feature beats adapting it.
 | Crate | Ring | Holds |
 |---|---|---|
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
-| `crates/jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Urn`, `Criteria`, `UseCase`, `Context`, outbound ports, tasks, telemetry |
+| `crates/jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Urn`, `Criteria`, `UseCase`, `Context`, outbound ports, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, `Ctx`, `Listing`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `MessagingAdapter` (declaration only) |
-| `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `SqlCriteria` + `Columns` allowlist, `DatabaseCheck`, legacy mapping helpers |
-| `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), RBAC (`RbacConfig`) |
-| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, hosting |
+| `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
+| `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
+| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, hosting, graceful shutdown |
 | `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
@@ -31,6 +31,9 @@ changing it, and write a new one (see the `write-adr` skill) for a new decision.
   considered and rejected; see the ADRs before reintroducing one.
 - **Filter paths are attacker-controlled.** Nothing turns a `Criteria` into SQL without a
   `Columns` allowlist; identifiers come from it, values are always bound parameters.
+- **Authorization never pattern-matches request paths.** The HTTP gate asks about the
+  matched route template inside its resource and adapter URNs, and policies are Cedar
+  (ADR-011). Anything that cannot be evaluated denies.
 - **One version for every crate** (`[workspace.package] version`). Never bump a single
   crate's version, and never edit `CHANGELOG.md` by hand: release-plz writes both.
 
@@ -62,7 +65,8 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   matching. `template_dependencies_track_the_workspace_majors` enforces it, so bump both
   files together.
 - **`#[derive(Dto)]` emits `::utoipa::…`** under `openapi`, so the using crate needs a
-  direct `utoipa` dependency on jenny's major. It does not read `#[serde(rename…)]` yet.
+  direct `utoipa` dependency on jenny's major. It reads serde's `rename`, `rename_all`,
+  `default` and `skip` for property names and `required`; other serde options are ignored.
 - **`Router::nest` rewrites the URI.** A layer inside a nested adapter sees `/orders`, not
   `/api/orders`; the authorization layer reads `OriginalUri` (there is a regression test).
 - **axum layers only wrap routes declared before them.** `Routes::layer` and
@@ -70,15 +74,15 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
 - **`service_version!()` must stay a macro**: `env!` expands where it is written.
 - **Generated projects are lib + bin**, because `#[path = "../src/main.rs"]` would re-root
   every `crate::` path in the included file.
-- **The network-dependent JWKS test** (`jenny-security`, googleapis.com) fails offline.
 
 ## topmesys
 
 `../topmesys` is the sibling repo providing the in-process broker; jenny uses the
-published crate (`topmesys = "0.2.1"`, moving to `"0.3"` once 0.3.0 is out). To develop
-both at once, add `[patch.crates-io] topmesys = { path = "../topmesys" }` to the root
-`Cargo.toml` temporarily. Never commit it: CI has no sibling checkout. A topmesys release
-must happen before jenny can depend on it.
+published crate. To develop both at once, add `[patch.crates-io] topmesys = { path =
+"../topmesys" }` to the root `Cargo.toml` temporarily. Never commit it: CI has no sibling
+checkout, and generated projects (`just test-cli*`) depend on jenny by path and do not
+see the patch, so they still resolve the published topmesys. A topmesys release must
+happen before jenny can depend on it.
 
 ## Releasing and commits
 
@@ -91,5 +95,6 @@ check publishability. Details: `RELEASING.md`.
 ## Known gaps (not yet built, recorded in ADRs)
 
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), framework use-case
-and HTTP metrics, W3C trace-context propagation, `cargo jenny new --manifest`. The next
-planned work is the persistence and security crate rework.
+and HTTP metrics, W3C trace-context propagation (event headers can now carry it),
+`cargo jenny new --manifest`, reloading Cedar policies without a restart, cursor
+pagination.

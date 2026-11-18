@@ -25,7 +25,7 @@ pub mod query;
 pub mod validation;
 
 #[doc(inline)]
-pub use error::{DomainError, DomainResult};
+pub use error::{DomainError, DomainResult, ErrorSource};
 #[doc(inline)]
 pub use event::DomainEvent;
 #[doc(inline)]
@@ -35,6 +35,6 @@ pub use identity::{
 #[doc(inline)]
 pub use label::{Label, Urn};
 #[doc(inline)]
-pub use query::{Check, Criteria, Filter, Ordering, Page, Sort};
+pub use query::{Check, Criteria, DEFAULT_PAGE_SIZE, Filter, MAX_PAGE_SIZE, Ordering, Page, Sort};
 #[doc(inline)]
 pub use validation::{Validate, ValidationErrors, ValidationIssue};

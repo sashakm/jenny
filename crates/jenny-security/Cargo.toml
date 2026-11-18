@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "JWT/API-key authentication and RBAC for the jenny framework"
+description = "JWT/API-key authentication and Cedar policy authorization for the jenny framework"
 
 [lib]
 path = "src/lib.rs"
@@ -15,9 +15,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
-futures = { workspace = true }
-glob = { workspace = true }
+cedar-policy = { workspace = true }
 jenny-core = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
@@ -25,10 +23,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# A stand-in identity provider for the JWKS tests.
+tokio = { workspace = true, features = ["net", "io-util"] }

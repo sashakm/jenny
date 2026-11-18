@@ -19,7 +19,7 @@
 //! use jenny::persistence::criteria::{ColumnKind, Columns, SqlCriteria};
 //! use sqlx::AssertSqlSafe;
 //!
-//! let columns = Columns::new([
+//! let columns = Columns::new("id", [
 //!     ("name", "name", ColumnKind::Text),
 //!     ("archived", "archived", ColumnKind::Bool),
 //! ]);

@@ -124,6 +124,7 @@ impl HealthCheck for Reachable {
 pub struct HealthRegistry {
     checks: Arc<[Arc<dyn HealthCheck>]>,
     started: Arc<AtomicBool>,
+    stopping: Arc<AtomicBool>,
     started_at: Instant,
 }
 
@@ -132,6 +133,7 @@ impl HealthRegistry {
         Self {
             checks: checks.into(),
             started: Arc::new(AtomicBool::new(false)),
+            stopping: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
         }
     }
@@ -142,6 +144,16 @@ impl HealthRegistry {
 
     pub fn started(&self) -> bool {
         self.started.load(Ordering::Acquire)
+    }
+
+    /// From the moment shutdown begins, readiness fails, so the load balancer stops
+    /// sending traffic while in-flight requests finish.
+    pub(crate) fn mark_stopping(&self) {
+        self.stopping.store(true, Ordering::Release);
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
     }
 
     pub fn uptime(&self) -> Duration {
@@ -173,6 +185,7 @@ impl HealthRegistry {
 pub(crate) enum HealthState {
     Up,
     Down,
+    Stopping,
 }
 
 /// The outcome of one [`HealthCheck`].
@@ -261,9 +274,11 @@ async fn ready(
     State(HealthEndpointState(registry, _)): State<HealthEndpointState>,
 ) -> impl IntoResponse {
     let checks = registry.run_checks().await;
-    let ready = registry.started() && checks.iter().all(CheckReport::is_up);
+    let ready = registry.started() && !registry.stopping() && checks.iter().all(CheckReport::is_up);
     let report = HealthReport {
-        status: if ready {
+        status: if registry.stopping() {
+            HealthState::Stopping
+        } else if ready {
             HealthState::Up
         } else {
             HealthState::Down
@@ -389,6 +404,23 @@ mod tests {
         assert_eq!(body["status"], "up");
         assert_eq!(body["checks"][0]["name"], "always-up");
         assert_eq!(body["checks"][0]["kind"], "test");
+    }
+
+    #[tokio::test]
+    async fn a_stopping_server_is_not_ready_but_still_live() {
+        let registry = HealthRegistry::new(vec![]);
+        registry.mark_started();
+        let router = health_router(registry.clone(), status_info());
+        assert_eq!(
+            call(router.clone(), "/health/ready").await.0,
+            StatusCode::OK
+        );
+
+        registry.mark_stopping();
+        let (status, body) = call(router.clone(), "/health/ready").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "stopping");
+        assert_eq!(call(router, "/health/live").await.0, StatusCode::OK);
     }
 
     #[tokio::test]

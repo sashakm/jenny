@@ -6,6 +6,8 @@ use topmesys::{EventEmitter, EventMessage, EventSubmission};
 
 use jenny_core::port::outbound::{EventEnvelope, EventPublisher, PublishError};
 
+use crate::headers;
+
 /// Publishes domain events onto a [`topmesys`] broker.
 ///
 /// This is the driven adapter that satisfies [`EventPublisher`]. The application layer
@@ -17,6 +19,10 @@ use jenny_core::port::outbound::{EventEnvelope, EventPublisher, PublishError};
 /// `"my-service.note.created"`. Listeners subscribe with topmesys topic patterns
 /// (`"my-service.note.*"`), which is what lets one publish fan out to many independent
 /// effects.
+///
+/// The envelope's metadata travels as message [`headers`]: its id, name,
+/// timestamp and correlation id, plus every header of its own. A listener reads them
+/// with `delivery.message().header(headers::CORRELATION_ID)`.
 ///
 /// ### Wiring it up
 ///
@@ -75,7 +81,17 @@ impl EventBus {
 
     fn message(&self, event: EventEnvelope) -> Result<EventMessage, PublishError> {
         let topic = self.topic_for(event.name());
-        EventMessage::new(topic, event.into_payload()).map_err(PublishError::transport)
+        // The envelope's own headers first, so they cannot overwrite the reserved ones.
+        let mut message = EventMessage::new(topic, Vec::new())
+            .map_err(PublishError::transport)?
+            .with_headers(event.headers().clone())
+            .with_header(headers::EVENT_ID, event.id().to_string())
+            .with_header(headers::EVENT_NAME, event.name())
+            .with_header(headers::OCCURRED_AT, event.timestamp().to_rfc3339());
+        if let Some(correlation_id) = event.correlation_id() {
+            message = message.with_header(headers::CORRELATION_ID, correlation_id.to_string());
+        }
+        Ok(message.with_content(event.into_payload()))
     }
 }
 
@@ -132,6 +148,41 @@ mod tests {
         let msg = rx.recv().await.unwrap();
         assert_eq!(msg.topic().text(), "test.note.created");
         assert_eq!(msg.content().as_ref(), br#"{"id":1}"#);
+    }
+
+    #[tokio::test]
+    async fn the_envelope_metadata_travels_as_headers() {
+        let (bus, mut rx) = bus(4);
+        let cx = jenny_core::port::Context::new();
+        let envelope = EventEnvelope::new("note.created", b"{}".to_vec())
+            .correlated_with(&cx)
+            .with_header("tenant", "acme")
+            // A header of the envelope's own cannot pass itself off as the event id.
+            .with_header(headers::EVENT_ID, "forged");
+        let id = envelope.id();
+        bus.publish(envelope).await.unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg.header(headers::EVENT_ID), Some(id.to_string().as_str()));
+        assert_eq!(msg.header(headers::EVENT_NAME), Some("note.created"));
+        assert_eq!(
+            msg.header(headers::CORRELATION_ID),
+            Some(cx.request_id().to_string().as_str())
+        );
+        assert!(msg.header(headers::OCCURRED_AT).is_some());
+        assert_eq!(msg.header("tenant"), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn an_uncorrelated_event_carries_no_correlation_header() {
+        let (bus, mut rx) = bus(4);
+        bus.publish(EventEnvelope::new("note.created", b"{}".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap().header(headers::CORRELATION_ID),
+            None
+        );
     }
 
     #[tokio::test]

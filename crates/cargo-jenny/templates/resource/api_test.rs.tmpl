@@ -83,6 +83,13 @@ async fn the_service_works_end_to_end() {
     assert_eq!(info["service"], "{{project_kebab}}");
     assert_eq!(info["service_version"], env!("CARGO_PKG_VERSION"));
     assert!(info["framework_version"].as_str().is_some_and(|v| !v.is_empty()));
+{{#if openapi}}
+
+    // The schemas `#[derive(Dto)]` produced, merged and served by the runtime.
+    let (status, document) = api.get("/j/openapi.json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(document["components"]["schemas"]["{{resource_pascal}}Request"].is_object());
+{{/if}}
 
     // --- the API -------------------------------------------------------------------
     let (status, id) = api

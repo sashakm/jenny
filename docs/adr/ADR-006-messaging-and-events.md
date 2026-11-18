@@ -102,6 +102,22 @@ framework:
   subscription rather than baked in, because the right answer depends on whether the
   effect is idempotent.
 
+### Event metadata travels as headers
+
+An `EventEnvelope` carries an `id` (fresh per event, kept across an outbox replay), its
+timestamp, the `correlation_id` of the request that raised it (`correlated_with(&cx)`)
+and free-form headers. They are envelope fields rather than extra arguments to
+`EventPublisher::publish`, so an outbox can store and replay an envelope unchanged; a
+`Context` parameter was rejected for exactly that reason, since a relay has none.
+
+`EventBus` writes them as topmesys message headers (`event-id`, `event-name`,
+`event-occurred-at`, `correlation-id`; constants in `jenny_messaging::headers`), after
+the envelope's own headers so that those cannot overwrite the reserved names.
+`NatsGateway` copies every header onto the JetStream message and sends the event id as
+`Nats-Msg-Id`, so JetStream deduplicates a replayed event within its duplicate window.
+Headers on `EventMessage` arrived in topmesys 0.3.1; before that the bus dropped
+everything but the name and payload, the timestamp included.
+
 ### `topmesys` is isolated
 
 The dependency lives in `jenny-messaging` and reaches the application layer only as the

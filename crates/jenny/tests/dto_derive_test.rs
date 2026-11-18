@@ -33,6 +33,47 @@ struct NoteRequest {
     slug: String,
 }
 
+/// Named the way serde names it on the wire.
+#[derive(Debug, Deserialize, Dto)]
+#[serde(rename_all = "camelCase")]
+struct SignUp {
+    #[dto(not_empty)]
+    first_name: String,
+
+    #[dto(not_empty)]
+    #[serde(rename = "mail")]
+    email_address: String,
+
+    #[serde(default)]
+    #[allow(dead_code)]
+    newsletter: bool,
+
+    #[serde(skip)]
+    #[allow(dead_code)]
+    internal_note: String,
+}
+
+#[test]
+fn validation_names_fields_as_they_arrive() {
+    let request = SignUp {
+        first_name: " ".into(),
+        email_address: String::new(),
+        newsletter: false,
+        internal_note: String::new(),
+    };
+    let found: Vec<String> = request
+        .validate()
+        .unwrap_err()
+        .issues()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        found,
+        ["firstName: must not be empty", "mail: must not be empty"]
+    );
+}
+
 fn valid() -> NoteRequest {
     NoteRequest {
         title: "Shopping".into(),
@@ -198,6 +239,27 @@ mod openapi {
             !required.contains(&"tag"),
             "an Option field must not be required"
         );
+    }
+
+    #[test]
+    fn a_field_serde_defaults_is_not_required() {
+        let schema = schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(!required.contains(&serde_json::json!("body")));
+    }
+
+    #[test]
+    fn the_schema_follows_serde_renames() {
+        let schema = serde_json::to_value(SignUp::schema()).unwrap();
+        let mut properties: Vec<&str> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        properties.sort_unstable();
+        assert_eq!(properties, ["firstName", "mail", "newsletter"]);
+        assert_eq!(schema["required"], serde_json::json!(["firstName", "mail"]));
     }
 
     #[test]

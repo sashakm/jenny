@@ -25,13 +25,22 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["net", "signal"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+url = { workspace = true }
 
 # Optional: the in-process event bus and messaging adapters.
 jenny-messaging = { workspace = true, optional = true }
 topmesys = { workspace = true, optional = true }
 
 # Optional telemetry backends
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry-appender-tracing = { workspace = true, optional = true }
+opentelemetry-prometheus = { workspace = true, optional = true }
 prometheus = { workspace = true, optional = true }
+tracing-loki = { workspace = true, optional = true }
 
 # Optional API description
 utoipa = { workspace = true, optional = true }
@@ -45,9 +54,12 @@ messaging = ["dep:jenny-messaging", "dep:topmesys"]
 openapi = ["dep:utoipa", "jenny-rest/openapi"]
 # Serve a browsable Swagger UI, with its assets compiled in.
 swagger-ui = ["openapi", "dep:utoipa-swagger-ui"]
-telemetry-otlp = ["jenny-core/telemetry-otlp"]
-telemetry-prometheus = ["jenny-core/telemetry-prometheus", "dep:prometheus"]
-telemetry-loki = ["jenny-core/telemetry-loki"]
+# OTLP export for traces, logs (→ Logstash/Loki via OTel Collector), and metrics push.
+telemetry-otlp = ["dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing"]
+# A Prometheus scrape endpoint at <framework_path>/metrics (pull-based metrics).
+telemetry-prometheus = ["dep:opentelemetry-prometheus", "dep:prometheus"]
+# Direct Loki log push (without an OTel Collector).
+telemetry-loki = ["dep:tracing-loki"]
 
 [dev-dependencies]
 base64 = { workspace = true }

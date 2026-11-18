@@ -32,14 +32,22 @@
 //! }
 //! ```
 
-use std::{fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    fmt::Debug,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
-use anyhow::Context as _;
 use async_trait::async_trait;
+use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 use futures::StreamExt;
+use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Something to run when its schedule fires.
 #[async_trait]
@@ -107,18 +115,69 @@ impl ScheduledTask {
 
 /// Runs [`ScheduledTask`]s at their appointed times.
 ///
-/// Each firing is spawned onto its own tokio task, so a slow run never delays the
-/// next one or blocks a different task's schedule. A run that returns an error is
-/// logged and the schedule continues — a failed run is not a reason to stop
-/// scheduling.
+/// Each firing is spawned onto its own tokio task, so a slow run never delays a
+/// different task's schedule. A run that returns an error is logged and the schedule
+/// continues: a failed run is not a reason to stop scheduling.
 ///
-/// The [`JennyServer`] runtime drives this for you; construct one directly only when
-/// running tasks outside a server.
+/// **One run per task at a time.** A firing that comes due while the previous run of
+/// the same task is still going is skipped, with a warning, rather than started beside
+/// it. Two copies of a cleanup job racing each other is rarely what anyone wanted.
+///
+/// **Slots are wall-clock times, delays are monotonic.** The scheduler reads the wall
+/// clock once, when it starts, and advances it with tokio's monotonic clock from then
+/// on. A slot is therefore never fired twice because a timer woke a moment before the
+/// wall clock reached it, slots missed while the process was suspended are skipped
+/// rather than fired in a burst, and changing the system clock while running does not
+/// move the schedule.
+///
+/// The [`JennyServer`] runtime drives this for you, and at shutdown stops starting
+/// runs and waits for those in progress. Construct one directly only when running
+/// tasks outside a server.
 ///
 /// [`JennyServer`]: https://docs.rs/jenny-server
 #[derive(Clone, Debug, Default)]
 pub struct TaskScheduler {
     tasks: Vec<ScheduledTask>,
+}
+
+/// The scheduler's notion of now: the wall clock when it started, plus the runtime's
+/// monotonic time since.
+struct Clock {
+    wall: DateTime<Utc>,
+    at: tokio::time::Instant,
+}
+
+impl Clock {
+    fn start() -> Self {
+        Self {
+            wall: Utc::now(),
+            at: tokio::time::Instant::now(),
+        }
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        let elapsed =
+            chrono::Duration::from_std(self.at.elapsed()).unwrap_or(chrono::TimeDelta::MAX);
+        self.wall + elapsed
+    }
+
+    /// The first slot of `schedule` after `fired` (or after now, whichever is later),
+    /// and how long until it.
+    fn next(
+        &self,
+        schedule: &Schedule,
+        fired: Option<DateTime<Utc>>,
+    ) -> Option<(DateTime<Utc>, Duration)> {
+        let now = self.now();
+        let from = fired.map_or(now, |fired| fired.max(now));
+        let next = schedule
+            .after(&from.with_timezone(&Local))
+            .next()?
+            .with_timezone(&Utc);
+        // A slot can only lie in the past by the time it takes to compute it.
+        let delay = (next - now).to_std().unwrap_or(Duration::ZERO);
+        Some((next, delay))
+    }
 }
 
 impl TaskScheduler {
@@ -137,47 +196,68 @@ impl TaskScheduler {
 
     /// Run until every schedule is exhausted, which for ordinary cron expressions
     /// means forever. Spawn this rather than awaiting it inline.
-    pub async fn run(self) -> anyhow::Result<()> {
-        let mut queue =
-            self.tasks
-                .iter()
-                .enumerate()
-                .try_fold(DelayQueue::new(), |mut acc, (idx, task)| {
-                    if let Some(delay) = Self::duration_until_next(&task.schedule)? {
-                        acc.insert(idx, delay);
-                    }
-                    Ok::<_, anyhow::Error>(acc)
-                })?;
+    pub async fn run(self) {
+        self.run_until(std::future::pending()).await;
+    }
 
-        while let Some(expired) = queue.next().await {
-            if let Some(scheduled) = self.tasks.get(*expired.get_ref()) {
-                let name = scheduled.name.clone();
-                info!(task = %name, "executing scheduled task");
-                let task = scheduled.task.clone();
-                tokio::task::spawn(async move {
-                    if let Err(e) = task.execute().await {
-                        error!(task = %name, "scheduled task failed: {e}");
-                    }
-                });
-
-                if let Some(delay) = Self::duration_until_next(&scheduled.schedule)? {
-                    queue.insert(*expired.get_ref(), delay);
-                }
+    /// Run until `shutdown` resolves, then start no more runs and wait for the ones in
+    /// progress to finish.
+    pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
+        let clock = Clock::start();
+        let busy: Vec<Arc<AtomicBool>> = self.tasks.iter().map(|_| Arc::default()).collect();
+        let mut queue = DelayQueue::new();
+        for (index, task) in self.tasks.iter().enumerate() {
+            if let Some((slot, delay)) = clock.next(&task.schedule, None) {
+                queue.insert((index, slot), delay);
             }
         }
 
-        Ok(())
-    }
+        let mut runs = JoinSet::new();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = &mut shutdown => break,
+                Some(expired) = queue.next() => {
+                    let (index, slot) = expired.into_inner();
+                    let scheduled = &self.tasks[index];
+                    let name = scheduled.name.clone();
 
-    fn duration_until_next(schedule: &Schedule) -> anyhow::Result<Option<Duration>> {
-        let Some(next) = schedule.upcoming(chrono::Local).next() else {
-            return Ok(None);
-        };
-        let delay = next
-            .signed_duration_since(chrono::Local::now())
-            .to_std()
-            .context("next scheduled time is in the past")?;
-        Ok(Some(delay))
+                    if busy[index].swap(true, Ordering::AcqRel) {
+                        warn!(task = %name, "skipping a scheduled run: the previous one is still going");
+                    } else {
+                        info!(task = %name, "executing scheduled task");
+                        let task = scheduled.task.clone();
+                        let busy = busy[index].clone();
+                        runs.spawn(async move {
+                            if let Err(e) = task.execute().await {
+                                error!(task = %name, "scheduled task failed: {e}");
+                            }
+                            busy.store(false, Ordering::Release);
+                        });
+                    }
+
+                    if let Some((next, delay)) = clock.next(&scheduled.schedule, Some(slot)) {
+                        queue.insert((index, next), delay);
+                    }
+                }
+                Some(finished) = runs.join_next(), if !runs.is_empty() => {
+                    if let Err(e) = finished
+                        && e.is_panic()
+                    {
+                        error!("a scheduled task panicked: {e}");
+                    }
+                }
+                else => break,
+            }
+        }
+
+        if !runs.is_empty() {
+            info!(
+                running = runs.len(),
+                "waiting for scheduled runs in progress"
+            );
+        }
+        while runs.join_next().await.is_some() {}
     }
 }
 
@@ -225,23 +305,44 @@ mod tests {
         assert!(!scheduler.is_empty());
     }
 
+    /// Counts its runs, each taking `takes`, and the most that were ever in flight.
+    #[derive(Default)]
+    struct Slow {
+        runs: AtomicU32,
+        in_flight: AtomicU32,
+        most_in_flight: AtomicU32,
+        takes: Duration,
+    }
+
+    #[async_trait]
+    impl Task for Arc<Slow> {
+        async fn execute(&self) -> anyhow::Result<()> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_in_flight.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(self.takes).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn tasks_fire_on_their_schedule() {
+    async fn tasks_fire_once_per_slot() {
         let counter = Arc::new(AtomicU32::new(0));
         let scheduler = TaskScheduler::default().with_task(
             ScheduledTask::new("tick", Counting(counter.clone()), "*/1 * * * * * *").unwrap(),
         );
         let running = tokio::spawn(scheduler.run());
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_millis(5_500)).await;
         // Yield so the spawned per-firing tasks get to run under the paused clock.
         tokio::task::yield_now().await;
         running.abort();
 
+        let fired = counter.load(Ordering::SeqCst);
         assert!(
-            counter.load(Ordering::SeqCst) >= 4,
-            "expected at least 4 firings in 5 simulated seconds, got {}",
-            counter.load(Ordering::SeqCst)
+            (5..=6).contains(&fired),
+            "expected one firing per second in 5.5 simulated seconds, got {fired}"
         );
     }
 
@@ -260,5 +361,75 @@ mod tests {
         running.abort();
 
         assert!(counter.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_overruns_its_interval_is_not_doubled() {
+        let slow = Arc::new(Slow {
+            takes: Duration::from_millis(2_500),
+            ..Default::default()
+        });
+        let scheduler = TaskScheduler::default()
+            .with_task(ScheduledTask::new("slow", slow.clone(), "*/1 * * * * * *").unwrap());
+        let running = tokio::spawn(scheduler.run());
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        running.abort();
+
+        assert_eq!(slow.most_in_flight.load(Ordering::SeqCst), 1);
+        let runs = slow.runs.load(Ordering::SeqCst);
+        assert!(
+            (3..=4).contains(&runs),
+            "one run per 2.5s + skipped slots, got {runs}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_waits_for_runs_in_progress_and_starts_no_more() {
+        let slow = Arc::new(Slow {
+            takes: Duration::from_secs(3),
+            ..Default::default()
+        });
+        let scheduler = TaskScheduler::default()
+            .with_task(ScheduledTask::new("slow", slow.clone(), "*/1 * * * * * *").unwrap());
+
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn(scheduler.run_until(async {
+            let _ = stopped.await;
+        }));
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert_eq!(slow.in_flight.load(Ordering::SeqCst), 1);
+
+        stop.send(()).unwrap();
+        running.await.unwrap();
+        assert_eq!(
+            slow.in_flight.load(Ordering::SeqCst),
+            0,
+            "the run was allowed to finish"
+        );
+        assert_eq!(slow.runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_slot_is_never_handed_out_twice() {
+        let clock = Clock::start();
+        let schedule: Schedule = "*/1 * * * * * *".parse().unwrap();
+        let (first, _) = clock.next(&schedule, None).unwrap();
+        // Even if asked again before the wall clock reaches `first`...
+        let (second, _) = clock.next(&schedule, Some(first)).unwrap();
+        assert_eq!(second - first, chrono::Duration::seconds(1));
+    }
+
+    #[test]
+    fn a_slot_in_the_past_is_due_now_rather_than_an_error() {
+        let clock = Clock::start();
+        let schedule: Schedule = "*/1 * * * * * *".parse().unwrap();
+        let long_ago = clock.now() - chrono::Duration::hours(1);
+        let (next, delay) = clock.next(&schedule, Some(long_ago)).unwrap();
+        assert!(
+            next > clock.now() - chrono::Duration::seconds(1),
+            "missed slots are skipped"
+        );
+        assert!(delay <= Duration::from_secs(1));
     }
 }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use axum::extract::Request;
+use axum::extract::{MatchedPath, Request};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -23,32 +23,46 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::debug;
 
 use jenny_core::domain::{AuthenticationError, Credentials, Principal};
-use jenny_core::port::outbound::{Authenticator, Authorizer};
+use jenny_core::port::outbound::{AccessRequest, Authenticator, Authorizer, Resource};
 
+use crate::adapter::RouteTable;
 use crate::problem::Problem;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// Read `Authorization: Bearer …` or `Authorization: ApiKey …` off a request.
 ///
-/// Anything else — a missing header, an unknown scheme, a malformed value — is an
-/// authentication *failure* rather than a silent pass, so a typo in a scheme name can
-/// never be mistaken for an anonymous request.
+/// `Ok(None)` when there is no `Authorization` header at all. A header that is present
+/// but unusable (an unknown scheme, nothing after the scheme, more than one header) is
+/// an error, so a typo in a scheme name is never mistaken for an anonymous request.
+/// Scheme names are matched case-insensitively, as RFC 9110 requires.
 pub fn credentials_from_headers(
     headers: &header::HeaderMap,
-) -> Result<Credentials, AuthenticationError> {
-    let raw = headers.get(header::AUTHORIZATION);
-    raw.and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .and_then(|(scheme, secret)| match scheme {
-            "Bearer" => Some(Credentials::JsonWebToken(secret.to_string())),
-            "ApiKey" => Some(Credentials::ApiKey(secret.to_string())),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            debug!("could not parse Authorization header: {raw:?}");
-            AuthenticationError("missing or malformed credentials".to_string())
-        })
+) -> Result<Option<Credentials>, AuthenticationError> {
+    let malformed = |reason: &str| AuthenticationError(format!("malformed credentials: {reason}"));
+
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(malformed("more than one Authorization header"));
+    }
+    let (scheme, secret) = value
+        .to_str()
+        .ok()
+        .and_then(|value| value.trim().split_once(' '))
+        .map(|(scheme, secret)| (scheme, secret.trim()))
+        .filter(|(_, secret)| !secret.is_empty())
+        .ok_or_else(|| malformed("expected `<scheme> <credentials>`"))?;
+
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Ok(Some(Credentials::JsonWebToken(secret.to_string())))
+    } else if scheme.eq_ignore_ascii_case("apikey") {
+        Ok(Some(Credentials::ApiKey(secret.to_string())))
+    } else {
+        Err(malformed("the scheme is neither Bearer nor ApiKey"))
+    }
 }
 
 /// Verifies credentials and puts the resulting [`Principal`] into the request
@@ -79,12 +93,13 @@ impl Authentication {
         }
     }
 
-    /// Attach a principal when credentials are present and valid; otherwise carry on
-    /// anonymously.
+    /// Attach a principal when credentials are present and valid; carry on anonymously
+    /// when there is no `Authorization` header at all.
     ///
-    /// Note the asymmetry: *absent* credentials are fine, but credentials that are
-    /// present and **invalid** still fail with 401. Silently downgrading a bad token
-    /// to anonymous access is how authentication bypasses happen.
+    /// Note the asymmetry: *absent* credentials are fine, but a header that is present
+    /// and **invalid** (a bad token, an unknown scheme, a malformed value) still fails
+    /// with 401. Silently downgrading a bad credential to anonymous access is how
+    /// authentication bypasses happen.
     pub fn optional(authenticator: Arc<dyn Authenticator>) -> Self {
         Self {
             authenticator,
@@ -134,8 +149,11 @@ where
 
         Box::pin(async move {
             let credentials = match credentials_from_headers(req.headers()) {
-                Ok(credentials) => credentials,
-                Err(_) if !required => return inner.call(req).await,
+                Ok(Some(credentials)) => credentials,
+                Ok(None) if !required => return inner.call(req).await,
+                Ok(None) => {
+                    return Ok(Problem::unauthenticated("credentials required").into_response());
+                }
                 Err(e) => return Ok(Problem::unauthenticated(e.to_string()).into_response()),
             };
 
@@ -151,15 +169,37 @@ where
     }
 }
 
-/// Gates requests on an [`Authorizer`], using the HTTP method as the action and the
-/// request path as the resource.
+/// The entity kind of the matched route in the [`AccessRequest`] [`Authorization`] sends.
+pub const ROUTE_KIND: &str = "Route";
+/// The entity kind of the [`Routes`](crate::Routes) group a route belongs to.
+pub const RESOURCE_KIND: &str = "Resource";
+/// The entity kind of the [`RestAdapter`](crate::RestAdapter) a resource is mounted on.
+pub const ADAPTER_KIND: &str = "Adapter";
+
+/// Gates every request on an [`Authorizer`], and hands the authorizer on to use cases.
 ///
-/// Apply it alongside [`Authentication`] — it rejects with 403 when no principal has
-/// been established, because "authorize an unknown caller" has no useful answer.
+/// The question it asks is the coarse one, before dispatch. For
+/// `GET /api/orders/2341` on a [`Routes`](crate::Routes) group named `orders`, mounted
+/// on the adapter `shop`:
 ///
-/// This is the coarse, endpoint-level gate. Rules that depend on the data being
-/// addressed belong in a domain service, so they hold for calls arriving over
-/// messaging and gRPC too.
+/// | | |
+/// |---|---|
+/// | action | `GET` |
+/// | resource | [`ROUTE_KIND`] `/api/orders/{id}`, the route *template*, within [`RESOURCE_KIND`] `urn:shop:orders`, within [`ADAPTER_KIND`] `urn:shop` |
+/// | context | `path`: `/api/orders/2341` |
+///
+/// Rules are written against templates and the resource tree, never against the
+/// concrete path, so no pattern can grant `/api/orders/2341/refunds` by accident. With
+/// Cedar that reads `resource in Resource::"urn:shop:orders"`.
+///
+/// Apply it after [`Authentication`] (so it runs inside it). A request without a
+/// principal is answered 401, because "may an unknown caller do this" has no useful
+/// answer. On success the authorizer is attached to the request, where [`Ctx`]
+/// puts it into the [`Context`](jenny_core::port::Context), so a use case can ask the
+/// fine-grained question with
+/// [`Context::authorize`](jenny_core::port::Context::authorize).
+///
+/// [`Ctx`]: crate::Ctx
 #[derive(Clone)]
 pub struct Authorization {
     authorizer: Arc<dyn Authorizer>,
@@ -188,6 +228,10 @@ pub struct AuthorizationService<S> {
     authorizer: Arc<dyn Authorizer>,
 }
 
+/// The authorizer an [`Authorization`] layer attached, for [`Ctx`](crate::Ctx).
+#[derive(Clone)]
+pub(crate) struct AttachedAuthorizer(pub(crate) Arc<dyn Authorizer>);
+
 impl<S> Service<Request> for AuthorizationService<S>
 where
     S: Service<Request, Response = Response> + Clone + Send + 'static,
@@ -201,24 +245,47 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
+    fn call(&mut self, mut req: Request) -> Self::Future {
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         let authorizer = self.authorizer.clone();
 
         Box::pin(async move {
             let Some(principal) = req.extensions().get::<Principal>().cloned() else {
-                return Ok(Problem::forbidden("no authenticated principal").into_response());
+                return Ok(Problem::unauthenticated("no authenticated principal").into_response());
             };
-            let action = req.method().as_str().to_owned();
-            let resource = original_path(&req);
+            // Without a matched route there is nothing to write a rule against. Only
+            // reachable when the layer wraps a router's fallback.
+            let Some(request) = access_request(&req) else {
+                return Ok(Problem::forbidden("the request matched no route").into_response());
+            };
 
-            match authorizer.authorize(&principal, &action, &resource).await {
-                Ok(()) => inner.call(req).await,
+            match authorizer.authorize(&principal, &request).await {
+                Ok(()) => {
+                    req.extensions_mut().insert(AttachedAuthorizer(authorizer));
+                    inner.call(req).await
+                }
                 Err(e) => Ok(Problem::forbidden(e.to_string()).into_response()),
             }
         })
     }
+}
+
+/// What [`Authorization`] asks about `req`.
+fn access_request(req: &Request) -> Option<AccessRequest> {
+    let template = req.extensions().get::<MatchedPath>()?.as_str();
+    let mut route = Resource::new(ROUTE_KIND, template);
+    if let Some(urn) = req
+        .extensions()
+        .get::<RouteTable>()
+        .and_then(|table| table.resource_of(template))
+    {
+        route = route.within(
+            Resource::new(RESOURCE_KIND, urn)
+                .within(Resource::new(ADAPTER_KIND, format!("urn:{}", urn.name()))),
+        );
+    }
+    Some(AccessRequest::new(req.method().as_str(), route).with_context("path", original_path(req)))
 }
 
 /// Guards a route with HTTP Basic authentication against one fixed credential.
@@ -443,10 +510,9 @@ mod tests {
         async fn authorize(
             &self,
             _: &Principal,
-            action: &str,
-            _: &str,
+            request: &AccessRequest,
         ) -> Result<(), AuthorizationError> {
-            if action == "GET" {
+            if request.action() == "GET" {
                 Ok(())
             } else {
                 Err(AuthorizationError("read-only".to_string()))
@@ -470,32 +536,45 @@ mod tests {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
-    #[test]
-    fn credentials_are_parsed_per_scheme() {
+    fn parse(value: &str) -> Result<Option<Credentials>, AuthenticationError> {
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer token".parse().unwrap());
-        assert_eq!(
-            credentials_from_headers(&headers).unwrap(),
-            Credentials::JsonWebToken("token".into())
-        );
-
-        headers.insert(header::AUTHORIZATION, "ApiKey secret".parse().unwrap());
-        assert_eq!(
-            credentials_from_headers(&headers).unwrap(),
-            Credentials::ApiKey("secret".into())
-        );
+        headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+        credentials_from_headers(&headers)
     }
 
     #[test]
-    fn an_unknown_or_missing_scheme_is_a_failure_not_a_pass() {
-        assert!(credentials_from_headers(&header::HeaderMap::new()).is_err());
+    fn credentials_are_parsed_per_scheme_whatever_its_case() {
+        for value in ["Bearer token", "bearer token", "BEARER  token "] {
+            assert_eq!(
+                parse(value).unwrap(),
+                Some(Credentials::JsonWebToken("token".into())),
+                "{value}"
+            );
+        }
+        for value in ["ApiKey secret", "apikey secret"] {
+            assert_eq!(
+                parse(value).unwrap(),
+                Some(Credentials::ApiKey("secret".into())),
+                "{value}"
+            );
+        }
+    }
 
-        let mut headers = header::HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Basic abc".parse().unwrap());
-        assert!(credentials_from_headers(&headers).is_err());
+    #[test]
+    fn no_header_is_anonymous_but_a_bad_one_is_a_failure() {
+        assert_eq!(
+            credentials_from_headers(&header::HeaderMap::new()).unwrap(),
+            None
+        );
 
-        headers.insert(header::AUTHORIZATION, "Bearer".parse().unwrap());
-        assert!(credentials_from_headers(&headers).is_err());
+        for value in ["Basic abc", "Bearer", "Bearer   ", "Bearertoken", ""] {
+            assert!(parse(value).is_err(), "`{value}` must not parse");
+        }
+
+        let mut twice = header::HeaderMap::new();
+        twice.append(header::AUTHORIZATION, "Bearer a".parse().unwrap());
+        twice.append(header::AUTHORIZATION, "Bearer b".parse().unwrap());
+        assert!(credentials_from_headers(&twice).is_err());
     }
 
     #[tokio::test]
@@ -545,20 +624,38 @@ mod tests {
     #[tokio::test]
     async fn optional_authentication_still_rejects_bad_credentials() {
         let app = whoami_app().layer(Authentication::optional(Arc::new(StaticAuthenticator)));
+        for value in ["Bearer bad", "Basic abc", "Bearer", "Token good"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    http::Request::get("/whoami")
+                        .header(header::AUTHORIZATION, value)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "`{value}` must not be downgraded to anonymous access"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_authentication_accepts_a_lowercase_scheme() {
+        let app = whoami_app().layer(Authentication::optional(Arc::new(StaticAuthenticator)));
         let response = app
             .oneshot(
                 http::Request::get("/whoami")
-                    .header(header::AUTHORIZATION, "Bearer bad")
+                    .header(header::AUTHORIZATION, "bearer good")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::UNAUTHORIZED,
-            "an invalid token must not be downgraded to anonymous access"
-        );
+        assert_eq!(body_string(response).await, "u-1");
     }
 
     #[tokio::test]
@@ -592,54 +689,111 @@ mod tests {
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
-    #[tokio::test]
-    async fn authorization_sees_the_path_the_client_asked_for_not_the_nested_one() {
-        use crate::{RestAdapter, Routes};
+    /// Grants only what it was told to expect, and reports what it saw otherwise.
+    #[derive(Debug)]
+    struct Expecting(AccessRequest);
 
-        /// Only grants the full, un-stripped path.
-        #[derive(Debug)]
-        struct OnlyFullPath;
-
-        #[async_trait]
-        impl Authorizer for OnlyFullPath {
-            async fn authorize(
-                &self,
-                _: &Principal,
-                _: &str,
-                resource: &str,
-            ) -> Result<(), AuthorizationError> {
-                if resource == "/api/notes" {
-                    Ok(())
-                } else {
-                    Err(AuthorizationError(format!("saw `{resource}`")))
-                }
+    #[async_trait]
+    impl Authorizer for Expecting {
+        async fn authorize(
+            &self,
+            _: &Principal,
+            request: &AccessRequest,
+        ) -> Result<(), AuthorizationError> {
+            if *request == self.0 {
+                Ok(())
+            } else {
+                Err(AuthorizationError(format!("saw {request:?}")))
             }
         }
+    }
 
-        // `Router::nest` rewrites the URI, so a naive layer would see `/notes` here.
+    #[tokio::test]
+    async fn authorization_asks_about_the_route_template_inside_its_resource_and_adapter() {
+        use crate::{RestAdapter, Routes};
+
+        let expected = AccessRequest::new(
+            "GET",
+            Resource::new(ROUTE_KIND, "/api/notes/{id}").within(
+                Resource::new(RESOURCE_KIND, "urn:my-notes:notes")
+                    .within(Resource::new(ADAPTER_KIND, "urn:my-notes")),
+            ),
+        )
+        // `Router::nest` strips the mount prefix from the URI; the context must still
+        // carry the path the client called.
+        .with_context("path", "/api/notes/7");
+
         let app = RestAdapter::new("my-notes")
             .unwrap()
-            .mount(Routes::new("notes").get("/notes", || async { "ok" }))
+            .mount(Routes::new("notes").get("/notes/{id}", || async { "ok" }))
             .unwrap()
-            .layer(Authorization::new(Arc::new(OnlyFullPath)))
+            .layer(Authorization::new(Arc::new(Expecting(expected))))
             .layer(Authentication::required(Arc::new(StaticAuthenticator)))
             .into_router();
 
         let response = app
             .oneshot(
-                http::Request::get("/api/notes")
+                http::Request::get("/api/notes/7")
                     .header(header::AUTHORIZATION, "Bearer good")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        let status = response.status();
+        assert_eq!(status, StatusCode::OK, "{}", body_string(response).await);
+    }
 
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "the authorizer must be given `/api/notes`, not the nest-stripped `/notes`"
-        );
+    #[tokio::test]
+    async fn the_authorizer_reaches_the_use_case_through_the_context() {
+        use jenny_core::port::outbound::Resource;
+
+        let app = Router::new()
+            .route(
+                "/notes/{id}",
+                get(|cx: Ctx| async move {
+                    // The note's owner decides, which no route-level rule can know.
+                    let note = Resource::new("Note", 7).with_attribute("owner", "u-1");
+                    match cx.authorize(&AccessRequest::new("archive", note)).await {
+                        Ok(()) => "archived".to_string(),
+                        Err(e) => e.to_string(),
+                    }
+                }),
+            )
+            .layer(Authorization::new(Arc::new(OwnerOrGet)))
+            .layer(Authentication::required(Arc::new(StaticAuthenticator)));
+
+        let response = app
+            .oneshot(
+                http::Request::get("/notes/7")
+                    .header(header::AUTHORIZATION, "Bearer good")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_string(response).await, "archived");
+    }
+
+    /// Allows any `GET`, and `archive` on resources the principal owns.
+    #[derive(Debug)]
+    struct OwnerOrGet;
+
+    #[async_trait]
+    impl Authorizer for OwnerOrGet {
+        async fn authorize(
+            &self,
+            principal: &Principal,
+            request: &AccessRequest,
+        ) -> Result<(), AuthorizationError> {
+            let owns = request.resource().attributes().get("owner")
+                == Some(&serde_json::Value::from(principal.id()));
+            if request.action() == "GET" || (request.action() == "archive" && owns) {
+                Ok(())
+            } else {
+                Err(AuthorizationError("no".into()))
+            }
+        }
     }
 
     fn basic_header(username: &str, password: &str) -> String {
@@ -751,7 +905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorization_without_a_principal_is_forbidden() {
+    async fn authorization_without_a_principal_asks_for_credentials() {
         let app = Router::new()
             .route("/notes", get(|| async { "ok" }))
             .layer(Authorization::new(Arc::new(ReadOnlyAuthorizer)));
@@ -759,6 +913,6 @@ mod tests {
             .oneshot(http::Request::get("/notes").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

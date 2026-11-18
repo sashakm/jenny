@@ -32,7 +32,12 @@ async fn main() -> Result<(), anyhow::Error> {
             "*/3 * * * * *",
         )?);
 
-    scheduler.run().await?;
+    // Stop starting runs on Ctrl-C, and let the ones in progress finish.
+    scheduler
+        .run_until(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
 
     Ok(())
 }

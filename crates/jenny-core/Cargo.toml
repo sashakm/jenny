@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Domain vocabulary, ports, tasks and telemetry for the jenny framework"
+description = "Domain vocabulary, ports and tasks for the jenny framework"
 
 [lib]
 path = "src/lib.rs"
@@ -23,28 +23,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-opentelemetry = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-url = { workspace = true }
 uuid = { workspace = true }
 
-# Optional telemetry backends
-opentelemetry-otlp = { workspace = true, optional = true }
-opentelemetry-appender-tracing = { workspace = true, optional = true }
-opentelemetry-prometheus = { workspace = true, optional = true }
-prometheus = { workspace = true, optional = true }
-tracing-loki = { workspace = true, optional = true }
-
-[features]
-default = []
-# Enable OTLP export for traces, logs (→ Logstash/Loki via OTel Collector), and metrics push.
-telemetry-otlp = ["dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing"]
-# Enable a Prometheus /metrics scrape endpoint (pull-based metrics).
-telemetry-prometheus = ["dep:opentelemetry-prometheus", "dep:prometheus"]
-# Enable direct Loki log push (without an OTel Collector).
-telemetry-loki = ["dep:tracing-loki"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

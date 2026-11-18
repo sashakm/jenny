@@ -1,10 +1,6 @@
 //! End-to-end authorization: a real router, the real [`Authorization`] layer, and the
-//! real RBAC authorizer from `jenny-security`, driven by `docs/data/sample_rbac_config.json`.
-//!
-//! Nothing here reimplements the rules — the previous version of this test carried its
-//! own copy of the matching logic, which meant it could pass while the shipped
-//! authorizer was broken. Every assertion below goes through the code a deployed
-//! service would run.
+//! Cedar authorizer from `jenny-security`, loaded from `docs/data/cedar/` with the
+//! reference HTTP schema, so the schema and the example policies are checked too.
 
 use std::sync::Arc;
 
@@ -13,78 +9,77 @@ use axum::body::Body;
 use axum::routing::get;
 use axum::{Router, response::Response};
 use jenny_core::domain::{AuthenticationError, Credentials, Principal};
-use jenny_core::port::outbound::Authenticator;
+use jenny_core::port::outbound::{Authenticator, Authorizer};
 use jenny_rest::security::{Authentication, Authorization};
 use jenny_rest::{RestAdapter, Routes, StatusCode};
-use jenny_security::RbacConfig;
+use jenny_security::CedarAuthorizer;
 use tower::ServiceExt;
 
-/// Hands back a principal whose single role is whatever was presented as the API key.
-/// Keeps the test about *authorization* — the authentication half is deliberately
-/// trivial so a failure can only mean the rules are wrong.
+/// Hands back a principal whose roles are the comma-separated API key. Keeps the test
+/// about *authorization*: the authentication half is deliberately trivial so a failure
+/// can only mean the policies are wrong.
 #[derive(Debug)]
-struct RoleAsCredential;
+struct RolesAsCredential;
 
 #[async_trait]
-impl Authenticator for RoleAsCredential {
+impl Authenticator for RolesAsCredential {
     async fn authenticate(
         &self,
         credentials: &Credentials,
     ) -> Result<Principal, AuthenticationError> {
-        let role = credentials.secret();
-        if role.is_empty() {
-            return Err(AuthenticationError("no role presented".into()));
-        }
-        Ok(Principal::builder(format!("user-{role}"))
-            .with_attribute("preferred_username", role)
-            .with_attribute("roles", vec![role])
+        let roles: Vec<&str> = credentials.secret().split(',').collect();
+        Ok(Principal::builder(format!("user-{}", roles.join("-")))
+            .with_attribute("roles", roles)
+            // Not declared in the schema, so it must be dropped rather than fail the request.
+            .with_attribute("department", "sales")
             .build())
     }
 }
 
+fn authorizer() -> CedarAuthorizer {
+    CedarAuthorizer::from_path("../../docs/data/cedar/shop.cedar")
+        .unwrap()
+        .with_schema_file("../../docs/data/cedar/http.cedarschema")
+        .unwrap()
+        .with_entities_file("../../docs/data/cedar/shop.entities.json")
+        .unwrap()
+}
+
 fn shop() -> Router {
-    let rbac: Arc<dyn jenny_core::port::outbound::Authorizer> = Arc::new(
-        RbacConfig::<String>::load_from_file("../../docs/data/sample_rbac_config.json").unwrap(),
-    );
-
+    let authorizer: Arc<dyn Authorizer> = Arc::new(authorizer());
     let ok = || async { StatusCode::OK };
-
-    let routes: Routes = Routes::new("shop")
-        .route("/orders", get(ok).post(ok))
-        .route(
-            "/orders/{id}",
-            get(ok).post(ok).put(ok).patch(ok).delete(ok),
-        )
-        .route(
-            "/orders/{id}/status",
-            get(ok).post(ok).put(ok).patch(ok).delete(ok),
-        )
-        .route("/payments", get(ok).post(ok))
-        .route(
-            "/payments/{id}",
-            get(ok).post(ok).put(ok).patch(ok).delete(ok),
-        )
-        .route("/products", get(ok).post(ok))
-        .route(
-            "/products/{id}",
-            get(ok).post(ok).put(ok).patch(ok).delete(ok),
-        )
-        .route("/customers", get(ok).post(ok))
-        .route(
-            "/customers/{id}",
-            get(ok).post(ok).put(ok).patch(ok).delete(ok),
-        )
-        .route(
-            "/customers/{id}/account",
-            get(ok).post(ok).put(ok).patch(ok).delete(ok),
-        );
+    let item = || get(ok).post(ok).put(ok).patch(ok).delete(ok);
 
     RestAdapter::new("shop")
         .unwrap()
-        .mount(routes)
+        .mount(
+            Routes::new("orders")
+                .route("/orders", get(ok).post(ok))
+                .route("/orders/{id}", item())
+                .route("/orders/{id}/status", item()),
+        )
         .unwrap()
-        .layer(Authorization::new(rbac))
-        .layer(Authentication::required(Arc::new(RoleAsCredential)))
+        .mount(
+            Routes::new("payments")
+                .route("/payments", get(ok).post(ok))
+                .route("/payments/{id}", item()),
+        )
+        .unwrap()
+        .mount(
+            Routes::new("products")
+                .route("/products", get(ok).post(ok))
+                .route("/products/{id}", item()),
+        )
+        .unwrap()
+        .mount(
+            Routes::new("customers")
+                .route("/customers", get(ok).post(ok))
+                .route("/customers/{id}", item())
+                .route("/customers/{id}/account", item()),
+        )
+        .unwrap()
+        .layer(Authorization::new(authorizer))
+        .layer(Authentication::required(Arc::new(RolesAsCredential)))
         .into_router()
 }
 
@@ -101,10 +96,10 @@ const PRODUCT_ITEM: &str = "/api/products/2341";
 
 const ALL_METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
-async fn request(role: Option<&str>, method: &str, uri: &str) -> Response {
+async fn request(roles: Option<&str>, method: &str, uri: &str) -> Response {
     let mut builder = http::Request::builder().method(method).uri(uri);
-    if let Some(role) = role {
-        builder = builder.header(http::header::AUTHORIZATION, format!("ApiKey {role}"));
+    if let Some(roles) = roles {
+        builder = builder.header(http::header::AUTHORIZATION, format!("ApiKey {roles}"));
     }
     shop()
         .oneshot(builder.body(Body::empty()).unwrap())
@@ -112,26 +107,32 @@ async fn request(role: Option<&str>, method: &str, uri: &str) -> Response {
         .unwrap()
 }
 
-async fn assert_allowed(role: &str, cases: &[(&str, &str)]) {
+async fn assert_allowed(roles: &str, cases: &[(&str, &str)]) {
     for (method, uri) in cases {
-        let status = request(Some(role), method, uri).await.status();
+        let status = request(Some(roles), method, uri).await.status();
         assert_eq!(
             status,
             StatusCode::OK,
-            "{role} should be allowed to {method} {uri}"
+            "{roles} should be allowed to {method} {uri}"
         );
     }
 }
 
-async fn assert_denied(role: &str, cases: &[(&str, &str)]) {
+async fn assert_denied(roles: &str, cases: &[(&str, &str)]) {
     for (method, uri) in cases {
-        let status = request(Some(role), method, uri).await.status();
+        let status = request(Some(roles), method, uri).await.status();
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
-            "{role} should be denied {method} {uri}"
+            "{roles} should be denied {method} {uri}"
         );
     }
+}
+
+#[test]
+fn the_example_policies_validate_against_the_reference_schema() {
+    // Every other test would fail on this too; this one names the cause.
+    assert!(authorizer().policies().policies().count() > 10);
 }
 
 #[tokio::test]
@@ -163,7 +164,7 @@ async fn a_denial_is_a_problem_document() {
 }
 
 #[tokio::test]
-async fn admin_reaches_everything_under_the_api() {
+async fn admin_reaches_everything_on_the_adapter() {
     let mut cases = Vec::new();
     for uri in [
         CUSTOMER_ACCOUNT,
@@ -199,6 +200,7 @@ async fn dispatch_may_read_orders_and_drive_their_status() {
         &[
             ("GET", ORDER_COLLECTION),
             ("GET", ORDER_ITEM),
+            ("HEAD", ORDER_ITEM),
             ("GET", ORDER_STATUS),
             ("POST", ORDER_STATUS),
             ("PUT", ORDER_STATUS),
@@ -248,11 +250,11 @@ async fn purchasing_owns_products_and_nothing_else() {
 }
 
 #[tokio::test]
-async fn customer_support_inherits_dispatch_and_adds_customer_access() {
+async fn customer_support_is_a_member_of_dispatch_and_adds_customer_access() {
     assert_allowed(
         "CustomerSupport",
         &[
-            // inherited from Dispatch
+            // through its membership in Dispatch
             ("GET", ORDER_COLLECTION),
             ("GET", ORDER_ITEM),
             ("GET", ORDER_STATUS),
@@ -313,6 +315,12 @@ async fn a_customer_may_only_place_orders_and_manage_their_account() {
         ],
     )
     .await;
+}
+
+#[tokio::test]
+async fn a_forbid_outweighs_every_role() {
+    assert_allowed("Admin", &[("GET", ORDER_ITEM)]).await;
+    assert_denied("Admin,Suspended", &[("GET", ORDER_ITEM)]).await;
 }
 
 #[tokio::test]

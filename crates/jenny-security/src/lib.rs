@@ -7,7 +7,7 @@
 //! | Port | Implementation here |
 //! |---|---|
 //! | [`Authenticator`] | [`AuthenticationConfig`] — OIDC/JWT verification against a JWKS, and hashed API-key lookup |
-//! | [`Authorizer`] | [`RbacConfig`] — role-to-resource rules loaded from JSON |
+//! | [`Authorizer`] | [`CedarAuthorizer`] — [Cedar](https://www.cedarpolicy.com) policies, optionally validated against a schema |
 //!
 //! Nothing in here knows about HTTP. Lifting credentials off a request is the inbound
 //! adapter's job — `jenny-rest` does it for HTTP — and this crate takes the
@@ -29,6 +29,6 @@ pub use authorization::*;
 pub use jenny_core::domain::{
     AuthenticationError, AuthorizationError, Credentials, Principal, PrincipalBuilder,
 };
-pub use jenny_core::port::outbound::{Authenticator, Authorizer};
+pub use jenny_core::port::outbound::{AccessRequest, Authenticator, Authorizer, Resource};
 
 mod utils;

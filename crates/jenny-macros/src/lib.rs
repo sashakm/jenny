@@ -1,5 +1,6 @@
 mod dto;
 mod query_format;
+mod serde_attrs;
 pub(crate) mod utils;
 
 /// One set of field constraints; a `Validate` impl and an OpenAPI schema out of it.
@@ -43,7 +44,12 @@ pub(crate) mod utils;
 ///
 /// Constraints on an `Option<T>` apply to the value when present: absence is already
 /// expressed by the type, and checking for it as well would contradict it. Fields that
-/// are not `Option` are marked required in the schema.
+/// are not `Option` and have no `#[serde(default)]` are marked required in the schema.
+///
+/// Fields are named as serde names them on the way in: `#[serde(rename = …)]` and the
+/// container's `#[serde(rename_all = …)]` apply to schema properties and to validation
+/// messages alike, so a client sending `firstName` reads `firstName: must not be empty`.
+/// `#[serde(skip)]` fields are left out of the schema.
 ///
 /// Container options are `title`, `description` (defaults to the doc comment) and
 /// `krate` — the path to the jenny facade, `::jenny` unless you say otherwise.

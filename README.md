@@ -73,7 +73,7 @@ port is a function signature until it needs to be more.
 | Credential extraction | inbound adapter (differs per protocol) |
 | Credential **verification** | driven adapter, behind [`Authenticator`] |
 | Coarse endpoint authorization | inbound adapter, via [`Authorizer`] |
-| Data-dependent authorization | the domain — written once, enforced on every transport |
+| Data-dependent authorization | the domain, via `Context::authorize` — written once, enforced on every transport |
 | Protocol status mapping | inbound adapter — `DomainError` → HTTP or gRPC status |
 
 DTOs are **per-protocol and deliberately not shared**. What makes REST, gRPC and a
@@ -213,7 +213,9 @@ worth reading top to bottom.
 
 `JennyServer` loads configuration (YAML → environment → CLI), brings telemetry up,
 mounts every registered adapter on one axum server, drives scheduled tasks, and shuts
-down gracefully.
+down gracefully on `SIGTERM` or `SIGINT`: readiness turns 503 first, the listener stays
+open for `server.shutdown_delay_seconds` so a load balancer can catch up, then in-flight
+requests and scheduled runs get `server.shutdown_timeout_seconds` to finish.
 
 Its own endpoints live under `server.framework_path` (`/j`), namespaced away from
 `server.api_path` (`/api`) so the framework can never collide with a route you wanted:
@@ -250,11 +252,14 @@ including 404s and 405s, so every error a client can provoke has one shape:
 ```json
 { "type": "urn:jenny:problem:conflict", "title": "Conflict",
   "status": 409, "detail": "note is already archived",
-  "instance": "8f14e45f-ea1a-4a2c-9a1e-2d4c1f0b3a77" }
+  "instance": "urn:uuid:8f14e45f-ea1a-4a2c-9a1e-2d4c1f0b3a77" }
 ```
 
-`instance` is the request id, which is the same id in your logs and traces. Details of
-5xx failures are logged rather than sent.
+`instance` is the request id: the same id as the response's `x-request-id`, the request
+span in your logs and traces, and `Context::request_id()`. An inbound `x-request-id`
+UUID is kept, so a gateway's id survives the hop. A failed `Validate` lists each issue in
+an `errors` member (`[{ "field": "title", "message": "must not be empty" }]`). Details of
+5xx failures, with their whole cause chain, are logged rather than sent.
 
 ## Listings
 
@@ -277,8 +282,8 @@ allowlist. Parsing rejects anything that is not a dotted identifier, and the per
 translator takes the allowlist as a *required* argument — there is no API that skips it:
 
 ```rust,ignore
-let columns = Columns::new([
-    ("title",      "title",      ColumnKind::Text),
+let columns = Columns::new("id", [                   // `id` breaks ties, so pages
+    ("title",      "title",      ColumnKind::Text),    // never overlap or skip rows
     ("created_at", "created_at", ColumnKind::Timestamp),
 ]);
 let sql = SqlCriteria::build(&criteria, &columns)?;   // identifiers from `columns`,
@@ -286,16 +291,19 @@ let statement = format!("SELECT … FROM notes{}", sql.tail());  // values bound
                                                      // interpolated
 ```
 
+Every listing is paged: `page_size` defaults to 50 and may not exceed 1000, so a
+growing table never turns one request into a full scan.
+
 ## Crates
 
 | Crate | Ring | Role |
 |---|---|---|
 | `jenny` | — | facade: feature-gated re-exports |
-| `jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Urn`, `UseCase`, `Context`, the outbound ports, tasks, telemetry |
+| `jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Urn`, `UseCase`, `Context`, the outbound ports, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
 | `jenny-persistence` | driven adapter | Postgres/sqlx query and mapping helpers |
-| `jenny-security` | driven adapter | JWT/API-key authentication, RBAC |
+| `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, config, health, hosting |
 | `jenny-macros` | — | derive macros (`Dto`, `QueryFormat`) |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
@@ -323,6 +331,39 @@ Publishing after saving is two writes and can diverge on a partial failure. Star
 direct; when consistency demands it, put a transactional outbox behind the same port —
 write the event inside the state change's transaction and let a relay drain it. The
 application layer does not change.
+
+Every envelope has its own id and can be correlated with the request that raised it
+(`EventEnvelope::json(…)?.correlated_with(&cx)`). The bus carries both as message
+headers, and the NATS forwarder passes them on, the id as `Nats-Msg-Id` so JetStream
+drops a replayed duplicate.
+
+## Authorization
+
+The `Authorizer` port asks one question, *may this principal do this action on this
+resource*, and `jenny-security` answers it with [Cedar](https://www.cedarpolicy.com)
+policies. The REST `Authorization` layer asks it for every request, about the matched
+route template inside its resource and adapter, never about a path pattern:
+
+```cedar
+permit (principal in Role::"Dispatch", action in Action::"read",
+        resource in Resource::"urn:shop:orders");
+
+permit (principal, action == Action::"archive", resource is Note)
+  when { resource.owner == principal.id };
+```
+
+The second rule depends on the note, so the use case asks it once the note is loaded,
+and it holds on every transport:
+
+```rust,ignore
+cx.authorize(&AccessRequest::new("archive",
+    Resource::new("Note", note.id()).with_attribute("owner", note.owner()))).await?;
+```
+
+`CedarAuthorizer::from_path("policies/")?.with_schema_file("schema.cedarschema")?`
+validates every policy at startup, so a misspelled type fails the deployment.
+[`docs/data/cedar`](docs/data/cedar) has a schema for the HTTP gate and an example
+policy set; ADR-011 has the reasoning.
 
 ## Architecture decisions
 

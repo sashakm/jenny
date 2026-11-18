@@ -56,6 +56,9 @@ parameter** — SQL parameters cannot stand in for identifiers. So:
 
 1. **Parsing** rejects anything that is not a dotted identifier path. Quotes, whitespace,
    semicolons and wildcards never get past the front door, whatever happens downstream.
+   That holds for every way in: `Sort` and `Filter` deserialise through the same
+   validating constructors, so a `Criteria` read from a JSON body or a message is
+   checked exactly like one parsed from a query string.
 2. **An allowlist** decides which attributes are queryable at all.
    `Criteria::ensure_allowed` is the in-memory form; `jenny-persistence` takes a
    `Columns` table that doubles as allowlist and path-to-column translation.
@@ -72,6 +75,21 @@ columns get the cast they need.
 
 sqlx 0.9 requires `AssertSqlSafe` around any statement built at runtime, which is exactly
 the right question to be asked; the documentation answers it where the wrapper appears.
+
+### Every listing is paged, in a total order
+
+A `Page` without a size is `DEFAULT_PAGE_SIZE` (50) entries, and no size exceeds
+`MAX_PAGE_SIZE` (1000); the REST parser answers a `page_size` outside `1..=1000` with
+400 rather than silently clamping it. `SqlCriteria` therefore always emits `LIMIT` and
+`OFFSET`. An unbounded default would turn a growing table into a full scan per request,
+shipped over the wire.
+
+Offset paging is only correct over a total order: rows tied on the requested sort key
+can otherwise land on two pages or on none, because the database may order ties
+differently per query. `Columns::new` therefore takes the table's key column as a
+required first argument, and `SqlCriteria` ends every `ORDER BY` with it (unless the
+client already sorted by it). Cursor pagination would avoid the problem altogether, and
+remains the better choice for very large or fast-changing tables; it is not built.
 
 ### When not to use this
 

@@ -9,10 +9,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use jenny_core::domain::{Criteria, DomainError, Page, Principal, Urn};
+use jenny_core::domain::{Criteria, DomainError, MAX_PAGE_SIZE, Page, Principal, Urn};
 use jenny_core::port::Context;
 
 use crate::problem::Problem;
+use crate::request_id::RequestId;
+use crate::security::AttachedAuthorizer;
 
 /// Header carrying (or receiving) the id that correlates a request across logs,
 /// traces and the `instance` field of a [`Problem`].
@@ -36,12 +38,15 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// }
 /// ```
 ///
-/// It picks up the request id from an inbound `x-request-id` header when there is one
-/// — so a correlation id set by a gateway or an upstream service survives the hop —
-/// and mints a fresh one otherwise. The [`Principal`] comes from the request
-/// extensions, where the authentication layer put it; without that layer the context
-/// is simply anonymous, which is what
+/// The request id is the one [`RequestIdLayer`](crate::RequestIdLayer) assigned, so it
+/// matches the logs, the response header and any problem document. Without that layer
+/// it is read from an inbound `x-request-id` UUID, or minted. The [`Principal`] comes
+/// from the request extensions, where the authentication layer put it; without that
+/// layer the context is simply anonymous, which is what
 /// [`require_principal`](jenny_core::port::Context::require_principal) then reports.
+/// Likewise the authorizer, attached by the
+/// [`Authorization`](crate::security::Authorization) layer, for
+/// [`Context::authorize`](jenny_core::port::Context::authorize).
 #[derive(Debug)]
 pub struct Ctx(Context);
 
@@ -75,16 +80,22 @@ impl<S: Send + Sync> FromRequestParts<S> for Ctx {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        let request_id = parts
-            .headers
-            .get(REQUEST_ID_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .unwrap_or_else(Uuid::new_v4);
+        let request_id = match parts.extensions.get::<RequestId>() {
+            Some(id) => id.get(),
+            None => parts
+                .headers
+                .get(REQUEST_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .unwrap_or_else(Uuid::new_v4),
+        };
 
         let mut context = Context::new().with_request_id(request_id);
         if let Some(principal) = parts.extensions.get::<Principal>() {
             context = context.with_principal(principal.clone());
+        }
+        if let Some(AttachedAuthorizer(authorizer)) = parts.extensions.get::<AttachedAuthorizer>() {
+            context = context.with_authorizer(authorizer.clone());
         }
         Ok(Ctx(context))
     }
@@ -254,7 +265,15 @@ impl Listing {
         for (key, value) in form_urlencoded::parse(query.as_bytes()) {
             match key.as_ref() {
                 "page" => number = Some(parse_number(&key, &value)?),
-                "page_size" => size = Some(parse_number(&key, &value)?),
+                "page_size" => {
+                    let requested = parse_number(&key, &value)?;
+                    if !(1..=MAX_PAGE_SIZE).contains(&requested) {
+                        return Err(DomainError::invalid(format!(
+                            "`page_size` must be between 1 and {MAX_PAGE_SIZE}, got {requested}"
+                        )));
+                    }
+                    size = Some(requested);
+                }
                 "sort" => criteria.sort.push(value.parse()?),
                 "filter" => criteria.filter.push(value.parse()?),
                 // Not ours — the handler may have its own parameters.
@@ -484,6 +503,8 @@ mod tests {
             ("?filter=a:nope:b", "unknown check"),
             ("?filter=justapath", "missing a value"),
             ("?page=many", "whole number"),
+            ("?page_size=0", "between 1 and 1000"),
+            ("?page_size=5000", "between 1 and 1000"),
             // The injection attempt never reaches an allowlist — it fails at parsing.
             ("?sort=title;DROP%20TABLE%20notes", "attribute path"),
         ] {

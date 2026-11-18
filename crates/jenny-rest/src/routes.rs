@@ -176,8 +176,11 @@ where
         self
     }
 
-    /// Apply a tower [`Layer`](tower::Layer) to every route in this resource — a
-    /// stricter body limit here, an authorization check there.
+    /// Apply a tower [`Layer`](tower::Layer) to the routes declared so far — a stricter
+    /// body limit here, an authorization check there.
+    ///
+    /// axum layers wrap the routes that exist when they are applied, so a route added
+    /// after this call is not covered. Declare every route first, then layer.
     pub fn layer<L>(mut self, layer: L) -> Self
     where
         L: tower::Layer<routing::Route> + Clone + Send + Sync + 'static,

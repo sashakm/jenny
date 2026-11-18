@@ -89,7 +89,11 @@ why neither blocks the layering work.
 ## Consequences
 
 - Services instrument with one API and choose backends in configuration.
-- `jenny-core` carries the OTel SDK; the exporters are feature-gated, so a service that
-  logs to stdout does not compile OTLP.
+- `jenny-server` carries the OTel SDK and `tracing-subscriber`; `jenny-core`, which the
+  domain depends on, carries only `tracing`. The exporters are feature-gated, so a
+  service that logs to stdout does not compile OTLP.
+- Every request gets an id before anything else sees it (`RequestIdLayer`): kept from an
+  inbound `x-request-id` UUID, echoed in the response, recorded on the request span,
+  used as the `Context` request id and as the `instance` of every problem document.
 - Telemetry is up before the first line of service code runs and flushed after the last.
 - Distributed traces do not yet span service boundaries; single-service tracing works.

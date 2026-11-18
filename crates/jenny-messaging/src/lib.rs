@@ -37,6 +37,21 @@ pub mod eventbus;
 pub mod health;
 pub mod nats;
 
+/// The headers [`EventBus`] puts on every message, from the
+/// [`EventEnvelope`](jenny_core::port::outbound::EventEnvelope)'s metadata, and
+/// [`NatsGateway`](nats::NatsGateway) carries over to NATS.
+pub mod headers {
+    /// The envelope's [`id`](jenny_core::port::outbound::EventEnvelope::id). Also sent to
+    /// JetStream as `Nats-Msg-Id`, so a replayed event is deduplicated there.
+    pub const EVENT_ID: &str = "event-id";
+    /// The event name without the bus namespace, such as `note.created`.
+    pub const EVENT_NAME: &str = "event-name";
+    /// When the event occurred, RFC 3339.
+    pub const OCCURRED_AT: &str = "event-occurred-at";
+    /// The request id of the invocation that raised the event, when it was correlated.
+    pub const CORRELATION_ID: &str = "correlation-id";
+}
+
 /// The in-process broker, re-exported because its `EventConsumer` trait is part of
 /// this crate's public surface: subscribing a listener means implementing it.
 pub use topmesys;

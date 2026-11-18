@@ -41,5 +41,6 @@ pub use context::{Context, Extensions};
 pub use inbound::UseCase;
 #[doc(inline)]
 pub use outbound::{
-    Authenticator, Authorizer, EventEnvelope, EventPublisher, HealthCheck, PublishError,
+    AccessRequest, Authenticator, Authorizer, EventEnvelope, EventPublisher, HealthCheck,
+    PublishError, Resource,
 };

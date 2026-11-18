@@ -1,5 +1,4 @@
 //! Provides a basic data structure to implement JWT authentication
-use futures::lock::Mutex;
 use jsonwebtoken::{TokenData, jwk::Jwk};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -74,17 +73,37 @@ pub struct OidcConfig {
     /// don't verify token issuer claim with configured [issuer](Self::issuer). Default: false
     #[serde(default)]
     pub skip_issuer_validation: bool,
+    /// accept tokens whatever audience and authorizing party they name. Default: false
+    ///
+    /// Without either check, a token the same provider issued to *any* client is accepted
+    /// here, so this has to be asked for explicitly.
+    #[serde(default)]
+    pub skip_audience_validation: bool,
 }
 
 impl OidcConfig {
-    /// Create a [JwtAuthContextConfig] from this configuration
-    pub fn auth_context_config(&self) -> JwtAuthContextConfig {
-        if self.valid_audience.is_none() && self.valid_authorizing_parties.is_none() {
-            warn!(
-                "Both audience validation and authorizing party validation are disabled. This is insecure."
-            )
+    /// Create a [JwtAuthContextConfig] from this configuration.
+    ///
+    /// Fails when neither [`valid_audience`](Self::valid_audience) nor
+    /// [`valid_authorizing_parties`](Self::valid_authorizing_parties) is set, unless
+    /// [`skip_audience_validation`](Self::skip_audience_validation) says so.
+    pub fn auth_context_config(&self) -> anyhow::Result<JwtAuthContextConfig> {
+        let unchecked = self.valid_audience.as_ref().is_none_or(Vec::is_empty)
+            && self
+                .valid_authorizing_parties
+                .as_ref()
+                .is_none_or(Vec::is_empty);
+        if unchecked {
+            if !self.skip_audience_validation {
+                anyhow::bail!(
+                    "set `valid_audience` or `valid_authorizing_parties`; without either, tokens \
+                     the provider issued to any other client are accepted \
+                     (`skip_audience_validation: true` allows that explicitly)"
+                );
+            }
+            warn!("Audience and authorizing party validation are disabled. This is insecure.");
         }
-        JwtAuthContextConfig::new(
+        Ok(JwtAuthContextConfig::new(
             JwksCache::new(self.jwks_url.as_str(), self.jwks_cache_ttl.unwrap_or(1800)),
             if self.skip_issuer_validation {
                 warn!("Issuer validation disabled. This is insecure.");
@@ -94,14 +113,14 @@ impl OidcConfig {
             },
             self.valid_audience.clone().unwrap_or_default(),
             self.valid_authorizing_parties.clone().unwrap_or_default(),
-        )
+        ))
     }
 }
 
 /// Configuration for JWT-based authentication.
 #[derive(Debug, Clone)]
 pub struct JwtAuthContextConfig {
-    jwks_cache: Arc<Mutex<JwksCache>>,
+    jwks_cache: Arc<JwksCache>,
     valid_issuers: Vec<String>,
     valid_audience: Vec<String>,
     valid_authorizing_parties: Vec<String>,
@@ -115,7 +134,7 @@ impl JwtAuthContextConfig {
         valid_authorizing_parties: Vec<String>,
     ) -> Self {
         Self {
-            jwks_cache: Arc::new(Mutex::new(jwks_cache)),
+            jwks_cache: Arc::new(jwks_cache),
             valid_issuers,
             valid_audience,
             valid_authorizing_parties,
@@ -124,7 +143,7 @@ impl JwtAuthContextConfig {
 
     /// Fetch signing key from jwk cache by key id
     pub async fn lookup_jwk(&self, kid: &str) -> anyhow::Result<Jwk> {
-        Ok(self.jwks_cache.lock().await.read_jwk(kid).await?)
+        Ok(self.jwks_cache.read_jwk(kid).await?)
     }
 
     /// Validate JWT signature, expiration and issuer and decode token into [TokenData]<[JwtClaims]>

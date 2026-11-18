@@ -1,0 +1,31 @@
+// What jenny's REST `Authorization` layer sends to Cedar. Copy this file into your
+// service and extend it: declare the claims your policies read on `User`, and your own
+// actions and resource types for the checks use cases make through `Context::authorize`.
+//
+// Undeclared claims never reach a policy: with a schema, jenny keeps only the attributes
+// declared here.
+
+// A role may be a member of another role. The hierarchy comes from static entities.
+entity Role in [Role];
+
+// The caller. `id` is the principal's id; the rest are its claims.
+entity User in [Role] {
+  id: String,
+  email?: String,
+};
+
+// `RestAdapter::new("shop")` is `Adapter::"urn:shop"`, `Routes::new("orders")` mounted
+// on it is `Resource::"urn:shop:orders"`, and each route template in it, including the
+// mount path, is a `Route`, e.g. `Route::"/api/orders/{id}"`.
+entity Adapter;
+entity Resource in [Adapter];
+entity Route in [Resource];
+
+// `context.path` is the concrete path the client called.
+type HttpContext = { path: String };
+
+action read, write;
+action "GET", "HEAD", "OPTIONS" in [read]
+  appliesTo { principal: [User], resource: [Route], context: HttpContext };
+action "POST", "PUT", "PATCH", "DELETE" in [write]
+  appliesTo { principal: [User], resource: [Route], context: HttpContext };

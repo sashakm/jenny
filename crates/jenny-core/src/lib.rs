@@ -9,7 +9,6 @@
 //! | [`domain`] | the hexagon itself | `domain/`, `application/`, adapters, composition root |
 //! | [`port`] | the boundary — ports are traits | `domain/`, `application/`, adapters, composition root |
 //! | [`task`] | clock-driven inbound adapter | adapters, composition root |
-//! | [`telemetry`] | outbound adapter (emit side) | composition root |
 //!
 //! Nothing in [`domain`] or [`port`] pulls in a database driver, an HTTP or gRPC
 //! framework, or a message broker. That is what makes "the domain depends on
@@ -40,7 +39,6 @@
 pub mod domain;
 pub mod port;
 pub mod task;
-pub mod telemetry;
 
 /// Your crate's version, for reporting as the service version.
 ///

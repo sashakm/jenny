@@ -178,18 +178,24 @@ failure a client can provoke has one content type and one shape.
 `Authentication::required(Arc<dyn Authenticator>)` lifts credentials off the
 `Authorization` header, verifies them through the port, and puts the `Principal` into
 request extensions where the `Ctx` extractor finds it. `Authentication::optional` allows
-anonymous callers **but still rejects credentials that are present and invalid** —
+anonymous callers **but still rejects an `Authorization` header that is present and
+invalid**, whether the token is bad or the header is malformed —
 silently downgrading a bad token to anonymous access is how authentication bypasses
 happen.
 
-`Authorization::new(Arc<dyn Authorizer>)` gates on the HTTP method as the action and the
-request path as the resource. It reads the path from `OriginalUri`, because
-`Router::nest` rewrites the URI to strip the mount prefix — a layer inside an adapter
-mounted at `/api` would otherwise be handed `/orders` and be asked to match it against
-rules written for `/api/orders`. There is a regression test for exactly this.
+`Authorization::new(Arc<dyn Authorizer>)` gates on the HTTP method as the action and
+the matched route *template* as the resource, inside the resource and adapter URNs it
+belongs to (`Route::"/api/orders/{id}"` in `Resource::"urn:shop:orders"` in
+`Adapter::"urn:shop"`), with the concrete path in the context. ADR-011 has the reasons.
+The path comes from `OriginalUri`, because `Router::nest` rewrites the URI to strip the
+mount prefix, and the template from `MatchedPath`, which keeps it. A request without a
+principal gets 401. On success the authorizer is attached to the request, so `Ctx` puts
+it into the `Context` for use cases.
 
 Unknown `Authorization` schemes are an authentication *failure*, not a silent pass, so a
-typo in a scheme name can never be mistaken for an anonymous request.
+typo in a scheme name can never be mistaken for an anonymous request. That holds for
+`Authentication::optional` too: only a missing header is anonymous. Scheme names are
+case-insensitive, as RFC 9110 has them.
 
 CORS defaults are provided but **no origins are set** — that is a security decision the
 framework has no business making for a service.

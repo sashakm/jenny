@@ -3,7 +3,11 @@
 use darling::FromAttributes;
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, Lit, Type, parse_macro_input};
+
+use crate::serde_attrs;
+use crate::utils::apply_casing;
 
 /// Container-level `#[dto(...)]` options.
 #[derive(Default, FromAttributes)]
@@ -54,6 +58,7 @@ pub(crate) fn derive_dto_impl(input: proc_macro::TokenStream) -> proc_macro::Tok
 
 fn expand(input: &DeriveInput) -> darling::Result<TokenStream> {
     let container = DtoContainer::from_attributes(&input.attrs)?;
+    let serde_container = serde_attrs::container(&input.attrs)?;
     let ident = &input.ident;
 
     let Data::Struct(data) = &input.data else {
@@ -75,13 +80,24 @@ fn expand(input: &DeriveInput) -> darling::Result<TokenStream> {
 
     for field in &fields.named {
         let options = DtoField::from_attributes(&field.attrs)?;
+        let serde_field = serde_attrs::field(&field.attrs)?;
         let name = field.ident.as_ref().expect("named field");
-        let name_str = name.to_string();
+        // The name the field has on the wire, which is the one a client needs to see.
+        let name_str = match (&serde_field.rename, &serde_container.rename_all) {
+            (Some(rename), _) => rename.clone(),
+            (None, Some(casing)) => {
+                apply_casing(casing, &name.unraw().to_string()).map_err(|e| e.with_span(name))?
+            }
+            (None, None) => name.unraw().to_string(),
+        };
         let ty = &field.ty;
 
         validations.extend(field_validation(name, &name_str, ty, &options));
+        if serde_field.skip {
+            continue;
+        }
         properties.push(field_schema(&name_str, ty, &options));
-        if !is_option(ty) {
+        if !is_option(ty) && !serde_field.default && !serde_container.default {
             required.push(quote!(#name_str));
         }
     }

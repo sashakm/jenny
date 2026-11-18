@@ -79,15 +79,13 @@ where
         found.retain(|entity| criteria.filter.iter().all(|f| matches(entity, f)));
         sort(&mut found, criteria);
 
-        // Paging last, so it slices the result the client actually asked for.
-        if criteria.page.limit() > 0 {
-            found = found
-                .into_iter()
-                .skip(criteria.page.offset() as usize)
-                .take(criteria.page.limit() as usize)
-                .collect();
-        }
-        Ok(found)
+        // Paging last, so it slices the result the client actually asked for. Every
+        // listing is paged; an unpaged request gets the default page size.
+        Ok(found
+            .into_iter()
+            .skip(criteria.page.offset() as usize)
+            .take(criteria.page.limit() as usize)
+            .collect())
     }
 
     pub async fn fetch(
@@ -137,7 +135,8 @@ where
     /// transaction as the state change and let a relay drain it. This method does not change.
     async fn publish(&self, event: &(impl DomainEvent + EventPayload), cx: &Context) {
         let envelope = match EventEnvelope::json(event.name(), &event.payload()) {
-            Ok(envelope) => envelope,
+            // Listeners can trace the event back to the request that raised it.
+            Ok(envelope) => envelope.correlated_with(cx),
             Err(e) => {
                 tracing::error!(request_id = %cx.request_id(), "could not encode event: {e}");
                 return;

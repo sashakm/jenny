@@ -81,7 +81,24 @@ example service's end-to-end test does exactly this, against the same `build` fu
 `main` uses — so what is tested is the real composition root rather than a rebuilt
 approximation of it.
 
-`run()` is `bind().serve()` plus a `SIGINT` handler.
+`run()` is `bind().serve()` plus a handler for `SIGINT` and, on Unix, `SIGTERM`. The
+generated Dockerfile runs the service as PID 1, where the kernel installs no default
+handler, so without an explicit `SIGTERM` handler `docker stop` and Kubernetes waited out
+their grace period and killed the process: no drain, no flush.
+
+### Shutdown is a sequence, not a switch
+
+On a signal or `ServerHandle::shutdown`:
+
+1. `/health/ready` answers 503 with `"status": "stopping"`; `/health/live` stays up.
+2. The server keeps accepting for `server.shutdown_delay_seconds` (default `0`). On
+   Kubernetes the pod leaves the load balancer *while* it is told to stop, not before,
+   so a few seconds of delay (around five) keeps late requests from being refused.
+3. The listener closes; in-flight requests finish. The scheduler starts no more runs and
+   waits for those in progress.
+4. Both are bounded together by `server.shutdown_timeout_seconds` (default `30`, what
+   Kubernetes waits before `SIGKILL`); what is still running then is abandoned.
+5. The broker stops (draining its listeners) and telemetry flushes.
 
 ### The framework's endpoints get their own prefix
 
@@ -145,6 +162,14 @@ Body limit, tracing and the problem-shaped 404/405 fallbacks are applied above e
 route, including the fallbacks themselves, so a 404 has the same shape as any other
 failure (ADR-005).
 
+Outermost of all is `RequestIdLayer`. It keeps an inbound `x-request-id` that is a UUID
+(so a gateway's correlation id survives the hop) and mints one otherwise, then puts that
+one id everywhere: the request span, the `Context` a handler extracts, the response's
+`x-request-id`, and the `instance` (`urn:uuid:…`) of every problem document produced
+while serving the request, through a task-local that `Problem` reads. Before, `Ctx`
+minted a fresh id on each extraction when no header came in, and `instance` was never
+set at all.
+
 The body limit is enforced when a handler *reads* the body, which is axum's semantics: a
 handler that ignores the body will answer a request that carries an oversized one. Worth
 knowing, and documented on the setting.
@@ -154,8 +179,15 @@ knowing, and documented on the setting.
 `ScheduledTask` is a cron-scheduled `Task`, driven by the runtime as a background tokio
 task. A `Task` implementation should be as thin as a REST handler — the clock is just
 another thing that invokes a use case. Each firing is spawned separately, so a slow run
-never delays the next one or another task's schedule, and a failed run is logged without
-stopping the schedule.
+never delays another task's schedule, and a failed run is logged without stopping the
+schedule. A firing that comes due while the previous run of the same task is still going
+is skipped with a warning, not run beside it.
+
+Slots are wall-clock times but delays are monotonic: the scheduler reads the wall clock
+once and advances it with tokio's clock. A timer that fires a moment early can therefore
+never yield the same slot twice, slots missed while the process was suspended are
+skipped rather than fired in a burst, and a next slot computed a moment too late is due
+now instead of an error that used to end the whole scheduler.
 
 ## Consequences
 

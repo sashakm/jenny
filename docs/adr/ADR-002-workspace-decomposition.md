@@ -19,12 +19,12 @@ rather than along topics.
 
 | Crate | Ring | Contains |
 |---|---|---|
-| `jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `DomainEvent`; `UseCase`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; tasks; telemetry |
+| `jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `DomainEvent`; `UseCase`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, `Ctx`, auth and CORS layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
 | `jenny-persistence` | driven adapter | Postgres/sqlx statement building and row mapping |
-| `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, RBAC |
-| `jenny-server` | composition root | runtime, configuration, health, hosting |
+| `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, Cedar authorization |
+| `jenny-server` | composition root | runtime, configuration, telemetry, health, hosting |
 | `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]` |
 | `cargo-jenny` | — | `cargo jenny` — scaffolding (ADR-009) |
 | `jenny` | — | facade of feature-gated re-exports |
@@ -57,8 +57,9 @@ that, and both are load-bearing:
   ADR-001 grants it exactly that privilege.
 
 `jenny-core` keeps a deliberately small dependency set — `tokio`, `async-trait`,
-`serde`, `uuid`, `chrono`, `thiserror`, `tracing`, `cron`, and the OTel SDK. No web
-framework, no database driver, no broker client.
+`serde`, `uuid`, `chrono`, `thiserror`, `tracing` and `cron`. No web framework, no
+database driver, no broker client, and no exporter: telemetry setup (the OTel SDK,
+`tracing-subscriber`, the backends) lives in `jenny-server`, the only crate that starts it.
 
 ### Features
 
@@ -71,7 +72,7 @@ persistence  = ["dep:jenny-persistence"]
 security     = ["dep:jenny-security"]
 openapi      = ["jenny-macros/openapi", "jenny-rest?/openapi", "jenny-server?/openapi"]
 swagger-ui   = ["openapi", "jenny-server?/swagger-ui"]
-telemetry-otlp / telemetry-prometheus / telemetry-loki
+telemetry-otlp / telemetry-prometheus / telemetry-loki   # each implies `server`
 full         = ["rest", "server", "messaging", "persistence", "security", "openapi"]
 ```
 
@@ -92,7 +93,7 @@ alone, and `telemetry-prometheus` alone) did not even compile.
 
 ### The facade mirrors the rings
 
-`jenny` re-exports `domain`, `port`, `task` and `telemetry` as modules, plus the
+`jenny` re-exports `domain`, `port` and `task` as modules, plus the
 everyday items flat so ordinary code reads `use jenny::{Context, DomainError};`.
 Adapters appear as `jenny::rest`, `jenny::messaging`, … behind their features.
 

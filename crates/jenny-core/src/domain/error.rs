@@ -3,6 +3,10 @@
 use thiserror::Error;
 
 use super::identity::{AuthenticationError, AuthorizationError};
+use super::validation::{ValidationErrors, ValidationIssue};
+
+/// What caused an [`Internal`](DomainError::Internal) failure, kept for the logs.
+pub type ErrorSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// What went wrong, phrased in domain terms rather than protocol terms.
 ///
@@ -24,9 +28,14 @@ pub enum DomainError {
     #[error("not found")]
     NotFound,
 
-    /// The input broke a domain rule or invariant.
+    /// The input broke a domain rule or invariant. `issues` lists what was wrong field
+    /// by field when the failure came from [`Validate`](super::Validate), so an adapter
+    /// can report each one; it is empty otherwise.
     #[error("invalid: {detail}")]
-    Invalid { detail: String },
+    Invalid {
+        detail: String,
+        issues: Vec<ValidationIssue>,
+    },
 
     /// The caller could not be identified.
     #[error("unauthenticated: {detail}")]
@@ -41,9 +50,15 @@ pub enum DomainError {
     #[error("conflict: {detail}")]
     Conflict { detail: String },
 
-    /// Something failed that the caller can do nothing about.
+    /// Something failed that the caller can do nothing about. `source` is the error
+    /// behind it, so the whole chain reaches the logs even though none of it reaches
+    /// the caller.
     #[error("internal error: {detail}")]
-    Internal { detail: String },
+    Internal {
+        detail: String,
+        #[source]
+        source: Option<ErrorSource>,
+    },
 }
 
 impl DomainError {
@@ -54,6 +69,7 @@ impl DomainError {
     pub fn invalid(detail: impl Into<String>) -> Self {
         Self::Invalid {
             detail: detail.into(),
+            issues: Vec::new(),
         }
     }
 
@@ -78,7 +94,34 @@ impl DomainError {
     pub fn internal(detail: impl Into<String>) -> Self {
         Self::Internal {
             detail: detail.into(),
+            source: None,
         }
+    }
+
+    /// An internal failure caused by `source`, whose message becomes the detail.
+    pub fn internal_from(source: impl Into<ErrorSource>) -> Self {
+        let source = source.into();
+        Self::Internal {
+            detail: source.to_string(),
+            source: Some(source),
+        }
+    }
+
+    /// The message and every cause below it, `outer: inner: innermost`. What an
+    /// adapter logs for an internal failure.
+    pub fn report(&self) -> String {
+        let mut report = self.to_string();
+        let mut cause = std::error::Error::source(self);
+        while let Some(error) = cause {
+            let message = error.to_string();
+            // `anyhow` repeats its own context in `Display`; skip what is already there.
+            if !report.ends_with(&message) {
+                report.push_str(": ");
+                report.push_str(&message);
+            }
+            cause = error.source();
+        }
+        report
     }
 }
 
@@ -99,7 +142,16 @@ impl From<AuthorizationError> for DomainError {
 
 impl From<anyhow::Error> for DomainError {
     fn from(error: anyhow::Error) -> Self {
-        Self::internal(error.to_string())
+        Self::internal_from(error)
+    }
+}
+
+impl From<ValidationErrors> for DomainError {
+    fn from(errors: ValidationErrors) -> Self {
+        Self::Invalid {
+            detail: errors.to_string(),
+            issues: errors.issues().to_vec(),
+        }
     }
 }
 
@@ -134,9 +186,33 @@ mod tests {
     }
 
     #[test]
-    fn anyhow_maps_to_internal() {
-        let err: DomainError = anyhow::anyhow!("boom").into();
-        assert!(matches!(err, DomainError::Internal { .. }));
-        assert!(err.to_string().contains("boom"));
+    fn anyhow_maps_to_internal_and_keeps_the_chain() {
+        let root = std::io::Error::other("connection refused");
+        let err: DomainError = anyhow::Error::new(root).context("loading note 7").into();
+        assert!(matches!(
+            err,
+            DomainError::Internal {
+                source: Some(_),
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("loading note 7"));
+        assert_eq!(
+            err.report(),
+            "internal error: loading note 7: connection refused"
+        );
+    }
+
+    #[test]
+    fn validation_errors_keep_their_issues() {
+        let mut errors = ValidationErrors::default();
+        errors.push_field("title", "must not be empty");
+        errors.push("too large");
+        let DomainError::Invalid { detail, issues } = errors.into() else {
+            panic!("expected Invalid");
+        };
+        assert_eq!(detail, "title: must not be empty; too large");
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].field.as_deref(), Some("title"));
     }
 }

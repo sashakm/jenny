@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
@@ -38,7 +39,6 @@ openapi = ["dep:utoipa"]
 
 [dev-dependencies]
 jenny-security = { workspace = true }
-tokio = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 
 # Everything is feature-gated, so docs.rs would otherwise show next to nothing.

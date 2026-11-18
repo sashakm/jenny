@@ -1,31 +1,29 @@
 //! The composition root.
 
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(feature = "messaging")]
 use crate::config::DEFAULT_EVENT_NAMESPACE;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use clap::Parser;
-use jenny_core::{
-    task::{ScheduledTask, TaskScheduler},
-    telemetry::TelemetryHandle,
-};
+use jenny_core::task::{ScheduledTask, TaskScheduler};
 #[cfg(feature = "messaging")]
 use jenny_messaging::MessagingAdapter;
-use jenny_rest::RestAdapter;
+use jenny_rest::{RequestId, RequestIdLayer, RestAdapter};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tower_http::trace::TraceLayer;
-use tracing::info;
-#[cfg(feature = "messaging")]
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     config::{ConfigSource, ServerArgs, ServerConfig},
     context::ServerContext,
     health::{AdapterSummary, HealthCheck, HealthRegistry, StatusInfo, health_router},
+    telemetry::TelemetryHandle,
 };
 
 /// The one place that knows every layer.
@@ -101,9 +99,42 @@ fn merged_openapi(adapters: &[RestAdapter]) -> Option<utoipa::openapi::OpenApi> 
 pub struct ServerHandle(watch::Sender<bool>);
 
 impl ServerHandle {
-    /// Stop accepting connections and let in-flight requests finish.
+    /// Begin the shutdown sequence: report not ready, keep serving for
+    /// `server.shutdown_delay_seconds`, then stop accepting connections and let
+    /// in-flight requests finish within `server.shutdown_timeout_seconds`.
     pub fn shutdown(&self) {
         let _ = self.0.send(true);
+    }
+}
+
+/// Resolves on `SIGINT` or, on Unix, `SIGTERM`, which is what `docker stop` and
+/// Kubernetes send. A signal handler that cannot be installed never resolves rather
+/// than shutting the server down at once.
+async fn shutdown_signal() {
+    let interrupt = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            warn!("cannot listen for SIGINT");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(e) => {
+                warn!("cannot listen for SIGTERM: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => info!("SIGINT received"),
+        () = terminate => info!("SIGTERM received"),
     }
 }
 
@@ -116,10 +147,13 @@ pub struct ServerParts {
     listener: TcpListener,
     router: Router,
     shutdown: watch::Sender<bool>,
+    shutdown_delay: Duration,
+    shutdown_timeout: Duration,
     /// Dropping this flushes telemetry exporters.
     pub telemetry: Option<TelemetryHandle>,
-    /// The background scheduler, if any tasks were scheduled.
-    pub scheduler: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    /// The background scheduler, if any tasks were scheduled. It stops starting runs
+    /// when shutdown begins and finishes once the runs in progress have.
+    pub scheduler: Option<tokio::task::JoinHandle<()>>,
     /// The health registry of this server.
     pub health: HealthRegistry,
     /// The running event broker, stopped on shutdown so in-flight listeners finish.
@@ -138,29 +172,63 @@ impl ServerParts {
         ServerHandle(self.shutdown.clone())
     }
 
-    /// Serve until [`ServerHandle::shutdown`] is called, then flush and stop.
+    /// Serve until [`ServerHandle::shutdown`] is called, then drain, flush and stop.
     pub async fn serve(self) -> anyhow::Result<()> {
         let Self {
             listener,
             router,
             shutdown,
+            shutdown_delay,
+            shutdown_timeout,
             telemetry,
             scheduler,
-            health: _,
+            health,
             #[cfg(feature = "messaging")]
             broker,
         } = self;
 
-        let mut stop = shutdown.subscribe();
-        let result = axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = stop.wait_for(|stopping| *stopping).await;
-            })
-            .await;
+        let mut requested = shutdown.subscribe();
+        let close_listener = async move {
+            let _ = requested.wait_for(|stopping| *stopping).await;
+            health.mark_stopping();
+            info!(
+                delay_seconds = shutdown_delay.as_secs(),
+                "shutting down: reporting not ready"
+            );
+            tokio::time::sleep(shutdown_delay).await;
+            info!("closing the listener and draining in-flight requests");
+        };
+        let mut requested = shutdown.subscribe();
+        let deadline = async move {
+            let _ = requested.wait_for(|stopping| *stopping).await;
+            tokio::time::sleep(shutdown_delay + shutdown_timeout).await;
+        };
 
-        if let Some(handle) = scheduler {
-            handle.abort();
-        }
+        let serving = axum::serve(listener, router)
+            .with_graceful_shutdown(close_listener)
+            .into_future();
+        let abort_scheduler = scheduler.as_ref().map(|handle| handle.abort_handle());
+        // In-flight requests and scheduled runs in progress share one deadline.
+        let drain = async move {
+            let result = serving.await;
+            if let Some(handle) = scheduler {
+                let _ = handle.await;
+            }
+            result
+        };
+        let result = tokio::select! {
+            result = drain => result,
+            () = deadline => {
+                warn!(
+                    timeout_seconds = shutdown_timeout.as_secs(),
+                    "in-flight work did not finish in time; stopping without it"
+                );
+                if let Some(abort) = abort_scheduler {
+                    abort.abort();
+                }
+                Ok(())
+            }
+        };
         // Stopping the broker waits for listeners that are still handling an event, so
         // a graceful shutdown does not drop side effects that were already in flight.
         #[cfg(feature = "messaging")]
@@ -529,12 +597,20 @@ impl JennyServer {
             .fallback(jenny_rest::not_found)
             .method_not_allowed_fallback(jenny_rest::method_not_allowed)
             .layer(DefaultBodyLimit::max(config.server.body_limit))
-            .layer(TraceLayer::new_for_http());
-
-        let scheduler_handle = (!scheduler.is_empty()).then(|| tokio::spawn(scheduler.run()));
+            .layer(TraceLayer::new_for_http().make_span_with(request_span))
+            // Outermost, so the trace span, every layer and every problem document see
+            // the same id.
+            .layer(RequestIdLayer);
 
         let listener = TcpListener::bind(&config.server.address).await?;
         let (shutdown, _) = watch::channel(false);
+
+        let scheduler_handle = (!scheduler.is_empty()).then(|| {
+            let mut requested = shutdown.subscribe();
+            tokio::spawn(scheduler.run_until(async move {
+                let _ = requested.wait_for(|stopping| *stopping).await;
+            }))
+        });
 
         info!(address = %listener.local_addr()?, "jenny server bound");
         health.mark_started();
@@ -543,6 +619,8 @@ impl JennyServer {
             listener,
             router,
             shutdown,
+            shutdown_delay: Duration::from_secs(config.server.shutdown_delay_seconds),
+            shutdown_timeout: Duration::from_secs(config.server.shutdown_timeout_seconds),
             telemetry,
             scheduler: scheduler_handle,
             health,
@@ -551,18 +629,31 @@ impl JennyServer {
         })
     }
 
-    /// Bind and serve until `SIGINT`, then shut down gracefully.
+    /// Bind and serve until `SIGINT` or `SIGTERM`, then shut down gracefully.
     pub async fn run(self) -> anyhow::Result<()> {
         let parts = self.bind().await?;
         let handle = parts.handle();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                info!("shutdown signal received");
-                handle.shutdown();
-            }
+            shutdown_signal().await;
+            handle.shutdown();
         });
         parts.serve().await
     }
+}
+
+/// The span every request is traced in, carrying the id [`RequestIdLayer`] assigned.
+fn request_span(request: &axum::extract::Request) -> tracing::Span {
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %request.uri(),
+        request_id,
+    )
 }
 
 #[cfg(test)]
@@ -652,6 +743,79 @@ mod tests {
         let addr = parts.local_addr().unwrap();
         assert_ne!(addr.port(), 0);
         assert!(parts.health.started());
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_reports_not_ready_while_it_still_serves() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.shutdown_delay_seconds = 1;
+        let parts = server.bind().await.unwrap();
+        let addr = parts.local_addr().unwrap();
+        let handle = parts.handle();
+        let serving = tokio::spawn(parts.serve());
+
+        let before = raw_get(&format!("http://{addr}/j/health/ready")).await;
+        assert!(before.starts_with("HTTP/1.0 200"), "{before}");
+        handle.shutdown();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let during_delay = raw_get(&format!("http://{addr}/j/health/ready")).await;
+        assert!(during_delay.starts_with("HTTP/1.0 503"), "{during_delay}");
+        assert!(during_delay.contains("\"stopping\""), "{during_delay}");
+
+        serving.await.unwrap().unwrap();
+        assert!(
+            tokio::net::TcpStream::connect(addr).await.is_err(),
+            "after the delay the listener is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drain_is_bounded_by_the_shutdown_timeout() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.shutdown_timeout_seconds = 1;
+        let server = server
+            .register(
+                RestAdapter::new("slow")
+                    .unwrap()
+                    .mount(Routes::new("slow").get("/slow", || async {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        "done"
+                    }))
+                    .unwrap(),
+            )
+            .unwrap();
+        let parts = server.bind().await.unwrap();
+        let addr = parts.local_addr().unwrap();
+        let handle = parts.handle();
+        let serving = tokio::spawn(parts.serve());
+
+        let stuck = tokio::spawn(async move { raw_get(&format!("http://{addr}/api/slow")).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        handle.shutdown();
+
+        let started = std::time::Instant::now();
+        serving.await.unwrap().unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        stuck.abort();
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_the_request_id_and_problems_name_it() {
+        let parts = server_with("127.0.0.1:0").bind().await.unwrap();
+        let response = parts
+            .router
+            .clone()
+            .oneshot(http::Request::get("/nowhere").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let id = response.headers()[jenny_rest::REQUEST_ID_HEADER]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem["instance"], format!("urn:uuid:{id}"));
     }
 
     #[tokio::test]

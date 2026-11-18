@@ -10,7 +10,7 @@ use jenny_core::domain::{AuthenticationError, Credentials, Principal};
 use jenny_core::port::outbound::Authenticator;
 
 use crate::authentication::{
-    api_key::ApiKeyAuthContextConfig,
+    api_key::{ApiKeyAuthContextConfig, ApiKeyClaims},
     jwt::{JwtAuthContextConfig, JwtClaims},
 };
 
@@ -76,11 +76,15 @@ impl Authenticator for AuthenticationConfig {
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
-                config
+                let claims: ApiKeyClaims = config
                     .get(&hashed)
                     .await
                     .map_err(|e| AuthenticationError(e.to_string()))?
-                    .ok_or_else(|| AuthenticationError("unknown api key".to_string()))
+                    .ok_or_else(|| AuthenticationError("unknown api key".to_string()))?;
+                if claims.is_expired_at(std::time::SystemTime::now()) {
+                    return Err(AuthenticationError("expired api key".to_string()));
+                }
+                Ok(Principal::from(claims))
             }
             Credentials::JsonWebToken(token) => {
                 let config = self.jwt().ok_or_else(|| {
@@ -154,6 +158,44 @@ mod tests {
         assert_eq!(principal.id(), "svc-1");
         assert_eq!(principal.to_string(), "Principal(Batch Job)");
         assert!(principal.has_role("Dispatch"));
+    }
+
+    #[tokio::test]
+    async fn an_expired_api_key_is_rejected() {
+        let hashed = |secret: &str| {
+            sha2::Sha256::digest(secret.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        let store = std::collections::HashMap::from([
+            (
+                hashed("old"),
+                r#"{"id":"svc-1","expiration":1}"#.to_string().into_boxed_str(),
+            ),
+            (
+                hashed("current"),
+                r#"{"id":"svc-2","expiration":32503680000}"#
+                    .to_string()
+                    .into_boxed_str(),
+            ),
+        ]);
+        let config = AuthenticationConfig::default()
+            .with_api_key_enabled(ApiKeyAuthContextConfig::new_static(store));
+
+        let err = config
+            .authenticate(&Credentials::ApiKey("old".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"));
+        assert_eq!(
+            config
+                .authenticate(&Credentials::ApiKey("current".into()))
+                .await
+                .unwrap()
+                .id(),
+            "svc-2"
+        );
     }
 
     #[tokio::test]

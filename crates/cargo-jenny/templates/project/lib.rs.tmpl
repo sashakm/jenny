@@ -107,6 +107,12 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     let rest = RestAdapter::new("{{project_kebab}}")?
         .describe("{{project_kebab}}")
         .mount(adapter::inbound::rest::{{resource_snake}}::routes({{resource_plural}}))?;
+{{#if openapi}}
+    // The schemas `#[derive(Dto)]` produced, served at `<framework_path>/openapi.json`.
+    let rest = rest.with_openapi(
+        <adapter::inbound::rest::{{resource_snake}}::{{resource_pascal}}Api as utoipa::OpenApi>::openapi(),
+    );
+{{/if}}
 
     Ok(server
         .with_version(jenny::service_version!())

@@ -88,6 +88,7 @@
 mod adapter;
 mod extract;
 mod problem;
+mod request_id;
 mod routes;
 pub mod security;
 
@@ -102,11 +103,13 @@ pub use tower_http;
 pub use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 
 #[doc(inline)]
-pub use adapter::{DEFAULT_API_PATH, Resource, RestAdapter};
+pub use adapter::{DEFAULT_API_PATH, MountedResource, RestAdapter};
 #[doc(inline)]
 pub use extract::{Ctx, Json, Listing, REQUEST_ID_HEADER, RouteId};
 #[doc(inline)]
-pub use problem::{ApiResult, PROBLEM_CONTENT_TYPE, Problem};
+pub use problem::{ApiResult, PROBLEM_CONTENT_TYPE, Problem, ProblemIssue};
+#[doc(inline)]
+pub use request_id::{RequestId, RequestIdLayer};
 #[doc(inline)]
 pub use routes::{Endpoint, Routes};
 

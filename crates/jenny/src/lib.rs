@@ -14,11 +14,10 @@
 //! | [`jenny::port`](port) | the boundary | [`UseCase`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter`, `Routes`, `Problem` — axum/tower |
 //! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving) |
-//! | `jenny::persistence` | driven adapter | Postgres/sqlx query and mapping helpers |
-//! | `jenny::security` | driven adapter | JWT/API-key authentication, RBAC |
+//! | `jenny::persistence` | driven adapter | Postgres/sqlx: criteria to SQL, `QueryFormat`, `DatabaseCheck` |
+//! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 //! | [`jenny::task`](task) | driving adapter | the clock: [`Task`](task::Task), [`ScheduledTask`](task::ScheduledTask) |
-//! | [`jenny::telemetry`](telemetry) | driven adapter | logs, traces, metrics |
-//! | `jenny::server` | composition root | the `JennyServer` runtime |
+//! | `jenny::server` | composition root | the `JennyServer` runtime, and `jenny::server::telemetry` (logs, traces, metrics) |
 //!
 //! The most-used items are also re-exported flat, so ordinary application code reads
 //! `use jenny::{Context, DomainError, UseCase};`.
@@ -46,9 +45,9 @@
 //! | `server` | the runtime and composition root (implies `rest`) |
 //! | `messaging` | the event bus and messaging adapter |
 //! | `persistence` | Postgres/sqlx helpers |
-//! | `security` | authentication and RBAC |
+//! | `security` | authentication and Cedar authorization |
 //! | `openapi` | OpenAPI schemas for the REST wire types |
-//! | `telemetry-otlp` / `telemetry-prometheus` / `telemetry-loki` | telemetry backends |
+//! | `telemetry-otlp` / `telemetry-prometheus` / `telemetry-loki` | telemetry backends (imply `server`) |
 //! | `full` | every adapter and the runtime |
 
 /// One set of field constraints on an inbound DTO; a `Validate` impl and — with the
@@ -65,7 +64,6 @@ pub use jenny_core::service_version;
 pub use jenny_core::domain;
 pub use jenny_core::port;
 pub use jenny_core::task;
-pub use jenny_core::telemetry;
 
 // The everyday vocabulary, flattened.
 #[doc(no_inline)]
@@ -75,7 +73,8 @@ pub use jenny_core::domain::{
 };
 #[doc(no_inline)]
 pub use jenny_core::port::{
-    Authenticator, Authorizer, Context, EventEnvelope, EventPublisher, PublishError, UseCase,
+    AccessRequest, Authenticator, Authorizer, Context, EventEnvelope, EventPublisher, PublishError,
+    Resource, UseCase,
 };
 
 // Adapters and the runtime, behind their features.

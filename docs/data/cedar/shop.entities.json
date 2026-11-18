@@ -1,0 +1,7 @@
+[
+  {
+    "uid": { "type": "Role", "id": "CustomerSupport" },
+    "attrs": {},
+    "parents": [{ "type": "Role", "id": "Dispatch" }]
+  }
+]

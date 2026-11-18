@@ -10,7 +10,9 @@
 //! ### What the runtime brings
 //!
 //! - **Configuration** — YAML, then environment, then CLI ([`ServerConfig`], [`ConfigSource`]).
-//! - **Telemetry** — logs, traces and metrics initialised before anything else runs.
+//! - **Telemetry** — logs, traces and metrics initialised before anything else runs
+//!   ([`telemetry`]). It lives here rather than in `jenny-core`, because only the
+//!   composition root starts exporters, and the domain should not compile OpenTelemetry.
 //! - **Health** — `/health/live`, `/health/ready`, `/health/status` ([`HealthCheck`]).
 //! - **Metrics** — `/metrics`, with the `telemetry-prometheus` feature.
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the background.
@@ -41,11 +43,13 @@ mod metrics;
 #[cfg(feature = "openapi")]
 mod openapi;
 mod server;
+pub mod telemetry;
 
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
-    DEFAULT_EVENT_BUFFER, DEFAULT_EVENT_NAMESPACE, DEFAULT_FRAMEWORK_PATH, HttpConfig,
-    MessagingConfig, MetricsConfig, ServerArgs, ServerConfig,
+    DEFAULT_EVENT_BUFFER, DEFAULT_EVENT_NAMESPACE, DEFAULT_FRAMEWORK_PATH,
+    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig, MessagingConfig, MetricsConfig, ServerArgs,
+    ServerConfig,
 };
 pub use context::ServerContext;
 pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};

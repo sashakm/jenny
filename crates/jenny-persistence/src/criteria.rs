@@ -17,11 +17,15 @@
 //! 3. **Types** are checked while building, so `age:gt:banana` is a 400 at the edge
 //!    rather than a 500 from the database.
 //!
+//! Every statement is paged (see [`Page`](jenny_core::domain::Page)), and every
+//! ordering ends with the table's key column, because offset paging over an ordering
+//! with ties returns some rows twice and others never.
+//!
 //! ```
 //! use jenny_core::domain::Criteria;
 //! use jenny_persistence::criteria::{ColumnKind, Columns, SqlCriteria};
 //!
-//! let columns = Columns::new([
+//! let columns = Columns::new("id", [
 //!     ("title", "title", ColumnKind::Text),
 //!     ("created_at", "created_at", ColumnKind::Timestamp),
 //!     ("author.name", "a.name", ColumnKind::Text),
@@ -33,7 +37,8 @@
 //!
 //! let sql = SqlCriteria::build(&criteria, &columns)?;
 //! assert_eq!(sql.where_clause(), " WHERE title ILIKE $1");
-//! assert_eq!(sql.order_by(), " ORDER BY created_at DESC");
+//! assert_eq!(sql.order_by(), " ORDER BY created_at DESC, id ASC");
+//! assert_eq!(sql.page_clause(), " LIMIT 50 OFFSET 0");
 //! assert_eq!(sql.bindings(), ["%milk%"]);
 //! # Ok::<(), jenny_core::domain::DomainError>(())
 //! ```
@@ -108,43 +113,56 @@ impl ColumnKind {
 /// cannot be queried at all, and one that is can only produce the column you paired it
 /// with. Column names come from this table — never from the request — which is what
 /// makes the generated SQL safe.
-#[derive(Clone, Debug, Default)]
-pub struct Columns(BTreeMap<String, (String, ColumnKind)>);
+///
+/// `key` is a unique column (or comma-separated columns), such as the primary key. It
+/// ends every `ORDER BY`, so that rows tied on the requested sort still come back in
+/// the same order on every page.
+#[derive(Clone, Debug)]
+pub struct Columns {
+    key: &'static str,
+    paths: BTreeMap<String, (String, ColumnKind)>,
+}
 
 impl Columns {
     pub fn new(
+        key: &'static str,
         entries: impl IntoIterator<Item = (&'static str, &'static str, ColumnKind)>,
     ) -> Self {
-        Self(
-            entries
+        Self {
+            key,
+            paths: entries
                 .into_iter()
                 .map(|(path, column, kind)| (path.to_string(), (column.to_string(), kind)))
                 .collect(),
-        )
+        }
     }
 
     /// When every attribute path is already its column name and every column is text.
-    pub fn text(paths: impl IntoIterator<Item = &'static str>) -> Self {
-        Self(
-            paths
-                .into_iter()
-                .map(|path| (path.to_string(), (path.to_string(), ColumnKind::Text)))
-                .collect(),
+    pub fn text(key: &'static str, paths: impl IntoIterator<Item = &'static str>) -> Self {
+        Self::new(
+            key,
+            paths.into_iter().map(|path| (path, path, ColumnKind::Text)),
         )
     }
 
     pub fn insert(mut self, path: &str, column: &str, kind: ColumnKind) -> Self {
-        self.0.insert(path.to_string(), (column.to_string(), kind));
+        self.paths
+            .insert(path.to_string(), (column.to_string(), kind));
         self
+    }
+
+    /// The column that makes every ordering total.
+    pub fn key(&self) -> &str {
+        self.key
     }
 
     /// Every queryable path, for error messages.
     pub fn paths(&self) -> Vec<&str> {
-        self.0.keys().map(String::as_str).collect()
+        self.paths.keys().map(String::as_str).collect()
     }
 
     fn resolve(&self, path: &str) -> DomainResult<(&str, ColumnKind)> {
-        self.0
+        self.paths
             .get(path)
             .map(|(column, kind)| (column.as_str(), *kind))
             .ok_or_else(|| {
@@ -243,26 +261,27 @@ impl SqlCriteria {
         }
 
         let mut orderings = Vec::new();
+        let mut sorted_by_key = false;
         for sort in &criteria.sort {
             let (column, _) = columns.resolve(sort.path())?;
+            sorted_by_key |= column == columns.key();
             let direction = match sort.ordering() {
                 Ordering::Asc => "ASC",
                 Ordering::Desc => "DESC",
             };
             orderings.push(format!("{column} {direction}"));
         }
+        if !sorted_by_key {
+            orderings.push(format!("{} ASC", columns.key()));
+        }
 
         // The page is numeric and bounded, so it is formatted rather than bound —
         // there is no string from the request anywhere in this fragment.
-        let page_clause = if criteria.page.limit() > 0 {
-            format!(
-                " LIMIT {} OFFSET {}",
-                criteria.page.limit(),
-                criteria.page.offset()
-            )
-        } else {
-            String::new()
-        };
+        let page_clause = format!(
+            " LIMIT {} OFFSET {}",
+            criteria.page.limit(),
+            criteria.page.offset()
+        );
 
         Ok(Self {
             where_clause: if conditions.is_empty() {
@@ -270,11 +289,7 @@ impl SqlCriteria {
             } else {
                 format!(" WHERE {}", conditions.join(" AND "))
             },
-            order_by: if orderings.is_empty() {
-                String::new()
-            } else {
-                format!(" ORDER BY {}", orderings.join(", "))
-            },
+            order_by: format!(" ORDER BY {}", orderings.join(", ")),
             page_clause,
             bindings,
         })
@@ -285,12 +300,12 @@ impl SqlCriteria {
         &self.where_clause
     }
 
-    /// `" ORDER BY …"`, or empty.
+    /// `" ORDER BY …"`, always ending with the key column.
     pub fn order_by(&self) -> &str {
         &self.order_by
     }
 
-    /// `" LIMIT n OFFSET m"`, or empty when no page size was asked for.
+    /// `" LIMIT n OFFSET m"`. Never empty: an unpaged request gets the default page.
     pub fn page_clause(&self) -> &str {
         &self.page_clause
     }
@@ -323,14 +338,17 @@ mod tests {
     use super::*;
 
     fn columns() -> Columns {
-        Columns::new([
-            ("title", "title", ColumnKind::Text),
-            ("age", "age", ColumnKind::Integer),
-            ("archived", "archived", ColumnKind::Bool),
-            ("id", "id", ColumnKind::Uuid),
-            ("created_at", "created_at", ColumnKind::Timestamp),
-            ("author.name", "a.name", ColumnKind::Text),
-        ])
+        Columns::new(
+            "id",
+            [
+                ("title", "title", ColumnKind::Text),
+                ("age", "age", ColumnKind::Integer),
+                ("archived", "archived", ColumnKind::Bool),
+                ("id", "id", ColumnKind::Uuid),
+                ("created_at", "created_at", ColumnKind::Timestamp),
+                ("author.name", "a.name", ColumnKind::Text),
+            ],
+        )
     }
 
     fn build(query: &str) -> DomainResult<SqlCriteria> {
@@ -353,13 +371,21 @@ mod tests {
     }
 
     #[test]
-    fn nothing_asked_for_produces_nothing() {
+    fn nothing_asked_for_is_still_ordered_and_paged() {
         let sql = SqlCriteria::build(&Criteria::new(), &columns()).unwrap();
         assert_eq!(sql.where_clause(), "");
-        assert_eq!(sql.order_by(), "");
-        assert_eq!(sql.page_clause(), "");
+        assert_eq!(sql.order_by(), " ORDER BY id ASC");
+        assert_eq!(sql.page_clause(), " LIMIT 50 OFFSET 0");
         assert!(sql.bindings().is_empty());
-        assert_eq!(sql.tail(), "");
+        assert_eq!(sql.tail(), " ORDER BY id ASC LIMIT 50 OFFSET 0");
+    }
+
+    #[test]
+    fn the_key_is_not_repeated_when_the_client_sorts_by_it() {
+        let columns = columns().insert("id", "id", ColumnKind::Uuid);
+        let criteria = Criteria::new().with_sort("-id".parse().unwrap());
+        let sql = SqlCriteria::build(&criteria, &columns).unwrap();
+        assert_eq!(sql.order_by(), " ORDER BY id DESC");
     }
 
     #[test]
@@ -373,7 +399,7 @@ mod tests {
     fn a_path_maps_to_its_configured_column() {
         let sql = build("filter=author.name:eq:bo&sort=author.name").unwrap();
         assert_eq!(sql.where_clause(), " WHERE a.name = $1");
-        assert_eq!(sql.order_by(), " ORDER BY a.name ASC");
+        assert_eq!(sql.order_by(), " ORDER BY a.name ASC, id ASC");
     }
 
     #[test]
@@ -437,7 +463,10 @@ mod tests {
     #[test]
     fn sorting_renders_both_directions_in_order() {
         let sql = build("sort=-created_at&sort=title").unwrap();
-        assert_eq!(sql.order_by(), " ORDER BY created_at DESC, title ASC");
+        assert_eq!(
+            sql.order_by(),
+            " ORDER BY created_at DESC, title ASC, id ASC"
+        );
     }
 
     #[test]
@@ -500,7 +529,7 @@ mod tests {
 
     #[test]
     fn text_shorthand_maps_paths_to_themselves() {
-        let columns = Columns::text(["title", "body"]);
+        let columns = Columns::text("id", ["title", "body"]);
         assert_eq!(columns.paths(), ["body", "title"]);
 
         let criteria = jenny_rest_free_parse("filter=body:contains:x").unwrap();

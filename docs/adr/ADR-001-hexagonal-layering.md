@@ -103,7 +103,7 @@ Two deviations from the usual diagrams, both forced and both worth naming:
 | Credential extraction | inbound adapter (per protocol) |
 | Credential verification | driven adapter, behind the `Authenticator` port |
 | Coarse endpoint authorization | inbound adapter, via the `Authorizer` port |
-| Data-dependent authorization | domain service — written once, enforced on every transport |
+| Data-dependent authorization | domain service, via `Context::authorize` — written once, enforced on every transport (ADR-011) |
 | Protocol status mapping | inbound adapter |
 | Wiring | composition root |
 

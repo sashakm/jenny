@@ -61,16 +61,13 @@ where
         notes.retain(|note| criteria.filter.iter().all(|f| matches(note, f)));
         sort_notes(&mut notes, criteria);
 
-        // Paging last, so it slices the result the client actually asked for.
-        if criteria.page.limit() > 0 {
-            let offset = criteria.page.offset() as usize;
-            notes = notes
-                .into_iter()
-                .skip(offset)
-                .take(criteria.page.limit() as usize)
-                .collect();
-        }
-        Ok(notes)
+        // Paging last, so it slices the result the client actually asked for. Every
+        // listing is paged; an unpaged request gets the default page size.
+        Ok(notes
+            .into_iter()
+            .skip(criteria.page.offset() as usize)
+            .take(criteria.page.limit() as usize)
+            .collect())
     }
 
     pub async fn fetch(&self, id: NoteId, _cx: &Context) -> DomainResult<Note> {
@@ -118,7 +115,8 @@ where
     /// does not change.
     async fn publish(&self, event: &(impl DomainEvent + EventPayload), cx: &Context) {
         let envelope = match EventEnvelope::json(event.name(), &event.payload()) {
-            Ok(envelope) => envelope,
+            // Listeners can trace the event back to the request that raised it.
+            Ok(envelope) => envelope.correlated_with(cx),
             Err(e) => {
                 tracing::error!(request_id = %cx.request_id(), "could not encode event: {e}");
                 return;

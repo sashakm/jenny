@@ -19,7 +19,9 @@ async fn test_api_key_store_refresh() {
         .expect("Failed to write initial data");
     temp_file.flush().expect("Failed to flush");
 
-    let store = ApiKeyAuthContextConfig::new_file_backed(&temp_path);
+    // Look at the file on every lookup, so each rewrite below is seen immediately.
+    let store = ApiKeyAuthContextConfig::new_file_backed(&temp_path)
+        .with_refresh_interval(std::time::Duration::ZERO);
 
     assert_eq!(
         store.get("key1").await.unwrap(),
@@ -127,5 +129,52 @@ async fn test_api_key_store_refresh() {
     assert_eq!(
         store.get("key5").await.unwrap(),
         Some(json!({"user_id": 5, "name": "Eve", "role": "moderator"}))
+    );
+}
+
+#[tokio::test]
+async fn a_broken_rewrite_keeps_the_previous_store() {
+    let file = NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), r#"{"key1": {"id": "alice"}}"#).unwrap();
+    let store = ApiKeyAuthContextConfig::new_file_backed(&file.path().to_string_lossy())
+        .with_refresh_interval(std::time::Duration::ZERO);
+    assert_eq!(
+        store.get("key1").await.unwrap(),
+        Some(json!({"id": "alice"}))
+    );
+
+    std::fs::write(file.path(), "{ not json").unwrap();
+    assert_eq!(
+        store.get("key1").await.unwrap(),
+        Some(json!({"id": "alice"})),
+        "a malformed edit must not lock every client out"
+    );
+
+    std::fs::remove_file(file.path()).unwrap();
+    assert_eq!(
+        store.get("key1").await.unwrap(),
+        Some(json!({"id": "alice"}))
+    );
+}
+
+#[tokio::test]
+async fn a_store_that_never_loaded_fails_without_naming_its_path() {
+    let store = ApiKeyAuthContextConfig::new_file_backed("/nonexistent/keys.json");
+    let err = store.get::<Value>("key1").await.unwrap_err().to_string();
+    assert_eq!(err, "the api key store is unavailable");
+}
+
+#[tokio::test]
+async fn the_file_is_not_looked_at_more_often_than_the_interval() {
+    let file = NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), r#"{"key1": {"id": "alice"}}"#).unwrap();
+    let store = ApiKeyAuthContextConfig::new_file_backed(&file.path().to_string_lossy())
+        .with_refresh_interval(std::time::Duration::from_secs(3600));
+    assert!(store.get::<Value>("key1").await.unwrap().is_some());
+
+    std::fs::write(file.path(), r#"{"key2": {"id": "bob"}}"#).unwrap();
+    assert!(
+        store.get::<Value>("key2").await.unwrap().is_none(),
+        "the rewrite is only picked up once the interval has passed"
     );
 }

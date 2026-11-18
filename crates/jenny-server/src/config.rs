@@ -20,6 +20,8 @@
 //!   address: "[::]:8000"
 //!   api_path: /api        # where REST adapters mount
 //!   framework_path: /j    # where health, metrics and OpenAPI live
+//!   shutdown_delay_seconds: 5     # keep serving, reported not ready, before closing
+//!   shutdown_timeout_seconds: 30  # then wait at most this long for in-flight requests
 //!   metrics:
 //!     auth:               # optional; omit to leave the scrape endpoint open
 //!       username: prometheus
@@ -35,8 +37,8 @@
 //!     greeting: "hello"
 //! ```
 
+use crate::telemetry::TelemetryConfig;
 use clap::Parser;
-use jenny_core::telemetry::TelemetryConfig;
 use jenny_rest::DEFAULT_API_PATH;
 use serde::{Deserialize, de::DeserializeOwned};
 
@@ -51,6 +53,8 @@ pub const DEFAULT_ENV_PREFIX: &str = "JENNY";
 pub const DEFAULT_BODY_LIMIT: usize = 256 * 1024;
 /// Default prefix for the framework's own endpoints.
 pub const DEFAULT_FRAMEWORK_PATH: &str = "/j";
+/// Default bound on draining in-flight requests at shutdown.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u64 = 30;
 /// Default in-process event bus buffer.
 pub const DEFAULT_EVENT_BUFFER: usize = 64;
 /// Topic prefix used when neither `messaging.namespace` nor `telemetry.service_name`
@@ -112,6 +116,20 @@ pub struct HttpConfig {
     pub health: bool,
     /// The metrics scrape endpoint.
     pub metrics: MetricsConfig,
+    /// After `SIGTERM` (or `SIGINT`, or [`ServerHandle::shutdown`]), how long to keep
+    /// accepting requests while `/health/ready` already reports the server as stopping.
+    ///
+    /// On Kubernetes the pod is removed from the load balancer at the same time as it
+    /// is told to stop, not before, so for a few seconds new requests still arrive.
+    /// Closing the listener at once refuses them; a delay of about five seconds lets the
+    /// endpoint removal catch up. Defaults to `0`.
+    ///
+    /// [`ServerHandle::shutdown`]: crate::ServerHandle::shutdown
+    pub shutdown_delay_seconds: u64,
+    /// Once the listener is closed, how long in-flight requests may take to finish
+    /// before the server stops waiting for them. Defaults to `30`, which is what
+    /// Kubernetes waits before it kills the pod.
+    pub shutdown_timeout_seconds: u64,
 }
 
 impl Default for HttpConfig {
@@ -123,6 +141,8 @@ impl Default for HttpConfig {
             framework_path: DEFAULT_FRAMEWORK_PATH.to_string(),
             health: true,
             metrics: MetricsConfig::default(),
+            shutdown_delay_seconds: 0,
+            shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
         }
     }
 }

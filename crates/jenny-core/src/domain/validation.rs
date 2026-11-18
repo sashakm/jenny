@@ -40,8 +40,6 @@
 
 use std::fmt::Display;
 
-use super::error::DomainError;
-
 /// One thing that was wrong, optionally pinned to a field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationIssue {
@@ -104,12 +102,6 @@ impl Display for ValidationErrors {
     }
 }
 
-impl From<ValidationErrors> for DomainError {
-    fn from(errors: ValidationErrors) -> Self {
-        DomainError::invalid(errors.to_string())
-    }
-}
-
 /// A type that knows its own domain rules.
 pub trait Validate {
     fn validate(&self) -> Result<(), ValidationErrors>;
@@ -118,6 +110,7 @@ pub trait Validate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::DomainError;
 
     struct Note {
         title: String,
@@ -148,21 +141,48 @@ mod tests {
         assert_eq!(errors.to_string(), "title: must not be empty");
     }
 
+    /// Breaks both of its rules at once.
+    struct Draft {
+        title: String,
+        body: String,
+    }
+
+    impl Validate for Draft {
+        fn validate(&self) -> Result<(), ValidationErrors> {
+            let mut errors = ValidationErrors::default();
+            if self.title.is_empty() {
+                errors.push_field("title", "must not be empty");
+            }
+            if self.body.len() > 4 {
+                errors.push_field("body", "must be at most 4 characters");
+            }
+            errors.into_result()
+        }
+    }
+
     #[test]
     fn every_issue_is_collected_not_just_the_first() {
-        let errors = Note {
+        let errors = Draft {
             title: String::new(),
+            body: "far too long".into(),
         }
         .validate()
         .unwrap_err();
-        assert_eq!(errors.issues().len(), 1);
+        assert_eq!(errors.issues().len(), 2);
+        assert_eq!(
+            errors.to_string(),
+            "title: must not be empty; body: must be at most 4 characters"
+        );
+    }
 
+    #[test]
+    fn an_issue_about_the_whole_value_has_no_field() {
         let long = Note {
             title: "waaaaay too long".into(),
         }
         .validate()
         .unwrap_err();
-        assert_eq!(long.issues().len(), 1);
+        assert_eq!(long.issues()[0].field, None);
         let error: DomainError = long.into();
         assert!(matches!(error, DomainError::Invalid { .. }));
         assert!(error.to_string().contains("note is too large"));

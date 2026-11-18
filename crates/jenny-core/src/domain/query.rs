@@ -79,10 +79,27 @@ impl FromStr for Ordering {
 /// # Ok::<(), jenny_core::domain::DomainError>(())
 /// ```
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "SortFields")]
 pub struct Sort {
     path: String,
     #[serde(default)]
     ordering: Ordering,
+}
+
+/// What a [`Sort`] deserialises from, so that the path is validated on that way in too.
+#[derive(Deserialize)]
+struct SortFields {
+    path: String,
+    #[serde(default)]
+    ordering: Ordering,
+}
+
+impl TryFrom<SortFields> for Sort {
+    type Error = DomainError;
+
+    fn try_from(fields: SortFields) -> DomainResult<Self> {
+        Sort::new(fields.path, fields.ordering)
+    }
 }
 
 impl Sort {
@@ -207,11 +224,29 @@ impl FromStr for Check {
 /// # Ok::<(), jenny_core::domain::DomainError>(())
 /// ```
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "FilterFields")]
 pub struct Filter {
     path: String,
     #[serde(default)]
     check: Check,
     value: String,
+}
+
+/// What a [`Filter`] deserialises from, so that the path is validated on that way in too.
+#[derive(Deserialize)]
+struct FilterFields {
+    path: String,
+    #[serde(default)]
+    check: Check,
+    value: String,
+}
+
+impl TryFrom<FilterFields> for Filter {
+    type Error = DomainError;
+
+    fn try_from(fields: FilterFields) -> DomainResult<Self> {
+        Filter::new(fields.path, fields.check, fields.value)
+    }
 }
 
 impl Filter {
@@ -269,7 +304,16 @@ impl FromStr for Filter {
     }
 }
 
+/// How many entries a page holds when the client did not say.
+pub const DEFAULT_PAGE_SIZE: u32 = 50;
+/// The most entries a page may hold. A listing is never unbounded: a table that grows
+/// must not turn one request into a full scan shipped over the wire.
+pub const MAX_PAGE_SIZE: u32 = 1000;
+
 /// Which slice of a listing to return. Pages are 1-based.
+///
+/// Every listing is paged: without a size it is [`DEFAULT_PAGE_SIZE`] entries, and no
+/// size goes above [`MAX_PAGE_SIZE`].
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Page {
     #[serde(default)]
@@ -286,14 +330,17 @@ impl Page {
     /// How many entries to skip. Page `0` is treated as page `1` rather than
     /// underflowing.
     pub fn offset(&self) -> u32 {
-        self.size
-            .unwrap_or_default()
+        self.limit()
             .saturating_mul(self.number.unwrap_or(1).saturating_sub(1))
     }
 
-    /// How many entries to return. Zero means "unset" — apply your own default.
+    /// How many entries to return: the requested size, [`DEFAULT_PAGE_SIZE`] when none
+    /// (or zero) was requested, and never more than [`MAX_PAGE_SIZE`].
     pub fn limit(&self) -> u32 {
-        self.size.unwrap_or_default()
+        self.size
+            .filter(|size| *size > 0)
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .min(MAX_PAGE_SIZE)
     }
 
     pub fn number(&self) -> Option<u32> {
@@ -516,7 +563,6 @@ mod tests {
 
     #[test]
     fn paging_is_one_based_and_does_not_underflow() {
-        assert_eq!(Page::default().limit(), 0);
         assert_eq!(Page::default().offset(), 0);
         assert!(Page::default().is_unset());
 
@@ -559,5 +605,39 @@ mod tests {
             assert_eq!(parsed.to_string(), input);
             assert_eq!(parsed.to_string().parse::<Filter>().unwrap(), parsed);
         }
+    }
+
+    #[test]
+    fn deserialising_validates_paths_like_parsing_does() {
+        let criteria: Criteria = serde_json::from_str(
+            r#"{ "sort": [{ "path": "title", "ordering": "desc" }], "filter": [{ "path": "author.name", "value": "x" }] }"#,
+        )
+        .unwrap();
+        assert_eq!(criteria.sort[0].path(), "title");
+        assert_eq!(criteria.filter[0].check(), Check::Eq);
+
+        for hostile in [
+            r#"{ "sort": [{ "path": "title; DROP TABLE notes" }] }"#,
+            r#"{ "filter": [{ "path": "a'--", "value": "x" }] }"#,
+            r#"{ "filter": [{ "path": "", "value": "x" }] }"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Criteria>(hostile).is_err(),
+                "{hostile} must not deserialise"
+            );
+        }
+    }
+
+    #[test]
+    fn every_page_is_bounded() {
+        assert_eq!(Page::default().limit(), DEFAULT_PAGE_SIZE);
+        assert_eq!(Page::new(None, Some(0)).limit(), DEFAULT_PAGE_SIZE);
+        assert_eq!(Page::new(None, Some(20)).limit(), 20);
+        assert_eq!(Page::new(None, Some(u32::MAX)).limit(), MAX_PAGE_SIZE);
+        assert_eq!(Page::new(Some(3), None).offset(), 2 * DEFAULT_PAGE_SIZE);
+        assert_eq!(
+            Page::new(Some(u32::MAX), Some(MAX_PAGE_SIZE)).offset(),
+            u32::MAX
+        );
     }
 }

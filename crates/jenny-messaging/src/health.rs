@@ -10,12 +10,12 @@ use crate::eventbus::EventBus;
 /// Readiness of the in-process event bus.
 ///
 /// The bus is healthy while its channel is open. A closed channel means the broker's
-/// event loop has stopped, which is worth surfacing: publishes will keep being accepted
-/// by the port and silently go nowhere, and a service in that state should stop taking
-/// traffic.
+/// event loop has stopped, which is worth surfacing: every publish through the port now
+/// fails, and a service in that state should stop taking traffic.
 ///
-/// The runtime registers this for you when the `messaging` feature is on, because it
-/// owns the broker — unlike a database pool, which is yours.
+/// The runtime registers this for you once the bus exists, that is after
+/// `JennyServer::events` was called, because it owns the broker — unlike a database
+/// pool, which is yours.
 pub struct EventBusCheck {
     name: String,
     channel: mpsc::Sender<EventMessage>,

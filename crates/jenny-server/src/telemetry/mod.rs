@@ -20,7 +20,7 @@
 //! process — dropping it triggers a graceful flush of all OTel exporters.
 //!
 //! ```ignore
-//! use jenny_core::telemetry::{TelemetryConfig, LogFormat};
+//! use jenny_server::telemetry::{TelemetryConfig, LogFormat};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -84,7 +84,7 @@ pub struct TelemetryConfig {
     ///
     /// Usually your crate's version. The framework cannot read it for you — `env!`
     /// expands where it is written, which for framework code is the framework's own
-    /// manifest — so pass [`service_version!`](crate::service_version) from your
+    /// manifest — so pass [`service_version!`](jenny_core::service_version) from your
     /// binary, or set it here.
     #[serde(default)]
     pub service_version: Option<String>,

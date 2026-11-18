@@ -30,19 +30,16 @@ server = ["dep:jenny-server", "rest"]
 messaging = ["dep:jenny-messaging", "jenny-server?/messaging"]
 # Postgres/sqlx persistence helpers (driven adapter).
 persistence = ["dep:jenny-persistence"]
-# Authentication (JWT, API key) and RBAC authorization components.
+# Authentication (JWT, API key) and Cedar policy authorization.
 security = ["dep:jenny-security"]
 # OpenAPI schema generation for the REST wire types.
 openapi = ["jenny-macros/openapi", "jenny-rest?/openapi", "jenny-server?/openapi"]
 # A browsable Swagger UI, assets compiled in.
 swagger-ui = ["openapi", "jenny-server?/swagger-ui"]
-# Telemetry backends (forwarded to jenny-core / jenny-server).
-telemetry-otlp = ["jenny-core/telemetry-otlp"]
-telemetry-prometheus = [
-    "jenny-core/telemetry-prometheus",
-    "jenny-server?/telemetry-prometheus",
-]
-telemetry-loki = ["jenny-core/telemetry-loki"]
+# Telemetry backends, started by the server runtime (so they imply it).
+telemetry-otlp = ["server", "jenny-server/telemetry-otlp"]
+telemetry-prometheus = ["server", "jenny-server/telemetry-prometheus"]
+telemetry-loki = ["server", "jenny-server/telemetry-loki"]
 # Everything.
 full = ["rest", "server", "messaging", "persistence", "security", "openapi"]
 
@@ -54,7 +51,7 @@ futures = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 tracing = { workspace = true }
 utoipa = { workspace = true }
 uuid = { workspace = true }

@@ -1,7 +1,10 @@
 //! The REST driving adapter.
 
-use axum::Router;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use axum::routing::Route;
+use axum::{Extension, Router};
 
 use jenny_core::domain::{Label, Urn};
 
@@ -9,14 +12,14 @@ use crate::routes::{Endpoint, Routes};
 
 /// A description of one mounted resource, for `/health/status` and OpenAPI.
 #[derive(Clone, Debug)]
-pub struct Resource {
+pub struct MountedResource {
     urn: Urn,
     description: Option<String>,
     labels: Vec<Label>,
     endpoints: Vec<Endpoint>,
 }
 
-impl Resource {
+impl MountedResource {
     pub fn urn(&self) -> &Urn {
         &self.urn
     }
@@ -81,7 +84,7 @@ pub struct RestAdapter {
     /// runtime knows if it may apply the configured default.
     path_is_explicit: bool,
     description: Option<String>,
-    resources: Vec<Resource>,
+    resources: Vec<MountedResource>,
     router: Router,
     #[cfg(feature = "openapi")]
     openapi: Option<utoipa::openapi::OpenApi>,
@@ -168,7 +171,7 @@ impl RestAdapter {
     /// Mount a resource. Fails when the resource's name is not a valid URN segment.
     pub fn mount(mut self, routes: Routes) -> anyhow::Result<Self> {
         let urn = self.urn.clone().child(routes.name())?;
-        self.resources.push(Resource {
+        self.resources.push(MountedResource {
             urn: urn.clone(),
             description: routes.description().map(ToOwned::to_owned),
             labels: routes.labels().to_vec(),
@@ -214,17 +217,51 @@ impl RestAdapter {
         self.description.as_deref()
     }
 
-    pub fn resources(&self) -> &[Resource] {
+    pub fn resources(&self) -> &[MountedResource] {
         &self.resources
     }
 
     /// The finished router, nested under [`path`](Self::path).
     pub fn into_router(self) -> Router {
-        if self.path.is_empty() {
+        let table = RouteTable::new(&self.path, &self.resources);
+        let router = if self.path.is_empty() {
             self.router
         } else {
             Router::new().nest(&self.path, self.router)
+        };
+        // Outermost, so that every layer applied to the adapter can read it.
+        router.layer(Extension(table))
+    }
+}
+
+/// Which resource each route template belongs to, keyed the way axum reports a
+/// [`MatchedPath`](axum::extract::MatchedPath): mount path included.
+///
+/// [`Routes`] stamps its URN onto requests too, but from a layer *inside* any layer
+/// applied to the adapter, so the authorization layer could never see it. This table is
+/// installed outside all of them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RouteTable(Arc<HashMap<String, Urn>>);
+
+impl RouteTable {
+    fn new(mount_path: &str, resources: &[MountedResource]) -> Self {
+        let mut table = HashMap::new();
+        for resource in resources {
+            for endpoint in resource.endpoints() {
+                let template = match (mount_path, endpoint.path.as_str()) {
+                    ("", path) => path.to_string(),
+                    (prefix, "/") => prefix.to_string(),
+                    (prefix, path) => format!("{prefix}{path}"),
+                };
+                table.insert(template, resource.urn().clone());
+            }
         }
+        Self(Arc::new(table))
+    }
+
+    /// The URN of the resource whose route matched.
+    pub(crate) fn resource_of(&self, template: &str) -> Option<&Urn> {
+        self.0.get(template)
     }
 }
 
@@ -382,6 +419,58 @@ mod tests {
                 .unwrap();
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert_eq!(String::from_utf8(bytes.to_vec()).unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_route_table_is_keyed_like_axum_reports_the_matched_path() {
+        use axum::extract::{MatchedPath, Request};
+        use axum::middleware::{Next, from_fn};
+
+        // Echo what a layer applied to the adapter sees: the matched template, and the
+        // resource the table files it under.
+        async fn echo(req: Request, _: Next) -> axum::response::Response {
+            let template = req
+                .extensions()
+                .get::<MatchedPath>()
+                .unwrap()
+                .as_str()
+                .to_owned();
+            let urn = req
+                .extensions()
+                .get::<RouteTable>()
+                .and_then(|table| table.resource_of(&template))
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            format!("{template} {urn}").into_response()
+        }
+        use axum::response::IntoResponse;
+
+        for (mount, uri, expected) in [
+            ("/api", "/api/orders/7", "/api/orders/{id} urn:shop:orders"),
+            ("/api", "/api", "/api urn:shop:root"),
+            ("/", "/orders/7", "/orders/{id} urn:shop:orders"),
+            ("/", "/", "/ urn:shop:root"),
+        ] {
+            let app = RestAdapter::new("shop")
+                .unwrap()
+                .at(mount)
+                .mount(Routes::new("orders").get("/orders/{id}", || async { "" }))
+                .unwrap()
+                .mount(Routes::new("root").get("/", || async { "" }))
+                .unwrap()
+                .layer(from_fn(echo))
+                .into_router();
+            let response = app
+                .oneshot(http::Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                String::from_utf8(bytes.to_vec()).unwrap(),
+                expected,
+                "{mount} {uri}"
+            );
         }
     }
 }

@@ -34,6 +34,14 @@ pub struct {{resource_pascal}}Request {
     name: String,
 }
 
+{{#if openapi}}
+/// This resource's part of the OpenAPI document. The runtime merges it with every other
+/// adapter's and serves it at `<framework_path>/openapi.json`.
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas({{resource_pascal}}Request)))]
+pub struct {{resource_pascal}}Api;
+
+{{/if}}
 /// What this protocol returns.
 #[derive(Debug, Serialize)]
 pub struct {{resource_pascal}}Response {

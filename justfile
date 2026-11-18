@@ -27,8 +27,8 @@ features:
   for f in "" telemetry-otlp telemetry-loki telemetry-prometheus \
            telemetry-otlp,telemetry-prometheus telemetry-loki,telemetry-prometheus \
            telemetry-otlp,telemetry-loki telemetry-otlp,telemetry-loki,telemetry-prometheus; do
-    echo "==> jenny-core [${f:-none}]"
-    cargo check -p jenny-core --no-default-features ${f:+--features "$f"}
+    echo "==> jenny-server [${f:-none}]"
+    cargo check -p jenny-server --no-default-features ${f:+--features "$f"}
   done
   for f in "" rest server messaging persistence security openapi \
            server,openapi server,swagger-ui server,messaging server,messaging,openapi \
@@ -104,8 +104,13 @@ test: ci-test
 
 # Package every publishable crate and build each tarball against the others, the way
 # crates.io will see them. Nothing is uploaded; release-plz publishes (release-plz.toml).
+#
+# The tarballs are verified through a temporary local registry, which cargo extracts
+# into `registry/src/-<hash>/` once per crate *version*. Without a version bump a second
+# run would build against the first run's sources, so those extractions are cleared.
 [doc('package and verify every publishable crate without uploading')]
 package *args:
+  rm -rf "${CARGO_HOME:-$HOME/.cargo}"/registry/src/-*/jenny-* "${CARGO_HOME:-$HOME/.cargo}"/registry/src/-*/cargo-jenny-*
   cargo package --workspace {{args}}
 
 # Build against the declared `rust-version` (needs `rustup toolchain install 1.94`).

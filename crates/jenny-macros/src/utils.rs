@@ -7,6 +7,7 @@ pub(crate) fn apply_casing(casing: &str, value: &str) -> Result<String, darling:
         "UPPERCASE" => value.split('_').collect::<String>().to_uppercase(),
         "PascalCase" => stringcase::pascal_case(value),
         "SCREAMING_SNAKE_CASE" => value.to_uppercase(),
+        "SCREAMING-KEBAB-CASE" => value.to_uppercase().replace('_', "-"),
         _ => return Err(darling::Error::custom("Unsupported renaming pattern")),
     };
     Ok(renamed)
@@ -27,6 +28,7 @@ mod tests {
             ("UPPERCASE", "FRANKNORD"),
             ("PascalCase", "FrankNord"),
             ("SCREAMING_SNAKE_CASE", "FRANK_NORD"),
+            ("SCREAMING-KEBAB-CASE", "FRANK-NORD"),
         ];
         for case in cases {
             assert_eq!(apply_casing(case.0, base).unwrap(), case.1)

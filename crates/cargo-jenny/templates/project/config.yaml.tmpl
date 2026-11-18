@@ -11,6 +11,11 @@ server:
   api_path: /api
   # Where health, metrics and OpenAPI live, namespaced away from your API.
   framework_path: /j
+  # After SIGTERM, keep serving (reported not ready) this long before closing, so a
+  # load balancer can stop routing here first. About 5 on Kubernetes.
+  # shutdown_delay_seconds: 5
+  # Then wait at most this long for in-flight requests and scheduled runs.
+  # shutdown_timeout_seconds: 30
   # metrics:
   #   auth:
   #     username: prometheus

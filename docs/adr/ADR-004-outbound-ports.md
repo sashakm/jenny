@@ -44,13 +44,13 @@ adapter/outbound/persistence/   PgNoteRepository          (impl — uses jenny-p
 miss to `NotFound` and everything else to `Internal` — a dropped connection is not the
 caller's mistake and must not be reported as one.
 
-### The framework ships three ports, because their shape does not vary
+### The framework ships four ports, because their shape does not vary
 
 | Port | Driven adapter |
 |---|---|
 | `EventPublisher` | `adapter/outbound/eventbus` — in-process bus, broker, outbox relay |
 | `Authenticator` | `adapter/outbound/security` — JWT/JWKS verification, API-key lookup |
-| `Authorizer` | `adapter/outbound/security` — RBAC, policy engine |
+| `Authorizer` | `adapter/outbound/security` — a policy engine; jenny ships Cedar (ADR-011) |
 | `HealthCheck` | any driven adapter reporting whether it is usable |
 
 These are universal in a way a repository is not: "turn credentials into a principal" and
@@ -63,7 +63,7 @@ depending on the runtime. Putting the trait in the runtime would have inverted t
 edge; putting it in the core lets each adapter implement it and lets the runtime merely
 aggregate.
 
-All three are object-safe, so the composition root can choose between `Arc<dyn …>` and a
+All four are object-safe, so the composition root can choose between `Arc<dyn …>` and a
 monomorphised generic without the port changing. That is a wiring decision, not a design
 one.
 

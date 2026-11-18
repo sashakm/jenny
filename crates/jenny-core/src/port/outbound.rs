@@ -10,20 +10,24 @@
 //! |---|---|
 //! | [`EventPublisher`] | `adapter/outbound/eventbus` — the in-process bus, a broker, an outbox relay |
 //! | [`Authenticator`] | `adapter/outbound/security` — JWT/JWK verification, API-key lookup |
-//! | [`Authorizer`] | `adapter/outbound/security` — RBAC, policy engine |
+//! | [`Authorizer`] | `adapter/outbound/security` — a policy engine (jenny ships Cedar) |
 //! | [`HealthCheck`] | any driven adapter reporting whether it is usable |
 //!
-//! All three are object-safe, so the composition root can choose between
+//! All four are object-safe, so the composition root can choose between
 //! `Arc<dyn EventPublisher>` and a monomorphised generic without the port changing.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::{Map, Value};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::domain::{AuthenticationError, AuthorizationError, Credentials, Principal};
+use crate::port::Context;
 
 /// Publishing an event failed.
 #[derive(Debug, Error)]
@@ -49,19 +53,45 @@ impl PublishError {
 /// an envelope on its way to the [`EventPublisher`]. That conversion is where serde
 /// enters — one ring out from the domain, mirroring how a DTO is converted into a
 /// command on the way in.
+///
+/// Besides the payload an envelope carries what a consumer needs to correlate and
+/// deduplicate: a unique [`id`](Self::id), when it [occurred](Self::timestamp), the
+/// [correlation id](Self::correlation_id) of the request that caused it, and free-form
+/// [headers](Self::headers) (a `traceparent`, a tenant). They are metadata rather than
+/// arguments to [`EventPublisher::publish`] so that an outbox can store and replay an
+/// envelope unchanged.
+///
+/// ```
+/// use jenny_core::port::{Context, EventEnvelope};
+///
+/// let cx = Context::new();
+/// let envelope = EventEnvelope::json("note.created", &serde_json::json!({ "id": 7 }))?
+///     .correlated_with(&cx)
+///     .with_header("tenant", "acme");
+///
+/// assert_eq!(envelope.correlation_id(), Some(cx.request_id()));
+/// assert_eq!(envelope.headers()["tenant"], "acme");
+/// # Ok::<(), jenny_core::port::PublishError>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventEnvelope {
+    id: Uuid,
     name: String,
     occurred_at: DateTime<Utc>,
+    correlation_id: Option<Uuid>,
+    headers: BTreeMap<String, String>,
     payload: Vec<u8>,
 }
 
 impl EventEnvelope {
-    /// Wrap an already-encoded payload.
+    /// Wrap an already-encoded payload, under a fresh id.
     pub fn new(name: impl Into<String>, payload: impl Into<Vec<u8>>) -> Self {
         Self {
+            id: Uuid::new_v4(),
             name: name.into(),
             occurred_at: Utc::now(),
+            correlation_id: None,
+            headers: BTreeMap::new(),
             payload: payload.into(),
         }
     }
@@ -78,9 +108,47 @@ impl EventEnvelope {
         self
     }
 
+    /// Override the id, which otherwise is fresh. An outbox replaying an envelope keeps
+    /// its original id, so a consumer can recognise the duplicate.
+    pub fn with_id(mut self, id: Uuid) -> Self {
+        self.id = id;
+        self
+    }
+
+    /// Correlate the event with the invocation that raised it, by that invocation's
+    /// request id.
+    pub fn correlated_with(self, cx: &Context) -> Self {
+        self.with_correlation_id(cx.request_id())
+    }
+
+    pub fn with_correlation_id(mut self, id: Uuid) -> Self {
+        self.correlation_id = Some(id);
+        self
+    }
+
+    /// Add a header. Setting one again replaces its value.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Unique per event, and kept across a replay.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
     /// The routing name, taken from the domain event.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The request id of the invocation that raised the event, if it was correlated.
+    pub fn correlation_id(&self) -> Option<Uuid> {
+        self.correlation_id
+    }
+
+    pub fn headers(&self) -> &BTreeMap<String, String> {
+        &self.headers
     }
 
     pub fn timestamp(&self) -> DateTime<Utc> {
@@ -186,20 +254,140 @@ pub trait HealthCheck: Send + Sync + 'static {
 
 /// Decides whether a known identity may perform an action on a resource.
 ///
-/// This is the *coarse*, mechanism-backed check an inbound adapter can run before
-/// dispatching — is this caller allowed to `POST` to this endpoint at all. Fine-grained
-/// rules that depend on the data itself ("may this user edit *this* note") are domain
-/// logic and belong in a domain service, written once and enforced on every transport.
+/// One port for both kinds of question a service asks:
+///
+/// - the **coarse** one an inbound adapter asks before dispatching: may this caller
+///   `POST` to this route at all. `jenny-rest`'s `Authorization` layer asks it for every
+///   request.
+/// - the **fine-grained** one that depends on the data: may this caller archive *this*
+///   note, which belongs to someone else. A use case asks it through
+///   [`Context::authorize`](crate::port::Context::authorize), after loading the note,
+///   so the rule holds on every transport.
+///
+/// The request is phrased in the principal/action/resource/context shape every policy
+/// engine shares, without naming one, so the domain never imports the engine.
+/// `jenny-security` implements it with [Cedar](https://www.cedarpolicy.com).
 #[async_trait]
 pub trait Authorizer: Send + Sync + 'static {
-    /// `action` is the protocol's verb (an HTTP method, a message kind); `resource`
-    /// identifies what is being acted on (a matched path, a [`Urn`](crate::domain::Urn)).
     async fn authorize(
         &self,
         principal: &Principal,
-        action: &str,
-        resource: &str,
+        request: &AccessRequest,
     ) -> Result<(), AuthorizationError>;
+}
+
+/// What a caller asks to do: an action on a [`Resource`], plus facts about the request.
+///
+/// ```
+/// use jenny_core::port::outbound::{AccessRequest, Resource};
+///
+/// let request = AccessRequest::new(
+///     "archive",
+///     Resource::new("Note", 42)
+///         .with_attribute("owner", "u-7")
+///         .within(Resource::new("Notebook", "travel")),
+/// )
+/// .with_context("reason", "cleanup");
+///
+/// assert_eq!(request.action(), "archive");
+/// assert_eq!(request.resource().to_string(), "Note(42)");
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessRequest {
+    action: String,
+    resource: Resource,
+    context: Map<String, Value>,
+}
+
+impl AccessRequest {
+    pub fn new(action: impl Into<String>, resource: Resource) -> Self {
+        Self {
+            action: action.into(),
+            resource,
+            context: Map::new(),
+        }
+    }
+
+    /// Add a fact about the request rather than the resource: the concrete path, the
+    /// client's address, a reason given. A value that cannot be serialised is skipped.
+    pub fn with_context(mut self, key: impl Into<String>, value: impl Serialize) -> Self {
+        if let Ok(value) = serde_json::to_value(value) {
+            self.context.insert(key.into(), value);
+        }
+        self
+    }
+
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+
+    pub fn resource(&self) -> &Resource {
+        &self.resource
+    }
+
+    pub fn context(&self) -> &Map<String, Value> {
+        &self.context
+    }
+}
+
+/// The thing an [`AccessRequest`] acts on.
+///
+/// A kind and an id identify it (`Note`, `42`). Parents place it in a hierarchy a policy
+/// can match as a whole: a note in a notebook, a route in a resource in an adapter.
+/// Attributes are the facts a policy may read, such as its owner or its status.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resource {
+    kind: String,
+    id: String,
+    parents: Vec<Resource>,
+    attributes: Map<String, Value>,
+}
+
+impl Resource {
+    pub fn new(kind: impl Into<String>, id: impl fmt::Display) -> Self {
+        Self {
+            kind: kind.into(),
+            id: id.to_string(),
+            parents: Vec::new(),
+            attributes: Map::new(),
+        }
+    }
+
+    /// Add an attribute a policy may read. A value that cannot be serialised is skipped.
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Serialize) -> Self {
+        if let Ok(value) = serde_json::to_value(value) {
+            self.attributes.insert(key.into(), value);
+        }
+        self
+    }
+
+    /// Place this resource inside `parent`. May be called more than once.
+    pub fn within(mut self, parent: Resource) -> Self {
+        self.parents.push(parent);
+        self
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn parents(&self) -> &[Resource] {
+        &self.parents
+    }
+
+    pub fn attributes(&self) -> &Map<String, Value> {
+        &self.attributes
+    }
+}
+
+impl fmt::Display for Resource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}({})", self.kind, self.id)
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +416,27 @@ mod tests {
         let envelope = EventEnvelope::json("note.created", &NoteCreatedPayload { id: 7 }).unwrap();
         assert_eq!(envelope.name(), "note.created");
         assert_eq!(envelope.payload(), br#"{"id":7}"#);
+    }
+
+    #[test]
+    fn every_envelope_has_its_own_id_unless_replayed() {
+        let first = EventEnvelope::new("note.created", b"{}".to_vec());
+        let second = EventEnvelope::new("note.created", b"{}".to_vec());
+        assert_ne!(first.id(), second.id());
+
+        let replayed = EventEnvelope::new("note.created", b"{}".to_vec()).with_id(first.id());
+        assert_eq!(replayed.id(), first.id());
+    }
+
+    #[test]
+    fn an_envelope_correlates_with_the_request_that_raised_it() {
+        let cx = Context::new();
+        let envelope = EventEnvelope::new("note.created", b"{}".to_vec());
+        assert_eq!(envelope.correlation_id(), None);
+        assert_eq!(
+            envelope.correlated_with(&cx).correlation_id(),
+            Some(cx.request_id())
+        );
     }
 
     #[test]
@@ -264,5 +473,28 @@ mod tests {
             .publish(EventEnvelope::new("note.created", b"{}".to_vec()))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn a_resource_keeps_its_parents_and_attributes() {
+        let note = Resource::new("Note", 42)
+            .with_attribute("owner", "u-7")
+            .with_attribute("tags", ["a", "b"])
+            .within(Resource::new("Notebook", "travel").within(Resource::new("Workspace", 1)));
+
+        assert_eq!(note.kind(), "Note");
+        assert_eq!(note.id(), "42");
+        assert_eq!(note.attributes()["owner"], "u-7");
+        assert_eq!(note.attributes()["tags"], serde_json::json!(["a", "b"]));
+        assert_eq!(note.parents()[0].to_string(), "Notebook(travel)");
+        assert_eq!(note.parents()[0].parents()[0].to_string(), "Workspace(1)");
+    }
+
+    #[test]
+    fn an_access_request_carries_its_context() {
+        let request = AccessRequest::new("GET", Resource::new("Route", "/notes/{id}"))
+            .with_context("path", "/notes/7");
+        assert_eq!(request.action(), "GET");
+        assert_eq!(request.context()["path"], "/notes/7");
     }
 }
