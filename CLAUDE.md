@@ -10,7 +10,7 @@ changes are fine, and removing a low-value feature beats adapting it.
 |---|---|---|
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
 | `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Events`, outbound ports, `Memory`, tasks |
-| `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, `Ctx`, `Listing`, auth/CORS layers |
+| `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `MessagingAdapter` (declaration only) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
@@ -87,6 +87,14 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   provider stays a no-op.
 - **`Memory<A>` stores JSON documents, not aggregates**, so a value object that cannot
   round-trip fails in unit tests. Nothing is queryable until `.queryable([...])`.
+- **A derived `PATCH` calls the GET/PUT `MethodRouter`s, never the `Router`.** Routing a
+  cloned request again appends to `MatchedPath` and duplicates the private `UrlParams`.
+  `Routes` keeps layered copies of each GET and PUT for this; a new way of adding or
+  layering routes must keep them in step (ADR-014).
+- **JSON Patch needs two conventions from a resource**: its PUT accepts the GET
+  representation (no `deny_unknown_fields`), and reads it through `jenny_rest::Json`,
+  which refuses ignored fields a patch changed. `accept_json_patch()` must precede
+  `mount()`.
 
 ## topmesys
 
@@ -108,6 +116,6 @@ check publishability. Details: `RELEASING.md`.
 ## Known gaps (not yet built, recorded in ADRs)
 
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
-trace-context propagation (event headers can now carry it), the REST JSON Patch mode and
-`ETag`/`If-Match`, every database-backed store (ADR-013), `cargo jenny new --manifest`,
+trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
+the OpenAPI document (ADR-014), every database-backed store (ADR-013), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

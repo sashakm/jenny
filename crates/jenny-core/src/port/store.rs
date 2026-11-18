@@ -159,6 +159,23 @@ impl<A> DerefMut for Loaded<A> {
     }
 }
 
+/// Check a caller's expected version against the current one. For store adapters and
+/// [`StoreExt`]: `Ok` when there was no expectation or it holds,
+/// [`Stale`](DomainError::Stale) naming both versions otherwise.
+pub fn expect_version<A: Aggregate>(
+    id: &A::Id,
+    expected: Option<Version>,
+    current: Version,
+) -> DomainResult<()> {
+    match expected {
+        Some(expected) if expected != current => Err(DomainError::stale(format!(
+            "{} {id} is at version {current}, not {expected}",
+            A::KIND
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Encode an aggregate as a store writes it. For store adapters.
 pub fn encode<A: Aggregate>(aggregate: &A) -> DomainResult<Value> {
     serde_json::to_value(aggregate)
@@ -192,9 +209,12 @@ pub trait Store<A: Aggregate>: Send + Sync + 'static {
     /// [`NotFound`](DomainError::NotFound) when it was removed.
     async fn save(&self, aggregate: Loaded<A>) -> DomainResult<Loaded<A>>;
 
-    /// Remove an aggregate and return it. [`NotFound`](DomainError::NotFound) when
-    /// there was nothing to remove.
-    async fn remove(&self, id: &A::Id) -> DomainResult<A>;
+    /// Remove an aggregate and return it.
+    ///
+    /// With an `expected` version, only if that is still the current one:
+    /// [`Stale`](DomainError::Stale) otherwise, decided atomically with the removal.
+    /// [`NotFound`](DomainError::NotFound) when there was nothing to remove.
+    async fn remove(&self, id: &A::Id, expected: Option<Version>) -> DomainResult<A>;
 
     /// One page of aggregates matching `criteria`.
     ///
@@ -231,6 +251,22 @@ pub trait StoreExt<A: Aggregate>: Store<A> {
     where
         F: FnOnce(&mut A) -> DomainResult<T> + Send,
         T: Send;
+
+    /// [`change`](Self::change), but only if the aggregate is still at the version the
+    /// caller expected — what an HTTP `If-Match` asks for. `None` means no expectation.
+    ///
+    /// Fails with [`Stale`](DomainError::Stale) when the version read is not the one
+    /// expected, and also when another writer saves between that read and this save:
+    /// either way the caller's view is out of date, and it asked to be told.
+    fn change_at<T, F>(
+        &self,
+        id: &A::Id,
+        expected: Option<Version>,
+        change: F,
+    ) -> impl Future<Output = DomainResult<Changed<A, T>>> + Send
+    where
+        F: FnOnce(&mut A) -> DomainResult<T> + Send,
+        T: Send;
 }
 
 impl<A, S> StoreExt<A> for S
@@ -249,13 +285,33 @@ where
         F: FnOnce(&mut A) -> DomainResult<T> + Send,
         T: Send,
     {
+        self.change_at(id, None, change).await
+    }
+
+    async fn change_at<T, F>(
+        &self,
+        id: &A::Id,
+        expected: Option<Version>,
+        change: F,
+    ) -> DomainResult<Changed<A, T>>
+    where
+        F: FnOnce(&mut A) -> DomainResult<T> + Send,
+        T: Send,
+    {
         let mut aggregate = self.load(id).await?;
+        expect_version::<A>(id, expected, aggregate.version())?;
         let outcome = change(&mut aggregate)?;
         let changes = aggregate.changes()?;
         let aggregate = if changes.is_empty() {
             aggregate
         } else {
-            self.save(aggregate).await?
+            match self.save(aggregate).await {
+                // Read at the expected version, but someone saved since: still stale.
+                Err(DomainError::Conflict { detail }) if expected.is_some() => {
+                    return Err(DomainError::stale(detail));
+                }
+                saved => saved?,
+            }
         };
         Ok(Changed {
             outcome,

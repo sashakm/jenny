@@ -19,7 +19,9 @@ base64 = { workspace = true }
 form_urlencoded = { workspace = true }
 http = { workspace = true }
 jenny-core = { workspace = true }
+json-patch = { workspace = true }
 serde = { workspace = true }
+serde_ignored = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }

@@ -210,6 +210,28 @@ curl 'localhost:8000/api/notes?sort=-title&filter=title:contains:shop&page_size=
 adapter directions, a health check, and an end-to-end test that boots the actual
 composition root.
 
+### Two REST modes
+
+An adapter is plainly representational unless told otherwise: `PUT` replaces, `PATCH` is
+`405`. With `.accept_json_patch()?` it also takes RFC 6902 JSON Patch on every route that
+has a `GET` and a `PUT` — derived from those two, so there is no `PATCH` handler to write.
+A patch is applied to what `GET` returns and handed to `PUT`, so it gets the same
+validation and use case; changing a field the `PUT` ignores is `422`, not a silent no-op.
+
+Writes are conditional when a client wants them to be. `Versioned` sends a store version
+as the `ETag`, `IfMatch` hands `If-Match` to the use case, and the store's
+compare-and-swap refuses a stale write with `412`:
+
+```rust,ignore
+async fn update(State(notes): State<Notes>, Path(id): Path<Uuid>,
+                IfMatch(expected): IfMatch, cx: Ctx, Json(dto): Json<NoteRequest>)
+    -> ApiResult<StatusCode>
+{
+    notes.edit(NoteId::from_uuid(id), dto.try_into()?, expected, &cx).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
 ## Scaffolding
 
 ```sh

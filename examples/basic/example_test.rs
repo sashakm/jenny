@@ -48,6 +48,30 @@ impl Service {
         self.read(self.client.delete(self.url(path))).await
     }
 
+    /// A JSON Patch, optionally conditional, returning the status and the body.
+    async fn patch(
+        &self,
+        path: &str,
+        operations: Value,
+        if_match: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut request = self
+            .client
+            .patch(self.url(path))
+            .header("content-type", "application/json-patch+json")
+            .body(operations.to_string());
+        if let Some(tag) = if_match {
+            request = request.header("if-match", tag);
+        }
+        self.read(request).await
+    }
+
+    /// The entity tag a GET reports.
+    async fn etag(&self, path: &str) -> String {
+        let response = self.client.get(self.url(path)).send().await.unwrap();
+        response.headers()["etag"].to_str().unwrap().to_string()
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
@@ -206,6 +230,84 @@ async fn a_domain_rule_becomes_the_right_status(svc: &Service) {
     svc.delete(&format!("/api/notes/{id}")).await;
 }
 
+async fn notes_can_be_patched_and_writes_can_be_made_conditional(svc: &Service) {
+    let (_, id) = svc
+        .post("/api/notes", json!({ "title": "Shopping", "body": "milk" }))
+        .await;
+    let id: Uuid = serde_json::from_value(id).unwrap();
+    let note = format!("/api/notes/{id}");
+    assert_eq!(svc.etag(&note).await, r#""1""#);
+
+    // A patch derived from GET and PUT: no PATCH handler exists in the adapter.
+    let replace_body = json!([{ "op": "replace", "path": "/body", "value": "eggs" }]);
+    let (status, _) = svc.patch(&note, replace_body.clone(), Some(r#""1""#)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, patched) = svc.get(&note).await;
+    assert_eq!(patched["title"], "Shopping");
+    assert_eq!(patched["body"], "eggs");
+    assert_eq!(svc.etag(&note).await, r#""2""#);
+
+    // The same precondition again: the note moved on, so nothing is overwritten.
+    let (status, problem) = svc.patch(&note, replace_body, Some(r#""1""#)).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(problem["type"], "urn:jenny:problem:precondition-failed");
+
+    // `archived` is in what GET returns but not in what PUT takes: refused, not dropped.
+    let (status, problem) = svc
+        .patch(
+            &note,
+            json!([{ "op": "replace", "path": "/archived", "value": true }]),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(problem["detail"].as_str().unwrap().contains("/archived"));
+
+    // A plain JSON body is not a patch.
+    let status = svc
+        .client
+        .patch(svc.url(&note))
+        .json(&json!({ "body": "x" }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    // PUT and DELETE honour If-Match too.
+    let put = |tag: &'static str| {
+        svc.client
+            .put(svc.url(&note))
+            .header("if-match", tag)
+            .json(&json!({ "title": "Groceries", "body": "eggs" }))
+            .send()
+    };
+    assert_eq!(
+        put(r#""1""#).await.unwrap().status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(
+        put(r#""2""#).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let delete = |tag: &'static str| {
+        svc.client
+            .delete(svc.url(&note))
+            .header("if-match", tag)
+            .send()
+    };
+    assert_eq!(
+        delete(r#""2""#).await.unwrap().status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(delete(r#""3""#).await.unwrap().status(), StatusCode::OK);
+
+    // The collection has no PUT, so it has no derived PATCH either.
+    let (status, _) = svc.patch("/api/notes", json!([]), None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
 async fn failures_are_problem_documents(svc: &Service) {
     // A value object refused to be constructed -> 400 with the reason.
     let (status, body) = svc.post("/api/notes", json!({ "title": "   " })).await;
@@ -276,6 +378,7 @@ async fn the_example_service_works_end_to_end() {
     a_note_can_be_created_read_updated_and_deleted(&svc).await;
     listings_can_be_sorted_filtered_and_paged(&svc).await;
     a_domain_rule_becomes_the_right_status(&svc).await;
+    notes_can_be_patched_and_writes_can_be_made_conditional(&svc).await;
     failures_are_problem_documents(&svc).await;
 
     handle.shutdown();

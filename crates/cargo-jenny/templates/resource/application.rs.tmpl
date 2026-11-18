@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use jenny::{Context, Criteria, DomainResult, Events, Loaded, StoreExt, use_cases};
+use jenny::{Context, Criteria, DomainResult, Events, Loaded, StoreExt, Version, use_cases};
 
 use crate::domain::model::{{resource_snake}}::{
     {{resource_pascal}}, {{resource_pascal}}Id, {{resource_pascal}}Name,
@@ -73,18 +73,22 @@ impl {{resource_pascal}}s {
         self.store.load(&id).await
     }
 
+    /// Rename — if it is still at `expected`, when the caller says which version it read
+    /// (an HTTP `If-Match`).
+    ///
     /// Listeners hear a `{{resource_snake}}.updated` carrying exactly what changed, as a
     /// JSON Patch. A rename to the same name writes and publishes nothing.
     pub async fn rename(
         &self,
         id: {{resource_pascal}}Id,
         cmd: Rename{{resource_pascal}},
+        expected: Option<Version>,
         cx: &Context,
     ) -> DomainResult<()> {
         // The rule about renaming archived entities lives in the aggregate, not here.
         let renamed = self
             .store
-            .change(&id, |entity| entity.rename(cmd.name))
+            .change_at(&id, expected, |entity| entity.rename(cmd.name))
             .await?;
         if let Some(updated) = renamed.updated() {
             self.events.publish(&updated, cx).await;
@@ -102,9 +106,10 @@ impl {{resource_pascal}}s {
     pub async fn delete(
         &self,
         id: {{resource_pascal}}Id,
+        expected: Option<Version>,
         _cx: &Context,
     ) -> DomainResult<{{resource_pascal}}> {
-        self.store.remove(&id).await
+        self.store.remove(&id, expected).await
     }
 }
 
@@ -162,7 +167,7 @@ mod tests {
             .unwrap();
 
         service
-            .rename(id, Rename{{resource_pascal}} { name: name("second") }, &cx)
+            .rename(id, Rename{{resource_pascal}} { name: name("second") }, None, &cx)
             .await
             .unwrap();
 
@@ -170,6 +175,27 @@ mod tests {
         let updated = events.payloads("{{resource_snake}}.updated");
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0]["changes"][0]["path"], "/name");
+    }
+
+    #[tokio::test]
+    async fn a_rename_against_a_version_that_moved_on_is_stale() {
+        let (service, _) = subject();
+        let cx = Context::new();
+        let id = service
+            .create(Create{{resource_pascal}} { name: name("first") }, &cx)
+            .await
+            .unwrap();
+        let read = service.fetch(id, &cx).await.unwrap().version();
+        service
+            .rename(id, Rename{{resource_pascal}} { name: name("second") }, Some(read), &cx)
+            .await
+            .unwrap();
+
+        let err = service
+            .rename(id, Rename{{resource_pascal}} { name: name("third") }, Some(read), &cx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Stale { .. }), "{err}");
     }
 
     #[tokio::test]
@@ -197,9 +223,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(service.delete(id, &cx).await.unwrap().id(), id);
+        assert_eq!(service.delete(id, None, &cx).await.unwrap().id(), id);
         assert!(matches!(
-            service.delete(id, &cx).await.unwrap_err(),
+            service.delete(id, None, &cx).await.unwrap_err(),
             DomainError::NotFound
         ));
     }

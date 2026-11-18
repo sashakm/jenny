@@ -3,9 +3,17 @@
 //! Everything HTTP-shaped lives here and nowhere else: the JSON DTOs, the conversions
 //! into domain commands, and the status codes. Each handler is three lines — extract,
 //! convert, call — because anything longer would be business logic in the wrong ring.
+//!
+//! There is no PATCH handler, and the adapter still answers PATCH: it accepts JSON
+//! Patch (see `main.rs`), so it derives one from `fetch` and `update`. Two things here
+//! make that safe. `fetch` sends the note's version as an `ETag`, and `update` takes
+//! `If-Match` and hands it to the use case, so a patch fails with 412 instead of
+//! overwriting a change made in between. And `NoteRequest` accepts the whole
+//! [`NoteResponse`], ignoring `id` and `archived`, so a patch applies to exactly what a
+//! client read — and one that tries to change `archived` is refused with 422.
 
 use axum::extract::{Path, State};
-use jenny::rest::{ApiResult, Ctx, Json, Listing, Routes, StatusCode};
+use jenny::rest::{ApiResult, Ctx, IfMatch, Json, Listing, Routes, StatusCode, Versioned};
 use jenny::{DomainError, Dto, Validate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -102,19 +110,23 @@ async fn fetch(
     State(notes): State<Notes>,
     Path(id): Path<Uuid>,
     cx: Ctx,
-) -> ApiResult<Json<NoteResponse>> {
+) -> ApiResult<Versioned<Json<NoteResponse>>> {
     let note = notes.fetch(NoteId::from_uuid(id), &cx).await?;
-    Ok(Json(NoteResponse::from(&*note)))
+    Ok(Versioned::new(
+        note.version(),
+        Json(NoteResponse::from(&*note)),
+    ))
 }
 
 async fn update(
     State(notes): State<Notes>,
     Path(id): Path<Uuid>,
+    IfMatch(expected): IfMatch,
     cx: Ctx,
     Json(dto): Json<NoteRequest>,
 ) -> ApiResult<StatusCode> {
     notes
-        .edit(NoteId::from_uuid(id), dto.try_into()?, &cx)
+        .edit(NoteId::from_uuid(id), dto.try_into()?, expected, &cx)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -131,9 +143,10 @@ async fn archive(
 async fn delete(
     State(notes): State<Notes>,
     Path(id): Path<Uuid>,
+    IfMatch(expected): IfMatch,
     cx: Ctx,
 ) -> ApiResult<Json<NoteResponse>> {
-    let removed = notes.delete(NoteId::from_uuid(id), &cx).await?;
+    let removed = notes.delete(NoteId::from_uuid(id), expected, &cx).await?;
     Ok(Json(NoteResponse::from(&removed)))
 }
 

@@ -137,6 +137,28 @@ async fn the_service_works_end_to_end() {
         "archiving twice is a conflict the domain raised, mapped to 409"
     );
 
+    // --- PATCH, derived from GET and PUT, and conditional with If-Match -------------
+    let (status, second) = api.post("/api/{{resource_plural}}", json!({ "name": "third" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let second: Uuid = serde_json::from_value(second).unwrap();
+    let rename = json!([{ "op": "replace", "path": "/name", "value": "renamed" }]);
+    let patch = |tag: &'static str| {
+        api.client
+            .patch(api.url(&format!("/api/{{resource_plural}}/{second}")))
+            .header("content-type", "application/json-patch+json")
+            .header("if-match", tag)
+            .body(rename.to_string())
+            .send()
+    };
+    assert_eq!(patch(r#""1""#).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        patch(r#""1""#).await.unwrap().status(),
+        StatusCode::PRECONDITION_FAILED,
+        "the version moved on, so the stale patch must not overwrite it"
+    );
+    let (_, renamed) = api.get(&format!("/api/{{resource_plural}}/{second}")).await;
+    assert_eq!(renamed["name"], "renamed");
+
     // --- failures are problem documents ---------------------------------------------
     let (status, problem) = api.post("/api/{{resource_plural}}", json!({ "name": "  " })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

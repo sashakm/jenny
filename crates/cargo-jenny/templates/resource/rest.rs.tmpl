@@ -3,9 +3,16 @@
 //! Everything HTTP-shaped lives here and nowhere else: the JSON DTOs, the conversions
 //! into domain commands, and the status codes. Each handler is a few lines — extract,
 //! convert, call — because anything longer would be business logic in the wrong ring.
+//!
+//! There is no PATCH handler, and the adapter still answers PATCH: it accepts JSON
+//! Patch, so it derives one from `fetch` and `rename`. `fetch` sends the version as an
+//! `ETag` and `rename` takes `If-Match`, so a patch fails with 412 instead of
+//! overwriting a change made in between. The request DTO accepts the whole response
+//! shape, ignoring what it does not take, so a patch applies to exactly what a client
+//! read — and one that tries to change an ignored field is refused with 422.
 
 use axum::extract::{Path, State};
-use jenny::rest::{ApiResult, Ctx, Json, Listing, Routes, StatusCode};
+use jenny::rest::{ApiResult, Ctx, IfMatch, Json, Listing, Routes, StatusCode, Versioned};
 use jenny::{DomainError, Dto, Validate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -106,19 +113,23 @@ async fn fetch(
     State(service): State<{{resource_pascal}}s>,
     Path(id): Path<Uuid>,
     cx: Ctx,
-) -> ApiResult<Json<{{resource_pascal}}Response>> {
+) -> ApiResult<Versioned<Json<{{resource_pascal}}Response>>> {
     let entity = service.fetch({{resource_pascal}}Id::from_uuid(id), &cx).await?;
-    Ok(Json({{resource_pascal}}Response::from(&*entity)))
+    Ok(Versioned::new(
+        entity.version(),
+        Json({{resource_pascal}}Response::from(&*entity)),
+    ))
 }
 
 async fn rename(
     State(service): State<{{resource_pascal}}s>,
     Path(id): Path<Uuid>,
+    IfMatch(expected): IfMatch,
     cx: Ctx,
     Json(dto): Json<{{resource_pascal}}Request>,
 ) -> ApiResult<StatusCode> {
     service
-        .rename({{resource_pascal}}Id::from_uuid(id), dto.try_into()?, &cx)
+        .rename({{resource_pascal}}Id::from_uuid(id), dto.try_into()?, expected, &cx)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -135,9 +146,12 @@ async fn archive(
 async fn delete(
     State(service): State<{{resource_pascal}}s>,
     Path(id): Path<Uuid>,
+    IfMatch(expected): IfMatch,
     cx: Ctx,
 ) -> ApiResult<Json<{{resource_pascal}}Response>> {
-    let removed = service.delete({{resource_pascal}}Id::from_uuid(id), &cx).await?;
+    let removed = service
+        .delete({{resource_pascal}}Id::from_uuid(id), expected, &cx)
+        .await?;
     Ok(Json({{resource_pascal}}Response::from(&removed)))
 }
 

@@ -191,6 +191,37 @@ impl Problem {
         .with_detail(detail)
     }
 
+    /// The request carried a precondition (`If-Match`) that no longer holds.
+    pub fn precondition_failed(detail: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::PRECONDITION_FAILED,
+            "urn:jenny:problem:precondition-failed",
+            "Precondition Failed",
+        )
+        .with_detail(detail)
+    }
+
+    /// The request was understood but cannot be applied — a JSON Patch whose path does
+    /// not exist, or that touches a field the resource does not let you change.
+    pub fn unprocessable(detail: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:jenny:problem:unprocessable",
+            "Unprocessable Content",
+        )
+        .with_detail(detail)
+    }
+
+    /// The body is in a format this endpoint does not take.
+    pub fn unsupported_media_type(detail: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "urn:jenny:problem:unsupported-media-type",
+            "Unsupported Media Type",
+        )
+        .with_detail(detail)
+    }
+
     pub fn internal(detail: impl Into<String>) -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -248,6 +279,7 @@ impl From<DomainError> for Problem {
             DomainError::Unauthenticated { detail } => Self::unauthenticated(detail),
             DomainError::Forbidden { detail } => Self::forbidden(detail),
             DomainError::Conflict { detail } => Self::conflict(detail),
+            DomainError::Stale { detail } => Self::precondition_failed(detail),
             internal @ DomainError::Internal { .. } => Self::internal(internal.report()),
         }
     }
@@ -326,6 +358,7 @@ mod tests {
             (DomainError::unauthenticated("x"), StatusCode::UNAUTHORIZED),
             (DomainError::forbidden("x"), StatusCode::FORBIDDEN),
             (DomainError::conflict("x"), StatusCode::CONFLICT),
+            (DomainError::stale("x"), StatusCode::PRECONDITION_FAILED),
             (
                 DomainError::internal("x"),
                 StatusCode::INTERNAL_SERVER_ERROR,

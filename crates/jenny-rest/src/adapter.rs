@@ -86,6 +86,8 @@ pub struct RestAdapter {
     description: Option<String>,
     resources: Vec<MountedResource>,
     router: Router,
+    /// Whether resources mounted on this adapter get a derived `PATCH`.
+    json_patch: bool,
     #[cfg(feature = "openapi")]
     openapi: Option<utoipa::openapi::OpenApi>,
 }
@@ -103,9 +105,50 @@ impl RestAdapter {
             description: None,
             resources: Vec::new(),
             router: Router::new(),
+            json_patch: false,
             #[cfg(feature = "openapi")]
             openapi: None,
         })
+    }
+
+    /// Accept RFC 6902 JSON Patch: every route template with both a `GET` and a `PUT`
+    /// also answers `PATCH`, derived from those two (see [`crate::patch`]).
+    ///
+    /// Without this, the adapter is plainly representational: `PUT` replaces, and
+    /// `PATCH` is `405`. A template with a `PATCH` handler of its own keeps it.
+    ///
+    /// ```
+    /// use jenny_rest::{RestAdapter, Routes};
+    ///
+    /// let notes: Routes = Routes::new("notes")
+    ///     .get("/notes/{id}", || async { "{}" })
+    ///     .put("/notes/{id}", || async { "" });
+    ///
+    /// let adapter = RestAdapter::new("my-notes")?
+    ///     .accept_json_patch()?
+    ///     .mount(notes)?;
+    /// assert!(adapter.resources()[0].endpoints().iter().any(|e| e.method == "PATCH"));
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    ///
+    /// Fails when resources are already mounted: they were built without the derived
+    /// routes, and an adapter that patches some resources and not others depending on
+    /// call order would be a surprise to everyone.
+    pub fn accept_json_patch(mut self) -> anyhow::Result<Self> {
+        if !self.resources.is_empty() {
+            anyhow::bail!(
+                "accept_json_patch() must come before mount(): {} resource(s) are already \
+                 mounted without a derived PATCH",
+                self.resources.len()
+            );
+        }
+        self.json_patch = true;
+        Ok(self)
+    }
+
+    /// Whether this adapter derives `PATCH` from `GET` and `PUT`.
+    pub fn accepts_json_patch(&self) -> bool {
+        self.json_patch
     }
 
     /// Attach this adapter's OpenAPI document, which the runtime serves and merges with
@@ -171,13 +214,20 @@ impl RestAdapter {
     /// Mount a resource. Fails when the resource's name is not a valid URN segment.
     pub fn mount(mut self, routes: Routes) -> anyhow::Result<Self> {
         let urn = self.urn.clone().child(routes.name())?;
+        let mut endpoints = routes.endpoints().to_vec();
+        if self.json_patch {
+            endpoints.extend(routes.patchable().into_iter().map(|path| Endpoint {
+                method: "PATCH".to_string(),
+                path,
+            }));
+        }
         self.resources.push(MountedResource {
             urn: urn.clone(),
             description: routes.description().map(ToOwned::to_owned),
             labels: routes.labels().to_vec(),
-            endpoints: routes.endpoints().to_vec(),
+            endpoints,
         });
-        self.router = self.router.merge(routes.into_router(urn));
+        self.router = self.router.merge(routes.into_router(urn, self.json_patch));
         Ok(self)
     }
 

@@ -86,7 +86,9 @@
 //! [`DomainError`]: jenny_core::domain::DomainError
 
 mod adapter;
+mod conditional;
 mod extract;
+pub mod patch;
 mod problem;
 mod request_id;
 mod routes;
@@ -105,7 +107,11 @@ pub use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 #[doc(inline)]
 pub use adapter::{DEFAULT_API_PATH, MountedResource, RestAdapter};
 #[doc(inline)]
+pub use conditional::{IfMatch, Versioned};
+#[doc(inline)]
 pub use extract::{Ctx, Json, Listing, REQUEST_ID_HEADER, RouteId};
+#[doc(inline)]
+pub use patch::JSON_PATCH_CONTENT_TYPE;
 #[doc(inline)]
 pub use problem::{ApiResult, PROBLEM_CONTENT_TYPE, Problem, ProblemIssue};
 #[doc(inline)]
