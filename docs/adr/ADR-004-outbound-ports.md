@@ -1,6 +1,6 @@
 # ADR-004: Outbound Ports
 
-**Status:** Accepted
+**Status:** Accepted — "no generic repository", serde and static dispatch superseded by ADR-012; "storage has no port" by ADR-013
 **Date:** 2026-08-24
 
 ## Context

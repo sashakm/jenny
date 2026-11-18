@@ -1,6 +1,6 @@
 # ADR-008: Observability
 
-**Status:** Accepted — framework metrics not implemented
+**Status:** Accepted — use-case metrics built (ADR-012); HTTP metrics and trace propagation not implemented
 **Date:** 2026-08-24
 
 ## Context

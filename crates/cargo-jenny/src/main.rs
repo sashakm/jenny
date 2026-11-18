@@ -179,13 +179,11 @@ fn add_resource(args: AddResourceArgs) -> Result<()> {
     println!("Added resource `{}`", resource.snake);
     report(&plan);
     println!();
-    println!("Wire it up in src/main.rs:");
+    println!("Wire it up in src/lib.rs:");
     println!();
     println!(
-        "    let {plural} = Arc::new({pascal}s::new(\n\
-         \x20       Arc::new(InMemory{pascal}s::default()),\n\
-         \x20       events.clone(),\n\
-         \x20   ));",
+        "    let {plural}_store = Arc::new(Memory::<{pascal}>::new().queryable([\"name\"]));\n\
+         \x20   let {plural} = {pascal}s::new({plural}_store.clone(), events.clone());",
         plural = resource.plural,
         pascal = resource.pascal,
     );

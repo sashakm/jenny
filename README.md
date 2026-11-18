@@ -30,15 +30,15 @@ introduces it.
 
 | Term | In jenny |
 |---|---|
-| **Driving (inbound) port** | a use case — usually a plain `async fn`; [`UseCase`] when a trait earns its keep |
+| **Driving (inbound) port** | a use case — a method on a plain struct, observed by `#[jenny::use_cases]` |
 | **Driving adapter** | `Routes` (REST), `MessagingAdapter`, `Task` — translates a protocol into a use-case call |
-| **Driven (outbound) port** | a trait the domain declares: your `NoteRepository`, plus `EventPublisher`, `Authenticator`, `Authorizer` |
-| **Driven adapter** | the implementation: sqlx, the event bus, JWT verification |
+| **Driven (outbound) port** | [`Store<A>`] for aggregates (extended by your own port when the domain needs its own queries), plus `EventPublisher`, `Authenticator`, `Authorizer` |
+| **Driven adapter** | the implementation: an in-memory or database store, the event bus, JWT verification |
 | **Composition root** | `JennyServer` — the only place that knows every layer |
 
-Static dispatch is the default (`fn run<R: NoteRepository>(…)`); `Arc<dyn Trait>` is
-there when the composition root wants to choose at runtime. Ports are ordinary traits,
-so both work and neither is baked in.
+Use cases hold their ports as `Arc<dyn Trait>`. Every port is `#[async_trait]`, which
+boxes each call's future whatever the dispatch, so a generic parameter would buy one
+saved vtable lookup and cost a type parameter on every handler.
 
 ## Project layout
 
@@ -53,7 +53,7 @@ src/
     event/          domain event definitions — no dispatch
     service/        cross-aggregate rules and fine-grained authorization
     port/           the outbound traits the domain owns
-  application/      use cases; collects raised events and hands them to EventPublisher
+  application/      use cases; load, change, save through Store, publish what was raised
   adapter/
     inbound/        driving: rest · grpc · messaging · task
     outbound/       driven: persistence · storage · eventbus · telemetry · security
@@ -62,7 +62,7 @@ src/
 
 Two notes on that tree. `in`/`out` are the usual diagram labels but `in` is a Rust
 keyword, so `inbound`/`outbound` it is. And there is no `domain/port/in/` — an inbound
-port is a function signature until it needs to be more.
+port is a method signature, and nothing more is needed.
 
 ### What goes where
 
@@ -113,7 +113,7 @@ impl TryFrom<NoteRequest> for CreateNote {
 }
 
 async fn create(
-    State(notes): State<Arc<Notes>>,
+    State(notes): State<Notes>,
     cx: Ctx,
     Json(dto): Json<NoteRequest>,
 ) -> ApiResult<(StatusCode, Json<Uuid>)> {
@@ -123,14 +123,14 @@ async fn create(
 
 /// `Listing` is paging, sorting and filtering, parsed and validated.
 async fn list(
-    State(notes): State<Arc<Notes>>,
+    State(notes): State<Notes>,
     listing: Listing,
     cx: Ctx,
 ) -> ApiResult<Json<Vec<NoteResponse>>> {
-    Ok(Json(notes.list(&listing, &cx).await?.into_iter().map(Into::into).collect()))
+    Ok(Json(notes.list(&listing, &cx).await?.iter().map(Into::into).collect()))
 }
 
-pub fn routes(notes: Arc<Notes>) -> Routes {
+pub fn routes(notes: Notes) -> Routes {
     Routes::new("notes")
         .get("/notes", list)
         .post("/notes", create)
@@ -141,18 +141,37 @@ pub fn routes(notes: Arc<Notes>) -> Routes {
 
 A use case takes a domain command plus the invocation [`Context`] — no envelope to
 unwrap, and the same signature whether the call arrived over HTTP, off a queue, or
-from the clock:
+from the clock. `Store::change` is load, apply a domain method, save with a version
+check, in one call:
 
 ```rust,ignore
 // application/notes.rs
-pub async fn create(&self, cmd: CreateNote, cx: &Context) -> DomainResult<NoteId> {
-    let (note, event) = Note::create(cmd.title, cmd.body);
-    let id = note.id();
-    self.repository.save(note).await?;      // outbound port
-    self.publish(&event, cx).await;         // outbound port
-    Ok(id)
+#[derive(Clone)]
+pub struct Notes {
+    notes: Arc<dyn Store<Note>>,
+    events: Events,
+}
+
+#[jenny::use_cases]                         // a span and a duration metric per method
+impl Notes {
+    pub async fn create(&self, cmd: CreateNote, cx: &Context) -> DomainResult<NoteId> {
+        let (note, created) = Note::create(cmd.title, cmd.body);
+        let note = self.notes.insert(note).await?;
+        self.events.publish(&created, cx).await;
+        Ok(note.id())
+    }
+
+    pub async fn archive(&self, id: NoteId, cx: &Context) -> DomainResult<()> {
+        let archived = self.notes.change(&id, Note::archive).await?;
+        self.events.publish(&archived.outcome, cx).await;
+        Ok(())
+    }
 }
 ```
+
+The aggregate derives serde and `Aggregate`, and its value objects deserialise through
+their constructors — so a store needs no mapping code, and stored data that breaks an
+invariant fails to load instead of becoming a state the domain would never build.
 
 And `main` is the dependency graph, readable top to bottom:
 
@@ -161,16 +180,16 @@ And `main` is the dependency graph, readable top to bottom:
 async fn main() -> anyhow::Result<()> {
     let mut server = JennyServer::from_args()?;          // config + telemetry up
 
-    let repository = Arc::new(PgNoteRepository::new(pool));      // driven adapter
-    let events: Arc<dyn EventPublisher> = Arc::new(EventBus::new(bus, "my-notes"));
-    let notes = Arc::new(Notes::new(repository.clone(), events)); // application
+    let store = Arc::new(Memory::<Note>::new().queryable(["title"])); // driven adapter
+    let events = Events::new(server.events()?);
+    let notes = Notes::new(store.clone(), events);                    // application
 
     let rest = RestAdapter::new("my-notes")?                     // driving adapter
         .mount(adapter::inbound::rest::routes(notes))?;           // mounts at /api
 
     server.with_version(jenny::service_version!())
         .register(rest)?
-        .register_health_check(DatabaseCheck::new("notes-db", pool))
+        .register_health_check(store)
         .run()
         .await
 }
@@ -299,13 +318,13 @@ growing table never turns one request into a full scan.
 | Crate | Ring | Role |
 |---|---|---|
 | `jenny` | — | facade: feature-gated re-exports |
-| `jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Urn`, `UseCase`, `Context`, the outbound ports, tasks |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Events`, the outbound ports, `Memory`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
 | `jenny-persistence` | driven adapter | Postgres/sqlx query and mapping helpers |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, config, health, hosting |
-| `jenny-macros` | — | derive macros (`Dto`, `QueryFormat`) |
+| `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 
 Features: `rest`, `server` (implies `rest`), `messaging`, `persistence`, `security`,
@@ -387,7 +406,7 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
 
-[`UseCase`]: https://docs.rs/jenny/latest/jenny/port/inbound/trait.UseCase.html
+[`Store<A>`]: https://docs.rs/jenny/latest/jenny/port/trait.Store.html
 [`Context`]: https://docs.rs/jenny/latest/jenny/port/struct.Context.html
 [`Validate`]: https://docs.rs/jenny/latest/jenny/domain/validation/trait.Validate.html
 [`Authenticator`]: https://docs.rs/jenny/latest/jenny/port/outbound/trait.Authenticator.html

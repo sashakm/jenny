@@ -9,23 +9,19 @@
 //! ```
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
-//! use jenny_core::port::{Context, UseCase};
+//! use jenny_core::port::Context;
 //! use jenny_core::task::Task;
 //!
-//! # use jenny_core::domain::DomainError;
-//! # struct ExpireStaleNotes;
-//! # #[async_trait]
-//! # impl UseCase for ExpireStaleNotes {
-//! #     type Input = (); type Output = usize; type Error = DomainError;
-//! #     async fn invoke(&self, _: (), _: &Context) -> Result<usize, DomainError> { Ok(0) }
-//! # }
-//! /// Driving adapter: clock fires -> invoke the use case.
-//! struct ExpiryTask(Arc<ExpireStaleNotes>);
+//! # use jenny_core::domain::DomainResult;
+//! # struct Notes;
+//! # impl Notes { async fn expire_stale(&self, _: &Context) -> DomainResult<usize> { Ok(0) } }
+//! /// Driving adapter: clock fires -> call the use case.
+//! struct ExpiryTask(Arc<Notes>);
 //!
 //! #[async_trait]
 //! impl Task for ExpiryTask {
 //!     async fn execute(&self) -> anyhow::Result<()> {
-//!         let expired = self.0.invoke((), &Context::new()).await?;
+//!         let expired = self.0.expire_stale(&Context::new()).await?;
 //!         tracing::info!(expired, "expired stale notes");
 //!         Ok(())
 //!     }

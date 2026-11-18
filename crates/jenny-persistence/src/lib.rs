@@ -1,24 +1,22 @@
 //! Building blocks for driven persistence adapters. Postgres, for now.
 //!
-//! This crate deliberately does **not** define a `Repository` trait. The repository
-//! port belongs to your domain — `NoteRepository`, returning `Note` and
-//! [`DomainError`](jenny_core::domain::DomainError), phrased in the language your
-//! aggregates use — and any generic `Repository<T, Id>` the framework invented would
-//! be a worse version of it that leaks storage concepts back inward.
-//!
-//! What lives here is the machinery an implementation of *your* port needs on the
-//! other side of that boundary: turning client criteria into SQL safely
-//! ([`SqlCriteria`] with a [`Columns`] allowlist), column lists for composite rows
-//! ([`QueryFormat`]), a [`DatabaseCheck`](health::DatabaseCheck), and the error type,
-//! with a `From` impl so a repository failure arrives in the application layer already
-//! phrased as a domain failure.
+//! The storage port is [`Store<A>`](jenny_core::port::Store), from the core: load by
+//! id, save with a version check. Queries phrased in your domain's own language go on
+//! a port of yours that extends it, and their implementation is what this crate helps
+//! with on the other side of that boundary (ADR-012):
 //!
 //! ```text
-//! domain/port/         NoteRepository            (trait — yours)
+//! domain/port/         NoteRepository: Store<Note>   (trait — yours)
 //!      ▲
-//! adapter/outbound/persistence/                  (impl — uses this crate)
-//!      └─ PgNoteRepository: sqlx, QueryFormat, RepositoryError -> DomainError
+//! adapter/outbound/persistence/                      (impl — uses this crate)
+//!      └─ PgNoteRepository: sqlx, SqlCriteria, RepositoryError -> DomainError
 //! ```
+//!
+//! What lives here: turning client criteria into SQL safely ([`SqlCriteria`] with a
+//! [`Columns`] allowlist), column lists for composite rows ([`QueryFormat`]), a
+//! [`DatabaseCheck`](health::DatabaseCheck), and the error type, with a `From` impl so
+//! a repository failure arrives in the application layer already phrased as a domain
+//! failure.
 pub mod criteria;
 mod error;
 pub mod health;

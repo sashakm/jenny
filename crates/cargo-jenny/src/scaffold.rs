@@ -317,7 +317,7 @@ fn add_resource_files(
             resource_template!("event.rs.tmpl"),
         ),
         (
-            format!("src/domain/port/{snake}_repository.rs"),
+            format!("src/domain/port/{snake}_store.rs"),
             resource_template!("port.rs.tmpl"),
         ),
         (
@@ -328,10 +328,6 @@ fn add_resource_files(
             format!("src/adapter/inbound/rest/{snake}.rs"),
             resource_template!("rest.rs.tmpl"),
         ),
-        (
-            format!("src/adapter/outbound/{snake}_repository.rs"),
-            resource_template!("repository.rs.tmpl"),
-        ),
     ];
 
     for (path, source) in files {
@@ -341,13 +337,9 @@ fn add_resource_files(
     if declare {
         plan.declare_module("src/domain/model/mod.rs", snake);
         plan.declare_module("src/domain/event/mod.rs", snake);
-        plan.declare_module("src/domain/port/mod.rs", &format!("{snake}_repository"));
+        plan.declare_module("src/domain/port/mod.rs", &format!("{snake}_store"));
         plan.declare_module("src/application/mod.rs", snake);
         plan.declare_module("src/adapter/inbound/rest/mod.rs", snake);
-        plan.declare_module(
-            "src/adapter/outbound/mod.rs",
-            &format!("{snake}_repository"),
-        );
     }
     Ok(())
 }
@@ -430,10 +422,9 @@ mod tests {
             "src/main.rs",
             "src/domain/model/note.rs",
             "src/domain/event/note.rs",
-            "src/domain/port/note_repository.rs",
+            "src/domain/port/note_store.rs",
             "src/application/note.rs",
             "src/adapter/inbound/rest/note.rs",
-            "src/adapter/outbound/note_repository.rs",
         ] {
             assert!(
                 paths.iter().any(|p| p == expected),
@@ -458,7 +449,8 @@ mod tests {
             .map(|p| p.to_string_lossy().to_string())
             .collect();
 
-        assert_eq!(paths.len(), 6, "one file per ring: {paths:?}");
+        // The store is jenny's, so there is no outbound adapter to generate.
+        assert_eq!(paths.len(), 5, "one file per ring: {paths:?}");
         assert!(paths.iter().all(|p| p.contains("order")));
         assert!(!paths.iter().any(|p| p == "Cargo.toml"));
     }

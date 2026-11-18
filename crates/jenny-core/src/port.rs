@@ -2,45 +2,48 @@
 //!
 //! Which side a port sits on is decided by who calls whom, not by what it does:
 //!
-//! - [`inbound`] — **driving** ports. The outside world calls in. A use case is an
-//!   inbound port; a REST handler, a message consumer or a scheduled task is a
-//!   driving adapter that invokes one.
-//! - [`outbound`] — **driven** ports. The application calls out. A repository, an
-//!   event publisher, a token verifier: the trait is owned by the inside, the
-//!   implementation lives in a driven adapter.
+//! - [`use_case`] — the **driving** side. The outside world calls in. A use case is a
+//!   method on a plain struct; a REST handler, a message consumer or a scheduled task
+//!   is a driving adapter that calls it.
+//! - [`store`], [`events`] and [`outbound`] — the **driven** side. The application
+//!   calls out. A store, an event publisher, a token verifier: the trait is owned by
+//!   the inside, the implementation lives in a driven adapter.
 //!
-//! The asymmetry between the two modules is intentional. Outbound ports are mostly
-//! *yours* — a `NoteRepository` phrased in your domain's language is worth far more
-//! than any generic `Repository<T>` the framework could offer, so the framework only
-//! ships the ones that are genuinely application-independent. Inbound ports are often
-//! not needed at all: a plain generic function is a use case, and
-//! [`inbound::UseCase`] exists for when a trait actually earns its keep.
+//! The framework ships the driven ports whose shape does not vary between applications.
+//! [`Store<A>`] is the storage one: load by id, save with a version check. Anything
+//! phrased in your domain's own language — `archived_before(cutoff)` — goes on a port
+//! of yours that extends it, in `domain/port/` (ADR-012).
 //!
-//! ### Static or dynamic dispatch, your call
+//! ### Dispatch
 //!
-//! Ports are ordinary traits, so both work and neither is baked in:
+//! Use cases hold their ports as `Arc<dyn …>`. Every port is `#[async_trait]`, which
+//! boxes each call's future whatever the dispatch, so a generic parameter would save
+//! one vtable lookup on a call that has already allocated and is about to do I/O — and
+//! it would cost a type parameter on every handler that touches the use case.
 //!
 //! ```
 //! # use jenny_core::domain::DomainResult;
-//! # trait NoteRepository: Send + Sync { fn count(&self) -> usize; }
 //! # use std::sync::Arc;
-//! // monomorphised, zero-cost — the default choice
-//! fn count_notes<R: NoteRepository>(repo: &R) -> usize { repo.count() }
-//!
-//! // erased — when the composition root wants to pick an implementation at runtime
-//! fn count_notes_dyn(repo: &Arc<dyn NoteRepository>) -> usize { repo.count() }
+//! # trait NoteRepository: Send + Sync { fn count(&self) -> usize; }
+//! fn count_notes(repo: &Arc<dyn NoteRepository>) -> usize { repo.count() }
 //! ```
 
 pub mod context;
-pub mod inbound;
+pub mod events;
 pub mod outbound;
+pub mod store;
+pub mod use_case;
 
 #[doc(inline)]
 pub use context::{Context, Extensions};
 #[doc(inline)]
-pub use inbound::UseCase;
+pub use events::Events;
 #[doc(inline)]
 pub use outbound::{
     AccessRequest, Authenticator, Authorizer, EventEnvelope, EventPublisher, HealthCheck,
     PublishError, Resource,
 };
+#[doc(inline)]
+pub use store::{Changed, Loaded, Store, StoreExt, Updated, Version};
+#[doc(inline)]
+pub use use_case::{UseCaseError, UseCaseObserver, observe_use_cases};

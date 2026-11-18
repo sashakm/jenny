@@ -50,6 +50,8 @@
 //! ```
 
 mod logging;
+#[cfg(any(feature = "telemetry-otlp", feature = "telemetry-prometheus"))]
+mod use_cases;
 
 use serde::Deserialize;
 

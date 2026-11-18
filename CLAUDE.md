@@ -9,13 +9,13 @@ changes are fine, and removing a low-value feature beats adapting it.
 | Crate | Ring | Holds |
 |---|---|---|
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
-| `crates/jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Urn`, `Criteria`, `UseCase`, `Context`, outbound ports, tasks |
+| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Events`, outbound ports, `Memory`, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, `Ctx`, `Listing`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `MessagingAdapter` (declaration only) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
 | `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, hosting, graceful shutdown |
-| `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]` |
+| `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
 `examples/basic` is the reference service and mirrors the layout a generated project
@@ -27,8 +27,14 @@ changing it, and write a new one (see the `write-adr` skill) for a new decision.
 - **Dependencies point inward.** `jenny_core::domain` and `jenny_core::port` import no
   web, database or broker crate. No adapter crate depends on another adapter crate; only
   `jenny-server` depends on more than the core (ADR-001, ADR-002).
-- **No generic `Repository<T, Id>`**, no error-code catalogue, no DI container. Each was
-  considered and rejected; see the ADRs before reintroducing one.
+- **Storage goes through `Store<A>`, and every save is versioned** (ADR-012). Queries in
+  the domain's own language go on a port that extends it, never on `Store` itself. No
+  error-code catalogue, no DI container: both were considered and rejected.
+- **Serde is the only foreign derive in `domain/`.** Aggregates and events derive it;
+  value objects deserialise through their constructors (`#[serde(try_from = …)]`), so a
+  stored value that breaks an invariant fails to load. No `FromRow`, no `ToSchema` there.
+- **Macros wrap or derive; they never generate ports, adapters or wiring** (ADR-001).
+  `#[use_cases]` only wraps method bodies; keep it that way.
 - **Filter paths are attacker-controlled.** Nothing turns a `Criteria` into SQL without a
   `Columns` allowlist; identifiers come from it, values are always bound parameters.
 - **Authorization never pattern-matches request paths.** The HTTP gate asks about the
@@ -74,6 +80,13 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
 - **`service_version!()` must stay a macro**: `env!` expands where it is written.
 - **Generated projects are lib + bin**, because `#[path = "../src/main.rs"]` would re-root
   every `crate::` path in the included file.
+- **`#[use_cases]` wraps only `pub async fn`s** and finds the request id through a
+  parameter typed `&Context`. A wrapped method must return `Result<_, E: UseCaseError>`.
+  Metrics reach OTel through `observe_use_cases`, a process-wide hook installed by
+  jenny-server's telemetry *after* the meter provider: an instrument made from the no-op
+  provider stays a no-op.
+- **`Memory<A>` stores JSON documents, not aggregates**, so a value object that cannot
+  round-trip fails in unit tests. Nothing is queryable until `.queryable([...])`.
 
 ## topmesys
 
@@ -94,7 +107,7 @@ check publishability. Details: `RELEASING.md`.
 
 ## Known gaps (not yet built, recorded in ADRs)
 
-Messaging inbound dispatch (`MessagingAdapter` is declaration only), framework use-case
-and HTTP metrics, W3C trace-context propagation (event headers can now carry it),
-`cargo jenny new --manifest`, reloading Cedar policies without a restart, cursor
-pagination.
+Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
+trace-context propagation (event headers can now carry it), the REST JSON Patch mode and
+`ETag`/`If-Match`, every database-backed store (ADR-013), `cargo jenny new --manifest`,
+reloading Cedar policies without a restart, cursor pagination.

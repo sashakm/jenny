@@ -9,15 +9,19 @@
 //! [`NoteTitle`] is the adapter's job, on the way in, which is why a use case can take
 //! one of these and never wonder whether the title is blank.
 
-use crate::domain::model::{NoteId, NoteTitle};
+//!
+//! Which note a command is about is the use case's other argument, not a field: the
+//! id arrives separately on every transport (a path segment, a message key), and
+//! keeping it out means one command type serves both creating and editing.
+
+use crate::domain::model::NoteTitle;
 
 pub struct CreateNote {
     pub title: NoteTitle,
     pub body: String,
 }
 
-pub struct UpdateNote {
-    pub id: NoteId,
+pub struct EditNote {
     pub title: NoteTitle,
     pub body: String,
 }

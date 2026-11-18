@@ -1,11 +1,11 @@
 //! Use cases: orchestration, and nothing else.
 //!
-//! Each method does the same few things in the same order — check permission, call the
-//! domain, persist, then publish what the domain raised. The business rules themselves
-//! are one ring in, in `domain/`. If a rule starts being written *here*, it has leaked
-//! out of the hexagon.
+//! Each method does the same few things — load, call the domain, save, publish what the
+//! domain raised — and most of that is one call: `Store::change` loads the aggregate,
+//! applies a domain method, and saves it with a version check. The business rules
+//! themselves are one ring in, in `domain/`. If a rule starts being written *here*, it
+//! has leaked out of the hexagon.
 //!
-//! These are plain methods rather than `jenny::UseCase` impls. A use case is a unit of
-//! behaviour, and in Rust that is a function; the trait earns its keep only when you
-//! need the indirection — several driving adapters that must not know the concrete
-//! type, a heterogeneous set behind `Arc<dyn …>`, a decorator wrapping any of them.
+//! A use case is a method on a plain struct that holds its ports. There is no trait to
+//! implement; `#[jenny::use_cases]` on the `impl` block gives every method a span and a
+//! duration measurement, and generates nothing else.

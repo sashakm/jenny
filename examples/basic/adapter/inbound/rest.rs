@@ -4,23 +4,20 @@
 //! into domain commands, and the status codes. Each handler is three lines — extract,
 //! convert, call — because anything longer would be business logic in the wrong ring.
 
-use std::sync::Arc;
-
 use axum::extract::{Path, State};
 use jenny::rest::{ApiResult, Ctx, Json, Listing, Routes, StatusCode};
-use jenny::{DomainError, Dto, EventPublisher, Validate};
+use jenny::{DomainError, Dto, Validate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::application::Notes;
-use crate::application::command::{CreateNote, UpdateNote};
+use crate::application::command::{CreateNote, EditNote};
 use crate::domain::model::{Note, NoteId, NoteTitle};
-use crate::domain::port::NoteRepository;
 
 /// A note to create or replace.
 ///
 /// Deliberately *not* shared with any other adapter — a gRPC adapter gets its own
-/// protobuf type, and both convert into [`CreateNote`].
+/// protobuf type, and both convert into [`CreateNote`] or [`EditNote`].
 ///
 /// `#[derive(Dto)]` turns these attributes into a `Validate` impl and, with the
 /// `openapi` feature, the matching OpenAPI schema. One place to change a bound, and
@@ -44,8 +41,8 @@ pub struct NoteResponse {
     archived: bool,
 }
 
-impl From<Note> for NoteResponse {
-    fn from(note: Note) -> Self {
+impl From<&Note> for NoteResponse {
+    fn from(note: &Note) -> Self {
         Self {
             id: note.id().as_uuid(),
             title: note.title().to_string(),
@@ -74,32 +71,26 @@ impl TryFrom<NoteRequest> for CreateNote {
     }
 }
 
-impl TryFrom<(Uuid, NoteRequest)> for UpdateNote {
+impl TryFrom<NoteRequest> for EditNote {
     type Error = DomainError;
 
-    fn try_from((id, dto): (Uuid, NoteRequest)) -> Result<Self, Self::Error> {
-        dto.validate()?;
-        Ok(UpdateNote {
-            id: NoteId::from_uuid(id),
-            title: NoteTitle::new(dto.title)?,
-            body: dto.body,
-        })
+    fn try_from(dto: NoteRequest) -> Result<Self, Self::Error> {
+        let CreateNote { title, body } = dto.try_into()?;
+        Ok(EditNote { title, body })
     }
 }
 
-type App<R, P> = State<Arc<Notes<R, P>>>;
-
-async fn list<R: NoteRepository, P: EventPublisher + ?Sized>(
-    State(notes): App<R, P>,
+async fn list(
+    State(notes): State<Notes>,
     listing: Listing,
     cx: Ctx,
 ) -> ApiResult<Json<Vec<NoteResponse>>> {
     let found = notes.list(&listing, &cx).await?;
-    Ok(Json(found.into_iter().map(NoteResponse::from).collect()))
+    Ok(Json(found.iter().map(NoteResponse::from).collect()))
 }
 
-async fn create<R: NoteRepository, P: EventPublisher + ?Sized>(
-    State(notes): App<R, P>,
+async fn create(
+    State(notes): State<Notes>,
     cx: Ctx,
     Json(dto): Json<NoteRequest>,
 ) -> ApiResult<(StatusCode, Json<Uuid>)> {
@@ -107,26 +98,29 @@ async fn create<R: NoteRepository, P: EventPublisher + ?Sized>(
     Ok((StatusCode::CREATED, Json(id.as_uuid())))
 }
 
-async fn fetch<R: NoteRepository, P: EventPublisher + ?Sized>(
-    State(notes): App<R, P>,
+async fn fetch(
+    State(notes): State<Notes>,
     Path(id): Path<Uuid>,
     cx: Ctx,
 ) -> ApiResult<Json<NoteResponse>> {
-    Ok(Json(notes.fetch(NoteId::from_uuid(id), &cx).await?.into()))
+    let note = notes.fetch(NoteId::from_uuid(id), &cx).await?;
+    Ok(Json(NoteResponse::from(&*note)))
 }
 
-async fn update<R: NoteRepository, P: EventPublisher + ?Sized>(
-    State(notes): App<R, P>,
+async fn update(
+    State(notes): State<Notes>,
     Path(id): Path<Uuid>,
     cx: Ctx,
     Json(dto): Json<NoteRequest>,
 ) -> ApiResult<StatusCode> {
-    notes.update((id, dto).try_into()?, &cx).await?;
+    notes
+        .edit(NoteId::from_uuid(id), dto.try_into()?, &cx)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn archive<R: NoteRepository, P: EventPublisher + ?Sized>(
-    State(notes): App<R, P>,
+async fn archive(
+    State(notes): State<Notes>,
     Path(id): Path<Uuid>,
     cx: Ctx,
 ) -> ApiResult<StatusCode> {
@@ -134,28 +128,25 @@ async fn archive<R: NoteRepository, P: EventPublisher + ?Sized>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete<R: NoteRepository, P: EventPublisher + ?Sized>(
-    State(notes): App<R, P>,
+async fn delete(
+    State(notes): State<Notes>,
     Path(id): Path<Uuid>,
     cx: Ctx,
 ) -> ApiResult<Json<NoteResponse>> {
-    Ok(Json(notes.delete(NoteId::from_uuid(id), &cx).await?.into()))
+    let removed = notes.delete(NoteId::from_uuid(id), &cx).await?;
+    Ok(Json(NoteResponse::from(&removed)))
 }
 
 /// The whole adapter, as one value. No trait to implement, nothing to erase.
-pub fn routes<R, P>(notes: Arc<Notes<R, P>>) -> Routes
-where
-    R: NoteRepository,
-    P: EventPublisher + ?Sized,
-{
+pub fn routes(notes: Notes) -> Routes {
     Routes::new("notes")
         .describe("Create, read, update, archive and delete notes")
         .label("kind", "crud")
-        .get("/notes", list::<R, P>)
-        .post("/notes", create::<R, P>)
-        .get("/notes/{id}", fetch::<R, P>)
-        .put("/notes/{id}", update::<R, P>)
-        .delete("/notes/{id}", delete::<R, P>)
-        .post("/notes/{id}/archive", archive::<R, P>)
+        .get("/notes", list)
+        .post("/notes", create)
+        .get("/notes/{id}", fetch)
+        .put("/notes/{id}", update)
+        .delete("/notes/{id}", delete)
+        .post("/notes/{id}/archive", archive)
         .with_state(notes)
 }

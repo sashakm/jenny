@@ -5,7 +5,7 @@
 //! application/     use cases — orchestration, and nothing else
 //! adapter/
 //!   inbound/rest   HTTP in: DTOs, TryFrom, status codes
-//!   outbound/      the driven side: a note store, an event publisher
+//!   outbound/      the driven side: an event publisher (the note store is jenny's)
 //! main.rs          the composition root — the only file that knows every layer
 //! ```
 //!
@@ -40,16 +40,16 @@ mod example_test;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use jenny::EventPublisher;
+use jenny::memory::Memory;
 use jenny::rest::RestAdapter;
-use jenny::server::{HealthCheck, JennyServer};
+use jenny::server::JennyServer;
+use jenny::{EventPublisher, Events};
 use serde::Deserialize;
 
 #[cfg(not(feature = "messaging"))]
 use adapter::outbound::events::EventLog;
-use adapter::outbound::memory::InMemoryNotes;
 use application::Notes;
+use domain::model::Note;
 
 /// This service's own configuration, read from `applications.my-notes`. The framework
 /// imposes no schema on it — the shape below is entirely ours.
@@ -62,26 +62,6 @@ impl Default for NotesConfig {
     fn default() -> Self {
         Self {
             greeting: "hello from the built-in default".to_string(),
-        }
-    }
-}
-
-/// A readiness signal backed by the note store. `/health/ready` reports it, so a load
-/// balancer stops sending traffic when the store is unusable — while `/health/live`
-/// stays up, because restarting the process would not fix a broken dependency.
-struct StoreIsUsable(Arc<InMemoryNotes>);
-
-#[async_trait]
-impl HealthCheck for StoreIsUsable {
-    fn name(&self) -> &str {
-        "note-store"
-    }
-
-    async fn check(&self) -> Result<(), String> {
-        if self.0.is_healthy() {
-            Ok(())
-        } else {
-            Err("note store is unavailable".to_string())
         }
     }
 }
@@ -99,13 +79,12 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     tracing::info!("my-notes says: {}", config.greeting);
 
     // --- driven adapters: the outside world, as the domain's ports see it ----------
-    let repository = Arc::new(InMemoryNotes::default());
-
-    // Erased on purpose, to show the other half of the choice: the repository below is
-    // a generic parameter (static dispatch, monomorphised), while the publisher is
-    // picked at the composition root and passed as a trait object. Both are ports;
-    // which dispatch you use is a wiring decision, not a design one.
     //
+    // The queryable paths are the security boundary for client-supplied criteria: a
+    // listing that sorts or filters on anything else is refused before it reaches the
+    // data, so `filter=…` cannot become a question about a field the API never shows.
+    let store = Arc::new(Memory::<Note>::new().queryable(["title", "body", "archived"]));
+
     // With the `messaging` feature the runtime has already started an in-process bus,
     // so the port comes from it and one publish fans out to every listener. Without
     // it, a publisher that writes to the log satisfies the same port.
@@ -118,10 +97,10 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     let events: Arc<dyn EventPublisher> = Arc::new(EventLog);
 
     // Anything several adapters need can be shared through the context while wiring.
-    server.context_mut().provide(repository.clone());
+    server.context_mut().provide(store.clone());
 
     // --- application: use cases over those ports ----------------------------------
-    let notes = Arc::new(Notes::new(repository.clone(), events));
+    let notes = Notes::new(store.clone(), Events::new(events));
 
     // --- driving adapter: HTTP in -------------------------------------------------
     // No mount path given, so it takes `server.api_path` from configuration, which
@@ -133,7 +112,10 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     Ok(server
         .with_version(jenny::service_version!())
         .register(rest)?
-        .register_health_check(StoreIsUsable(repository)))
+        // `/health/ready` reports the store, so a load balancer stops sending traffic
+        // when it is unusable — while `/health/live` stays up, because restarting the
+        // process would not fix a broken dependency.
+        .register_health_check(store))
 }
 
 #[tokio::main]

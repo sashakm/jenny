@@ -107,6 +107,19 @@ impl DomainError {
         }
     }
 
+    /// The variant as a stable, low-cardinality label — `"not_found"`, `"conflict"` —
+    /// for metrics and span fields, where the detail text would explode the series.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Invalid { .. } => "invalid",
+            Self::Unauthenticated { .. } => "unauthenticated",
+            Self::Forbidden { .. } => "forbidden",
+            Self::Conflict { .. } => "conflict",
+            Self::Internal { .. } => "internal",
+        }
+    }
+
     /// The message and every cause below it, `outer: inner: innermost`. What an
     /// adapter logs for an internal failure.
     pub fn report(&self) -> String {

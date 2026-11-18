@@ -1,6 +1,6 @@
 # ADR-003: Inbound Ports — Use Cases and the Invocation Context
 
-**Status:** Accepted
+**Status:** Accepted — the `UseCase` trait and the static-dispatch default superseded by ADR-012
 **Date:** 2026-08-24
 
 ## Context

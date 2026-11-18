@@ -9,6 +9,8 @@
 //! | [`domain`] | the hexagon itself | `domain/`, `application/`, adapters, composition root |
 //! | [`port`] | the boundary — ports are traits | `domain/`, `application/`, adapters, composition root |
 //! | [`task`] | clock-driven inbound adapter | adapters, composition root |
+//! | [`memory`] | in-memory store, a driven adapter | tests, composition root |
+//! | [`testing`] | test doubles for the shipped ports | tests |
 //!
 //! Nothing in [`domain`] or [`port`] pulls in a database driver, an HTTP or gRPC
 //! framework, or a message broker. That is what makes "the domain depends on
@@ -37,8 +39,10 @@
 //! ```
 
 pub mod domain;
+pub mod memory;
 pub mod port;
 pub mod task;
+pub mod testing;
 
 /// Your crate's version, for reporting as the service version.
 ///
