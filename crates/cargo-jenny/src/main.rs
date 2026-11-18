@@ -78,7 +78,7 @@ struct NewArgs {
 
 #[derive(Subcommand)]
 enum AddCommand {
-    /// Add a resource: aggregate, repository port, use cases, REST routes and tests.
+    /// Add a resource: aggregate, store port, use cases, REST routes and tests.
     Resource(AddResourceArgs),
 }
 

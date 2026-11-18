@@ -12,7 +12,7 @@
 //! |---|---|---|
 //! | [`jenny::domain`](domain) | the hexagon | [`Aggregate`], [`DomainError`], [`DomainEvent`], [`Changes`], [`Validate`], [`Principal`], [`Urn`] |
 //! | [`jenny::port`](port) | the boundary | [`Store`], [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
-//! | `jenny::rest` | driving adapter | `RestAdapter`, `Routes`, `Problem` — axum/tower |
+//! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
 //! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving) |
 //! | `jenny::persistence` | driven adapter | Postgres/sqlx: criteria to SQL, `QueryFormat`, `DatabaseCheck` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
@@ -52,7 +52,7 @@
 //!   cron ─┘                           │
 //!                                     ▼
 //!                              outbound ports
-//!                     repository · event publisher · storage
+//!                        store · event publisher · storage
 //!                                     │
 //!                            adapter/outbound
 //!                     postgres · eventbus · object store
@@ -68,6 +68,7 @@
 //! | `persistence` | Postgres/sqlx helpers |
 //! | `security` | authentication and Cedar authorization |
 //! | `openapi` | OpenAPI schemas for the REST wire types |
+//! | `swagger-ui` | a browsable Swagger UI, assets compiled in (implies `openapi`) |
 //! | `telemetry-otlp` / `telemetry-prometheus` / `telemetry-loki` | telemetry backends (imply `server`) |
 //! | `full` | every adapter and the runtime |
 

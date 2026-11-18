@@ -1,6 +1,6 @@
 # ADR-012: Aggregates, Versioned Stores and Use Cases
 
-**Status:** Accepted — implemented
+**Status:** Accepted — implemented; `Store::remove` takes an expected version and `ETag`/`If-Match` are built (ADR-014)
 **Date:** 2026-11-18
 
 ## Context

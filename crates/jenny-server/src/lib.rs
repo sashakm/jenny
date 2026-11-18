@@ -13,8 +13,9 @@
 //! - **Telemetry** — logs, traces and metrics initialised before anything else runs
 //!   ([`telemetry`]). It lives here rather than in `jenny-core`, because only the
 //!   composition root starts exporters, and the domain should not compile OpenTelemetry.
-//! - **Health** — `/health/live`, `/health/ready`, `/health/status` ([`HealthCheck`]).
-//! - **Metrics** — `/metrics`, with the `telemetry-prometheus` feature.
+//! - **Health** — `<framework_path>/health/live`, `…/ready`, `…/status`
+//!   ([`HealthCheck`]); `framework_path` defaults to `/j`.
+//! - **Metrics** — `<framework_path>/metrics`, with the `telemetry-prometheus` feature.
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the background.
 //! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
 //!

@@ -19,13 +19,13 @@ rather than along topics.
 
 | Crate | Ring | Contains |
 |---|---|---|
-| `jenny-core` | domain + ports | `DomainError`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `DomainEvent`; `UseCase`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; tasks |
-| `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, `Ctx`, auth and CORS layers |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; `Memory`; tasks |
+| `jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Versioned`/`IfMatch`, auth and CORS layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
 | `jenny-persistence` | driven adapter | Postgres/sqlx statement building and row mapping |
 | `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, configuration, telemetry, health, hosting |
-| `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]` |
+| `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` — scaffolding (ADR-009) |
 | `jenny` | — | facade of feature-gated re-exports |
 
@@ -56,8 +56,9 @@ that, and both are load-bearing:
 - **Only `jenny-server` depends on more than the core.** It is the composition root, and
   ADR-001 grants it exactly that privilege.
 
-`jenny-core` keeps a deliberately small dependency set — `tokio`, `async-trait`,
-`serde`, `uuid`, `chrono`, `thiserror`, `tracing` and `cron`. No web framework, no
+`jenny-core` keeps a deliberately small dependency set — `tokio`, `tokio-util`,
+`futures`, `async-trait`, `serde`, `serde_json`, `json-patch`, `uuid`, `chrono`,
+`thiserror`, `anyhow`, `tracing` and `cron`. No web framework, no
 database driver, no broker client, and no exporter: telemetry setup (the OTel SDK,
 `tracing-subscriber`, the backends) lives in `jenny-server`, the only crate that starts it.
 

@@ -28,7 +28,7 @@ pub(crate) mod utils;
 ///     #[serde(default)]
 ///     body: String,
 ///
-///     #[dto(range_note = "priority is 1..=5", min = 1, max = 5)]
+///     #[dto(min = 1, max = 5, description = "1 is most urgent")]
 ///     priority: Option<u8>,
 /// }
 /// ```

@@ -1,6 +1,6 @@
 # ADR-001: Hexagonal Layering and the Dependency Rule
 
-**Status:** Accepted
+**Status:** Accepted — the domain import rule and the module contents amended by ADR-012 (serde in `domain/`, `Store`, no `UseCase`); telemetry lives in `jenny::server::telemetry` (ADR-008)
 **Date:** 2026-08-24
 
 ## Context

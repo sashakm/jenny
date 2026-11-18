@@ -15,8 +15,9 @@ src/
   application/     use cases — orchestration, and nothing else
   adapter/
     inbound/rest/  HTTP in: DTOs, TryFrom, status codes
-    outbound/      the driven side: repositories, event publishing
-  main.rs          the composition root — the only file that knows every layer
+    outbound/      the driven side: event publishing (stores are jenny's)
+  lib.rs           the composition root, `build` — the only code that knows every layer
+  main.rs          the binary: `build`, then run
 ```
 
 ## Running

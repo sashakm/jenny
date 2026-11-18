@@ -66,6 +66,15 @@
 //! mapping happens at the boundary and never inside a handler. And `routes` is a plain
 //! function, so wiring it up is a function call.
 //!
+//! ### Two modes
+//!
+//! A [`RestAdapter`] is plainly representational unless told otherwise: `PUT` replaces
+//! and `PATCH` is `405`. With [`accept_json_patch`](RestAdapter::accept_json_patch) it
+//! also takes RFC 6902 JSON Patch on every route that has a `GET` and a `PUT`, derived
+//! from those two, so there is no `PATCH` handler to write ([`patch`]). Writes become
+//! conditional when a handler sends the store version with [`Versioned`] and hands
+//! `If-Match` to its use case through [`IfMatch`]; a stale write is `412`.
+//!
 //! ### Why axum
 //!
 //! axum is a thin ergonomic layer over [`tower`] and [`hyper`](https://docs.rs/hyper),

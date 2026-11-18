@@ -18,7 +18,7 @@
 //! Then poke at it:
 //!
 //! ```sh
-//! curl localhost:8000/health/ready
+//! curl localhost:8000/j/health/ready
 //!
 //! ID=$(curl -sX POST localhost:8000/api/notes \
 //!   -H 'content-type: application/json' \

@@ -1,6 +1,6 @@
 # ADR-009: The `cargo jenny` Scaffolder
 
-**Status:** Accepted — implemented
+**Status:** Accepted — implemented; the generated resource layout follows ADR-012 (a store port and no outbound adapter, wiring printed for `src/lib.rs`) and ADR-014
 **Date:** 2026-08-24
 
 ## Context

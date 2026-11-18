@@ -1,20 +1,22 @@
 //! Domain event definitions — no dispatch.
 //!
 //! Event *types* live in the domain and are raised by aggregates. Getting them onto
-//! a bus is somebody else's job: the application layer collects raised events after
-//! a state change and hands them to the
-//! [`EventPublisher`](crate::port::outbound::EventPublisher) outbound port, and a
-//! driven adapter behind that port does the actual publishing.
+//! a bus is somebody else's job: the application layer publishes what an aggregate
+//! raised through [`Events`](crate::port::Events), after the state change has been
+//! saved, and a driven adapter behind the
+//! [`EventPublisher`](crate::port::outbound::EventPublisher) port does the delivery.
 //!
-//! That split is why this module is so small. A domain event needs to say what it is
-//! called; it does not need to know how to serialise itself, which broker exists, or
-//! whether anyone is listening.
+//! An event derives `Serialize`, because what it carries *is* its published contract
+//! (ADR-012), and `#[derive(DomainEvent)]` names it after its type. It does not know
+//! which broker exists or whether anyone is listening.
 //!
 //! ### Example
 //!
 //! ```
 //! use jenny_core::domain::DomainEvent;
 //!
+//! // In a service, `#[derive(serde::Serialize, jenny::DomainEvent)]` writes the impl.
+//! #[derive(serde::Serialize)]
 //! pub struct NoteCreated {
 //!     pub id: uuid::Uuid,
 //!     pub title: String,
@@ -25,27 +27,28 @@
 //! }
 //! ```
 //!
-//! Turning that into something publishable happens one ring out, where serde is
-//! allowed:
+//! Publishing it encodes the fields as the payload and correlates it with the request:
 //!
 //! ```
+//! # use std::sync::Arc;
 //! # use jenny_core::domain::DomainEvent;
-//! # use jenny_core::port::outbound::EventEnvelope;
-//! # pub struct NoteCreated { pub id: uuid::Uuid, pub title: String }
+//! # use jenny_core::port::{Context, Events};
+//! # use jenny_core::testing::RecordedEvents;
+//! # #[derive(serde::Serialize)] pub struct NoteCreated { pub id: uuid::Uuid, pub title: String }
 //! # impl DomainEvent for NoteCreated { fn name(&self) -> &str { "note.created" } }
-//! # let event = NoteCreated { id: uuid::Uuid::nil(), title: "hi".into() };
-//! let envelope = EventEnvelope::json(
-//!     event.name(),
-//!     &serde_json::json!({ "id": event.id, "title": event.title }),
-//! )?;
-//! # Ok::<(), jenny_core::port::outbound::PublishError>(())
+//! # #[tokio::main(flavor = "current_thread")] async fn main() {
+//! # let events = Events::new(Arc::new(RecordedEvents::default()));
+//! let created = NoteCreated { id: uuid::Uuid::nil(), title: "Shopping".into() };
+//! events.publish(&created, &Context::new()).await;
+//! # }
 //! ```
 
 /// A thing that happened in the domain.
 ///
-/// Implemented by the plain structs and enums in a service's `domain/event/` module.
-/// The only thing the framework needs from an event is its name, which becomes the
-/// topic it is routed on.
+/// Implemented by the structs and enums in a service's `domain/event/` module, usually
+/// through `#[derive(DomainEvent)]`. The trait asks only for the name, which becomes the
+/// topic it is routed on; publishing through [`Events`](crate::port::Events) also needs
+/// `Serialize`, for the payload.
 pub trait DomainEvent: Send + Sync + 'static {
     /// Dotted, past-tense name identifying the kind of event — `"note.created"`,
     /// `"order.cancelled"`. Bus adapters route on this.
