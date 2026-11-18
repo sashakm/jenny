@@ -4,6 +4,7 @@
 //! |---|---|---|
 //! | [`eventbus`] | driven | [`EventBus`] — the in-process bus behind the [`EventPublisher`] port |
 //! | [`nats`] | driven | [`NatsGateway`](nats::NatsGateway) — a bus listener that forwards events to JetStream |
+//! | [`kv`] | driven | [`NatsKv`](kv::NatsKv) — a [`Store`](jenny_core::port::Store) over a JetStream key-value bucket |
 //! | [`subscription`] | driving | [`MessagingAdapter`] — declares the subjects this service consumes |
 //!
 //! ### One publish, many effects
@@ -35,6 +36,7 @@
 
 pub mod eventbus;
 pub mod health;
+pub mod kv;
 pub mod nats;
 
 /// The headers [`EventBus`] puts on every message, from the

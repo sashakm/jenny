@@ -67,6 +67,8 @@ pub struct JennyServer {
     broker: Option<topmesys::EventBroker<topmesys::type_states::Running>>,
     #[cfg(feature = "persistence")]
     postgres: Option<jenny_persistence::Postgres>,
+    #[cfg(feature = "messaging")]
+    nats: Option<jenny_messaging::kv::Nats>,
 }
 
 /// Leading slash on, trailing slash off. `"/"` or `""` mean "no prefix", which axum
@@ -299,6 +301,8 @@ impl JennyServer {
             broker: None,
             #[cfg(feature = "persistence")]
             postgres: None,
+            #[cfg(feature = "messaging")]
+            nats: None,
         }
     }
 
@@ -386,17 +390,49 @@ impl JennyServer {
         Ok(self)
     }
 
-    /// Start the broker if it is not running yet.
+    /// The NATS connection key-value stores use, from `messaging.nats.url`, or `None`
+    /// when no URL is configured.
+    ///
+    /// It connects on first use, so it is available during wiring. Before the socket is
+    /// bound, the runtime connects, opens or creates the bucket of every store handed
+    /// out — named `<namespace>-<kind>`, the namespace being `messaging.namespace` or the
+    /// service name — and registers a `nats` readiness check.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use jenny_core::memory::Memory;
+    /// # use jenny_core::port::Store;
+    /// # use jenny_server::JennyServer;
+    /// # #[derive(serde::Serialize, serde::Deserialize)] struct Session { id: String }
+    /// # impl jenny_core::domain::Aggregate for Session { type Id = String; const KIND: &'static str = "session"; fn id(&self) -> String { self.id.clone() } }
+    /// # fn wire(mut server: JennyServer) -> anyhow::Result<()> {
+    /// let sessions: Arc<dyn Store<Session>> = match server.nats() {
+    ///     Some(nats) => Arc::new(nats.kv::<Session>()),
+    ///     None => Arc::new(Memory::<Session>::new()),
+    /// };
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "messaging")]
-    fn ensure_broker(&mut self) -> anyhow::Result<()> {
-        if self.broker.is_some() {
-            return Ok(());
+    pub fn nats(&mut self) -> Option<jenny_messaging::kv::Nats> {
+        if self.nats.is_none()
+            && let Some(url) = self.config.messaging.nats.url.clone()
+        {
+            let prefix = self.namespace();
+            info!(prefix, "nats configured for key-value stores");
+            self.nats = Some(jenny_messaging::kv::Nats::new(url, prefix));
         }
-        // An empty namespace would produce topics like `.note.created`, which the
-        // broker rejects as having an empty segment — so fall back rather than build
-        // a bus whose every publish fails.
-        let namespace = self
-            .config
+        self.nats.clone()
+    }
+
+    /// The prefix for event topics and NATS buckets.
+    ///
+    /// An empty namespace would produce topics like `.note.created`, which the broker
+    /// rejects as having an empty segment — so fall back rather than build a bus whose
+    /// every publish fails.
+    #[cfg(feature = "messaging")]
+    fn namespace(&self) -> String {
+        self.config
             .messaging
             .namespace
             .clone()
@@ -404,7 +440,16 @@ impl JennyServer {
             .or_else(|| {
                 Some(self.config.telemetry.service_name.clone()).filter(|n| !n.trim().is_empty())
             })
-            .unwrap_or_else(|| DEFAULT_EVENT_NAMESPACE.to_string());
+            .unwrap_or_else(|| DEFAULT_EVENT_NAMESPACE.to_string())
+    }
+
+    /// Start the broker if it is not running yet.
+    #[cfg(feature = "messaging")]
+    fn ensure_broker(&mut self) -> anyhow::Result<()> {
+        if self.broker.is_some() {
+            return Ok(());
+        }
+        let namespace = self.namespace();
         let broker = topmesys::EventBroker::new(self.config.messaging.buffer_size).run()?;
         info!(
             namespace,
@@ -548,7 +593,19 @@ impl JennyServer {
             broker,
             #[cfg(feature = "persistence")]
             postgres,
+            #[cfg(feature = "messaging")]
+            nats,
         } = self;
+
+        // Buckets too: a store whose bucket cannot be opened fails here, not later.
+        #[cfg(feature = "messaging")]
+        if let Some(nats) = nats.as_ref() {
+            nats.prepare()
+                .await
+                .map_err(|e| e.context("preparing the NATS key-value buckets"))?;
+            info!("nats buckets prepared");
+            checks.push(Arc::new(nats.health_check()));
+        }
 
         // Schema first: nothing should be served against tables that do not exist yet.
         #[cfg(feature = "persistence")]
@@ -1249,6 +1306,66 @@ mod tests {
             seen.lock().unwrap().as_slice(),
             ["test-service.note.created"]
         );
+    }
+
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn without_a_nats_url_there_are_no_buckets() {
+        let mut server = server_with("127.0.0.1:0");
+        assert!(server.nats().is_none());
+    }
+
+    /// Needs `JENNY_TEST_NATS_URL`.
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn a_configured_nats_opens_its_buckets_before_serving_and_reports_ready() {
+        use jenny_core::port::{Store, StoreExt};
+
+        let url = match std::env::var("JENNY_TEST_NATS_URL") {
+            Ok(url) => url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("JENNY_TEST_NATS_URL must be set in CI")
+            }
+            Err(_) => return eprintln!("skipping: JENNY_TEST_NATS_URL is not set"),
+        };
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Session {
+            id: u32,
+        }
+        impl jenny_core::domain::Aggregate for Session {
+            type Id = u32;
+            const KIND: &'static str = "session";
+            fn id(&self) -> u32 {
+                self.id
+            }
+        }
+
+        let namespace = format!("servertest-{}", uuid::Uuid::new_v4().simple());
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.namespace = Some(namespace.clone());
+        server.config.messaging.nats.url = Some(url.clone());
+        let sessions = server.nats().expect("a URL is configured").kv::<Session>();
+
+        let parts = server.register(notes()).unwrap().bind().await.unwrap();
+        sessions.insert(Session { id: 1 }).await.unwrap();
+        assert_eq!(sessions.load(&1).await.unwrap().id, 1);
+
+        let (status, ready) = call(parts.router.clone(), "/j/health/ready").await;
+        assert_eq!(status, StatusCode::OK);
+        let check = ready["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "nats")
+            .expect("the runtime registers the NATS readiness check");
+        assert_eq!(check["status"], "up");
+
+        let client = async_nats::connect(&url).await.unwrap();
+        async_nats::jetstream::new(client)
+            .delete_key_value(format!("{namespace}-session"))
+            .await
+            .unwrap();
     }
 
     #[cfg(all(feature = "persistence", not(feature = "messaging")))]

@@ -32,6 +32,8 @@
 //!   log_format: pretty
 //! messaging:
 //!   buffer_size: 64
+//!   nats:
+//!     url: nats://nats:4222   # key-value stores; JENNY__MESSAGING__NATS__URL
 //! persistence:
 //!   postgres:
 //!     url: postgres://notes:secret@db/notes   # better: JENNY__PERSISTENCE__POSTGRES__URL
@@ -200,8 +202,11 @@ impl std::fmt::Debug for BasicAuthConfig {
 pub struct MessagingConfig {
     /// How many events the in-process bus buffers before publishers wait.
     pub buffer_size: usize,
-    /// Prefix for every event topic. Defaults to `telemetry.service_name`.
+    /// Prefix for every event topic, and for the NATS buckets of key-value stores.
+    /// Defaults to `telemetry.service_name`.
     pub namespace: Option<String>,
+    /// The NATS servers key-value stores use, comma-separated (`messaging.nats.url`).
+    pub nats: NatsSection,
 }
 
 impl Default for MessagingConfig {
@@ -209,8 +214,18 @@ impl Default for MessagingConfig {
         Self {
             buffer_size: DEFAULT_EVENT_BUFFER,
             namespace: None,
+            nats: NatsSection::default(),
         }
     }
+}
+
+/// The `messaging.nats` section.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct NatsSection {
+    /// Without one there is no NATS, and [`JennyServer::nats`](crate::JennyServer::nats)
+    /// is `None`.
+    pub url: Option<String>,
 }
 
 /// The `persistence` section. Applies with the `persistence` feature.

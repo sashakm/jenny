@@ -13,7 +13,7 @@
 //! | [`jenny::domain`](domain) | the hexagon | [`Aggregate`], [`DomainError`], [`DomainEvent`], [`Changes`], [`Validate`], [`Principal`], [`Urn`] |
 //! | [`jenny::port`](port) | the boundary | [`Store`], [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
-//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving) |
+//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving), `kv::NatsKv` store |
 //! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 //! | [`jenny::task`](task) | driving adapter | the clock: [`Task`](task::Task), [`ScheduledTask`](task::ScheduledTask) |

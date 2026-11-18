@@ -1,6 +1,6 @@
 # ADR-006: Messaging and the In-Process Event Bus
 
-**Status:** Accepted — inbound dispatch not implemented; events committed with a Postgres write reach the bus through the outbox relay (ADR-016)
+**Status:** Accepted — inbound dispatch not implemented; events committed with a Postgres write reach the bus through the outbox relay (ADR-016); `messaging.nats.url` also backs key-value stores (ADR-017)
 **Date:** 2026-08-24
 
 ## Context

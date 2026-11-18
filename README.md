@@ -279,8 +279,13 @@ The runtime does the rest before it binds its socket. It runs your migrations
 lock so replicas can start together, and adds `postgres` to `/j/health/ready`. Every
 save is a compare-and-swap on the version; listings filter, sort and page inside the
 database. For data other systems query relationally, `postgres.table::<Note>("notes")`
-is the same store over a table of your own with a column per field. MongoDB, NATS KV, S3-compatible object storage and Apache AGE follow
-(ADR-013).
+is the same store over a table of your own with a column per field.
+
+Services that already run NATS can keep aggregates in a JetStream key-value bucket
+instead: with `messaging.nats.url` set, `server.nats()` hands out a connection and
+`nats.kv::<Session>()` a store in the bucket `<namespace>-session`, created before the
+server starts. Versions, conditional writes and listings behave exactly as in memory —
+listing reads every key, so it suits hundreds of aggregates, not millions. S3-compatible object storage and Apache AGE follow (ADR-013).
 
 ## Scaffolding
 
@@ -394,7 +399,7 @@ growing table never turns one request into a full scan.
 | `jenny` | — | facade: feature-gated re-exports |
 | `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Events`, the outbound ports, `Memory`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
-| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
+| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, config, health, hosting |

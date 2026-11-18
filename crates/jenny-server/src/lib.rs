@@ -21,6 +21,9 @@
 //!   ([`JennyServer::postgres`]), migrated, its document tables created and its
 //!   readiness checked before the socket is bound; with `outbox: true`, the relay that
 //!   forwards committed events to the bus, until shutdown.
+//! - **NATS key-value buckets** — with `messaging`, a connection from `messaging.nats.url`
+//!   ([`JennyServer::nats`]), its buckets opened and its readiness checked before the
+//!   socket is bound.
 //! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
 //!
 //! ### No injection container
@@ -56,8 +59,8 @@ pub use config::PersistenceConfig;
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
     DEFAULT_EVENT_BUFFER, DEFAULT_EVENT_NAMESPACE, DEFAULT_FRAMEWORK_PATH,
-    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig, MessagingConfig, MetricsConfig, ServerArgs,
-    ServerConfig,
+    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig, MessagingConfig, MetricsConfig, NatsSection,
+    ServerArgs, ServerConfig,
 };
 pub use context::ServerContext;
 pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};

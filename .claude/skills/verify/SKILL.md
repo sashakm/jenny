@@ -34,6 +34,7 @@ Then add whatever the change touched:
 | a new cargo feature or `#[cfg(feature = …)]` | add it to the lists in the `features` recipe | `--all-features` hides combination bugs |
 | `examples/basic/**` | `cargo test --example basic --features server` | the example's end-to-end test boots the real composition root |
 | `crates/jenny-persistence/**`, the runtime's `persistence` wiring, or a store's contract in `jenny-core` | `just test-postgres` | database tests skip without `JENNY_TEST_POSTGRES_URL`, so `test-all` never ran them |
+| `crates/jenny-messaging/src/kv.rs`, the runtime's NATS wiring, `Queryable`, or a store's contract | `just test-nats` | the same, for `JENNY_TEST_NATS_URL` |
 | public API of any crate | `just package`; mark the commit breaking (`!`) if anything was removed or changed | release-plz versions from the commit header |
 
 `just test` is what CI runs (doc tests, then everything under llvm-cov); use it when
