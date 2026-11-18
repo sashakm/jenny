@@ -80,6 +80,11 @@ jobs:
         run: cargo test -p jenny --features server,persistence --example basic
         env:
           JENNY__PERSISTENCE__POSTGRES__URL: postgres://jenny:jenny@localhost:5432/jenny
+      - name: Run the example against Postgres, its events through the outbox
+        run: cargo test -p jenny --features server,persistence,messaging --example basic
+        env:
+          JENNY__PERSISTENCE__POSTGRES__URL: postgres://jenny:jenny@localhost:5432/jenny
+          JENNY__PERSISTENCE__POSTGRES__OUTBOX: "true"
       - name: Upload coverage report
         if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v7

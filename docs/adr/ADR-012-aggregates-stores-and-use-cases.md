@@ -1,6 +1,6 @@
 # ADR-012: Aggregates, Versioned Stores and Use Cases
 
-**Status:** Accepted — implemented; `Store::remove` takes an expected version and `ETag`/`If-Match` are built (ADR-014)
+**Status:** Accepted — implemented; `Store::remove` takes an expected version and `ETag`/`If-Match` are built (ADR-014); `change` returns a builder (`expecting`, `raising`) and `change_at` is gone (ADR-016)
 **Date:** 2026-11-18
 
 ## Context

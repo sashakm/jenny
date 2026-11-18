@@ -39,14 +39,19 @@
 //! ```
 
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::ops::{Deref, DerefMut};
 
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::{Aggregate, Changes, Criteria, DomainError, DomainEvent, DomainResult};
+
+use super::context::Context;
+use super::events::{Events, Raised};
+use super::outbound::{EventEnvelope, PublishError};
 
 /// How many times an aggregate has been written. The first write is version 1.
 ///
@@ -222,6 +227,30 @@ pub trait Store<A: Aggregate>: Send + Sync + 'static {
     /// any path outside its allowlist with [`Invalid`](DomainError::Invalid) — the same
     /// rule [`Criteria::ensure_allowed`] encodes (ADR-010).
     async fn list(&self, criteria: &Criteria) -> DomainResult<Vec<A>>;
+
+    /// [`insert`](Self::insert), keeping `events` with the write when this store can
+    /// commit them together — an outbox in the same transaction (ADR-016).
+    ///
+    /// Returns the events it did not keep. The caller publishes those once the write
+    /// has succeeded, which is all a store without an outbox can offer; the default
+    /// keeps none.
+    async fn insert_raising(
+        &self,
+        aggregate: A,
+        events: Vec<EventEnvelope>,
+    ) -> DomainResult<(Loaded<A>, Vec<EventEnvelope>)> {
+        Ok((self.insert(aggregate).await?, events))
+    }
+
+    /// [`save`](Self::save), keeping `events` with the write when this store can. See
+    /// [`insert_raising`](Self::insert_raising).
+    async fn save_raising(
+        &self,
+        aggregate: Loaded<A>,
+        events: Vec<EventEnvelope>,
+    ) -> DomainResult<(Loaded<A>, Vec<EventEnvelope>)> {
+        Ok((self.save(aggregate).await?, events))
+    }
 }
 
 /// The load-change-save sequence every command repeats, written once.
@@ -241,32 +270,28 @@ pub trait StoreExt<A: Aggregate>: Store<A> {
     /// changing anything, nothing is written either and the version stays put, so
     /// repeating a request is harmless.
     ///
+    /// Await it as it is, or say more first:
+    ///
+    /// - [`expecting`](Change::expecting) — only if the aggregate is still at the
+    ///   version the caller read (an HTTP `If-Match`); [`Stale`](DomainError::Stale)
+    ///   otherwise.
+    /// - [`raising`](Change::raising) — publish what `change` returned, with the write:
+    ///   in the same transaction when the store has an outbox, right after it otherwise.
+    ///
     /// A save that loses the race against another writer fails with
     /// [`Conflict`](DomainError::Conflict) rather than overwriting it.
-    fn change<T, F>(
-        &self,
-        id: &A::Id,
-        change: F,
-    ) -> impl Future<Output = DomainResult<Changed<A, T>>> + Send
+    fn change<'a, T, F>(&'a self, id: &'a A::Id, change: F) -> Change<'a, A, Self, F>
     where
-        F: FnOnce(&mut A) -> DomainResult<T> + Send,
-        T: Send;
+        F: FnOnce(&mut A) -> DomainResult<T> + Send + 'a,
+        T: Send + 'a;
 
-    /// [`change`](Self::change), but only if the aggregate is still at the version the
-    /// caller expected — what an HTTP `If-Match` asks for. `None` means no expectation.
-    ///
-    /// Fails with [`Stale`](DomainError::Stale) when the version read is not the one
-    /// expected, and also when another writer saves between that read and this save:
-    /// either way the caller's view is out of date, and it asked to be told.
-    fn change_at<T, F>(
-        &self,
-        id: &A::Id,
-        expected: Option<Version>,
-        change: F,
-    ) -> impl Future<Output = DomainResult<Changed<A, T>>> + Send
+    /// Insert `aggregate` together with what creating it raised. Await it after
+    /// [`raising`](Add::raising) — an `add` that forgot its events would lose them, so it
+    /// is not awaitable on its own; [`insert`](Store::insert) is for aggregates that
+    /// raise nothing.
+    fn add<'a, T>(&'a self, aggregate: A, raised: T) -> Add<'a, A, Self, T>
     where
-        F: FnOnce(&mut A) -> DomainResult<T> + Send,
-        T: Send;
+        T: Raised + 'a;
 }
 
 impl<A, S> StoreExt<A> for S
@@ -280,45 +305,268 @@ where
         self.find(id).await?.ok_or_else(DomainError::not_found)
     }
 
-    async fn change<T, F>(&self, id: &A::Id, change: F) -> DomainResult<Changed<A, T>>
+    fn change<'a, T, F>(&'a self, id: &'a A::Id, change: F) -> Change<'a, A, Self, F>
     where
-        F: FnOnce(&mut A) -> DomainResult<T> + Send,
-        T: Send,
+        F: FnOnce(&mut A) -> DomainResult<T> + Send + 'a,
+        T: Send + 'a,
     {
-        self.change_at(id, None, change).await
+        Change {
+            store: self,
+            id,
+            change,
+            expected: None,
+        }
     }
 
-    async fn change_at<T, F>(
-        &self,
-        id: &A::Id,
-        expected: Option<Version>,
-        change: F,
-    ) -> DomainResult<Changed<A, T>>
+    fn add<'a, T>(&'a self, aggregate: A, raised: T) -> Add<'a, A, Self, T>
     where
-        F: FnOnce(&mut A) -> DomainResult<T> + Send,
-        T: Send,
+        T: Raised + 'a,
     {
-        let mut aggregate = self.load(id).await?;
-        expect_version::<A>(id, expected, aggregate.version())?;
-        let outcome = change(&mut aggregate)?;
-        let changes = aggregate.changes()?;
-        let aggregate = if changes.is_empty() {
-            aggregate
-        } else {
-            match self.save(aggregate).await {
-                // Read at the expected version, but someone saved since: still stale.
-                Err(DomainError::Conflict { detail }) if expected.is_some() => {
-                    return Err(DomainError::stale(detail));
+        Add {
+            store: self,
+            aggregate,
+            raised,
+        }
+    }
+}
+
+/// A change about to be made. See [`StoreExt::change`].
+#[must_use = "a change does nothing until it is awaited"]
+pub struct Change<'a, A: Aggregate, S: ?Sized, F> {
+    store: &'a S,
+    id: &'a A::Id,
+    change: F,
+    expected: Option<Version>,
+}
+
+impl<'a, A, S, F, T> Change<'a, A, S, F>
+where
+    A: Aggregate,
+    S: Store<A> + ?Sized,
+    F: FnOnce(&mut A) -> DomainResult<T> + Send + 'a,
+    T: Send + 'a,
+{
+    /// Only if the aggregate is still at `expected`; `None` means no expectation.
+    ///
+    /// Fails with [`Stale`](DomainError::Stale) when the version read is not the one
+    /// expected, and also when another writer saves between that read and this save:
+    /// either way the caller's view is out of date, and it asked to be told.
+    pub fn expecting(mut self, expected: Option<Version>) -> Self {
+        self.expected = expected;
+        self
+    }
+
+    /// Publish what the change returned — an event, an `Option` or `Vec` of them — with
+    /// the write.
+    ///
+    /// A store with an outbox commits the events in the same transaction as the
+    /// aggregate, so either both happen or neither does. Any other store saves first
+    /// and publishes right after; nothing is published when the change or the save
+    /// fails. When the change turns out to change nothing, there is no write, and the
+    /// events are published as they are.
+    pub fn raising(self, events: &'a Events, cx: &'a Context) -> RaisingChange<'a, A, S, F> {
+        RaisingChange {
+            change: self,
+            events,
+            cx,
+            announce: false,
+        }
+    }
+}
+
+impl<'a, A, S, F, T> IntoFuture for Change<'a, A, S, F>
+where
+    A: Aggregate,
+    S: Store<A> + ?Sized,
+    F: FnOnce(&mut A) -> DomainResult<T> + Send + 'a,
+    T: Send + 'a,
+{
+    type Output = DomainResult<Changed<A, T>>;
+    type IntoFuture = BoxFuture<'a, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(apply(self, None, |_, _| Ok(Vec::new())))
+    }
+}
+
+/// A change whose events are published with it. See [`Change::raising`].
+#[must_use = "a change does nothing until it is awaited"]
+pub struct RaisingChange<'a, A: Aggregate, S: ?Sized, F> {
+    change: Change<'a, A, S, F>,
+    events: &'a Events,
+    cx: &'a Context,
+    announce: bool,
+}
+
+impl<'a, A, S, F, T> RaisingChange<'a, A, S, F>
+where
+    A: Aggregate,
+    S: Store<A> + ?Sized,
+    F: FnOnce(&mut A) -> DomainResult<T> + Send + 'a,
+    T: Raised + 'a,
+{
+    /// See [`Change::expecting`].
+    pub fn expecting(mut self, expected: Option<Version>) -> Self {
+        self.change.expected = expected;
+        self
+    }
+
+    /// Also publish an `<kind>.updated` event carrying what changed, as a JSON Patch
+    /// ([`Updated`]), when anything did — for listeners that mirror state rather than
+    /// react to what the domain said happened.
+    pub fn announcing_changes(mut self) -> Self {
+        self.announce = true;
+        self
+    }
+}
+
+impl<'a, A, S, F, T> IntoFuture for RaisingChange<'a, A, S, F>
+where
+    A: Aggregate,
+    S: Store<A> + ?Sized,
+    F: FnOnce(&mut A) -> DomainResult<T> + Send + 'a,
+    T: Raised + 'a,
+{
+    type Output = DomainResult<Changed<A, T>>;
+    type IntoFuture = BoxFuture<'a, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        let Self {
+            change,
+            events,
+            cx,
+            announce,
+        } = self;
+        Box::pin(apply(
+            change,
+            Some((events, cx)),
+            move |outcome: &T, updated| {
+                let mut envelopes = outcome.envelopes(cx).map_err(encoding)?;
+                if announce && let Some(updated) = updated {
+                    envelopes.extend(updated.envelopes(cx).map_err(encoding)?);
                 }
-                saved => saved?,
-            }
-        };
-        Ok(Changed {
+                Ok(envelopes)
+            },
+        ))
+    }
+}
+
+/// Load, check, change, and save with whatever events `encode` makes of the outcome.
+async fn apply<'a, A, S, F, T, E>(
+    change: Change<'a, A, S, F>,
+    deliver: Option<(&'a Events, &'a Context)>,
+    encode: E,
+) -> DomainResult<Changed<A, T>>
+where
+    A: Aggregate,
+    S: Store<A> + ?Sized,
+    F: FnOnce(&mut A) -> DomainResult<T> + Send + 'a,
+    T: Send + 'a,
+    E: FnOnce(&T, Option<&Updated>) -> DomainResult<Vec<EventEnvelope>> + Send,
+{
+    let Change {
+        store,
+        id,
+        change,
+        expected,
+    } = change;
+    let mut aggregate = store.load(id).await?;
+    expect_version::<A>(id, expected, aggregate.version())?;
+    let outcome = change(&mut aggregate)?;
+    let changes = aggregate.changes()?;
+
+    if changes.is_empty() {
+        // Nothing to write, so nothing to commit the events with; what the domain
+        // raised still happened.
+        let envelopes = encode(&outcome, None)?;
+        if let Some((events, cx)) = deliver {
+            events.deliver(envelopes, cx).await;
+        }
+        return Ok(Changed {
             outcome,
             changes,
             aggregate,
+        });
+    }
+
+    // Encoded before the write: an event that cannot be encoded is a bug, and the
+    // change must not be saved without it.
+    let updated = Updated::new::<A>(&aggregate.id(), aggregate.version().next(), changes.clone());
+    let envelopes = encode(&outcome, Some(&updated))?;
+    let (aggregate, unsent) = match store.save_raising(aggregate, envelopes).await {
+        // Read at the expected version, but someone saved since: still stale.
+        Err(DomainError::Conflict { detail }) if expected.is_some() => {
+            return Err(DomainError::stale(detail));
+        }
+        saved => saved?,
+    };
+    if let Some((events, cx)) = deliver {
+        events.deliver(unsent, cx).await;
+    }
+    Ok(Changed {
+        outcome,
+        changes,
+        aggregate,
+    })
+}
+
+/// An aggregate about to be inserted with what creating it raised. See
+/// [`StoreExt::add`].
+#[must_use = "an add does nothing until it is raised and awaited"]
+pub struct Add<'a, A, S: ?Sized, T> {
+    store: &'a S,
+    aggregate: A,
+    raised: T,
+}
+
+impl<'a, A, S, T> Add<'a, A, S, T>
+where
+    A: Aggregate,
+    S: Store<A> + ?Sized,
+    T: Raised + 'a,
+{
+    /// Publish what creating the aggregate raised, with the insert. See
+    /// [`Change::raising`].
+    pub fn raising(self, events: &'a Events, cx: &'a Context) -> RaisingAdd<'a, A, S, T> {
+        RaisingAdd {
+            add: self,
+            events,
+            cx,
+        }
+    }
+}
+
+/// An insert whose events are published with it. See [`Add::raising`].
+#[must_use = "an add does nothing until it is awaited"]
+pub struct RaisingAdd<'a, A, S: ?Sized, T> {
+    add: Add<'a, A, S, T>,
+    events: &'a Events,
+    cx: &'a Context,
+}
+
+impl<'a, A, S, T> IntoFuture for RaisingAdd<'a, A, S, T>
+where
+    A: Aggregate,
+    S: Store<A> + ?Sized,
+    T: Raised + 'a,
+{
+    type Output = DomainResult<Loaded<A>>;
+    type IntoFuture = BoxFuture<'a, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        let Self { add, events, cx } = self;
+        Box::pin(async move {
+            let envelopes = add.raised.envelopes(cx).map_err(encoding)?;
+            let (inserted, unsent) = add.store.insert_raising(add.aggregate, envelopes).await?;
+            events.deliver(unsent, cx).await;
+            Ok(inserted)
         })
     }
+}
+
+/// An event that cannot be encoded is a bug in its `Serialize`, not the caller's fault.
+fn encoding(error: PublishError) -> DomainError {
+    DomainError::internal(format!("could not encode an event: {error}"))
 }
 
 /// What [`StoreExt::change`] did.
@@ -342,12 +590,11 @@ impl<A: Aggregate, T> Changed<A, T> {
         if self.changes.is_empty() {
             return None;
         }
-        Some(Updated {
-            name: format!("{}.updated", A::KIND),
-            id: self.aggregate.id().to_string(),
-            version: self.aggregate.version(),
-            changes: self.changes.clone(),
-        })
+        Some(Updated::new::<A>(
+            &self.aggregate.id(),
+            self.aggregate.version(),
+            self.changes.clone(),
+        ))
     }
 }
 
@@ -364,6 +611,17 @@ pub struct Updated {
     pub id: String,
     pub version: Version,
     pub changes: Changes,
+}
+
+impl Updated {
+    fn new<A: Aggregate>(id: &A::Id, version: Version, changes: Changes) -> Self {
+        Self {
+            name: format!("{}.updated", A::KIND),
+            id: id.to_string(),
+            version,
+            changes,
+        }
+    }
 }
 
 impl DomainEvent for Updated {

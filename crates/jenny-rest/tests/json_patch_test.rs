@@ -82,11 +82,12 @@ async fn replace(
         return Err(DomainError::invalid("title must not be empty").into());
     }
     notes
-        .change_at(&id, expected, |note| -> DomainResult<()> {
+        .change(&id, |note| -> DomainResult<()> {
             note.title = dto.title;
             note.tags = dto.tags;
             Ok(())
         })
+        .expecting(expected)
         .await?;
     // Which resource served it, to show a forwarded PUT still knows.
     Ok((

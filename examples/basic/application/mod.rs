@@ -1,8 +1,10 @@
 //! Use cases: orchestration, and nothing else.
 //!
 //! Each method here does the same few things — load, call the domain, save, publish
-//! what the domain raised — and most of that is one call: `Store::change` loads the
-//! aggregate, applies a domain method, and saves it with a version check. The business
+//! what the domain raised — and all of it is one call: `Store::change` loads the
+//! aggregate, applies a domain method, saves it with a version check, and with
+//! `.raising(…)` publishes what the method returned, in the same transaction when the
+//! store keeps an outbox. The business
 //! rules themselves are one ring in, in `domain/`; if a rule ever starts being written
 //! *here*, it has leaked out of the hexagon.
 //!

@@ -28,7 +28,10 @@ changing it, and write a new one (see the `write-adr` skill) for a new decision.
   web, database or broker crate. No adapter crate depends on another adapter crate; only
   `jenny-server` depends on more than the core (ADR-001, ADR-002).
 - **Storage goes through `Store<A>`, and every save is versioned** (ADR-012). Queries in
-  the domain's own language go on a port that extends it, never on `Store` itself. No
+  the domain's own language go on a port that extends it, never on `Store` itself.
+- **Events that report a write go with the write**: `change(…).raising(&events, cx)` or
+  `add(aggregate, raised).raising(…)`, never `change(…).await` then `events.publish(…)`.
+  Only then can a Postgres store with an outbox commit them together (ADR-016). No
   error-code catalogue, no DI container: both were considered and rejected.
 - **Serde is the only foreign derive in `domain/`.** Aggregates and events derive it;
   value objects deserialise through their constructors (`#[serde(try_from = …)]`), so a
@@ -98,6 +101,10 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   runtime's `persistence` wiring. Each test uses a table of its own and drops it.
 - **`/tmp` has a per-user quota** that a few scaffolded target dirs fill. Run the slow
   gates with `TMPDIR=$PWD/target/tmp` when they fail with "Disk quota exceeded".
+- **The outbox delivers at least once**, in order per relay, a moment after the request.
+  The relay starts in `bind`, stops after the HTTP drain and before the broker, and the
+  pool closes last; keep that order. Outbox tests each use their own schema
+  (`search_path`), because every outbox table is `jenny_outbox`.
 - **JSON Patch needs two conventions from a resource**: its PUT accepts the GET
   representation (no `deny_unknown_fields`), and reads it through `jenny_rest::Json`,
   which refuses ignored fields a patch changed. `accept_json_patch()` must precede
@@ -124,6 +131,5 @@ check publishability. Details: `RELEASING.md`.
 
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
-the OpenAPI document (ADR-014), the Postgres outbox (ADR-015), the
-MongoDB, NATS KV, object-storage and AGE adapters (ADR-013), `cargo jenny new --manifest`,
+the OpenAPI document (ADR-014), events raised with a `remove` (ADR-016), the MongoDB, NATS KV, object-storage and AGE adapters (ADR-013), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

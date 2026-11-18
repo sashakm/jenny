@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::domain::DomainEvent;
 
 use super::context::Context;
-use super::outbound::{EventEnvelope, EventPublisher};
+use super::outbound::{EventEnvelope, EventPublisher, PublishError};
 
 /// What a use case holds to publish events: the [`EventPublisher`] port, plus the three
 /// things every publish needs and nobody should write twice.
@@ -40,8 +40,9 @@ use super::outbound::{EventEnvelope, EventPublisher};
 /// Why a failure is logged and not returned: by the time a use case publishes, the
 /// state change it reports has been committed. Failing the request would tell the
 /// caller their change did not happen when it did. That is the dual-write problem in
-/// miniature, and when a service outgrows it the answer is an outbox behind the port
-/// (ADR-004) — this call does not change.
+/// miniature. For events that report a store write, hand them to the write instead —
+/// [`StoreExt::change`](super::StoreExt::change)`(…).raising(&events, cx)` — and a store
+/// with an outbox records them in the same transaction (ADR-016).
 #[derive(Clone)]
 pub struct Events {
     publisher: Arc<dyn EventPublisher>,
@@ -69,18 +70,67 @@ impl Events {
                 return;
             }
         };
-        if let Err(e) = self.publisher.publish(envelope).await {
-            tracing::error!(
-                request_id = %cx.request_id(),
-                event = event.name(),
-                "could not publish event: {e}"
-            );
+        self.deliver(vec![envelope], cx).await;
+    }
+
+    /// Hand already-built envelopes to the port, logging any that fail.
+    pub async fn deliver(&self, envelopes: Vec<EventEnvelope>, cx: &Context) {
+        for envelope in envelopes {
+            let name = envelope.name().to_string();
+            if let Err(e) = self.publisher.publish(envelope).await {
+                tracing::error!(
+                    request_id = %cx.request_id(),
+                    event = name,
+                    "could not publish event: {e}"
+                );
+            }
         }
     }
 
     /// The port underneath, for the rare caller that wants the raw envelope API.
     pub fn publisher(&self) -> &Arc<dyn EventPublisher> {
         &self.publisher
+    }
+}
+
+/// What a change can raise: one event, an optional one, several, or nothing.
+///
+/// Implemented for every `DomainEvent + Serialize`, and for `Option`, `Vec` and `()` of
+/// them, so a domain method returns whatever it naturally raises and
+/// [`raising`](super::store::Change::raising) publishes it.
+pub trait Raised: Send {
+    /// The events, encoded and correlated with `cx`, in order.
+    fn envelopes(&self, cx: &Context) -> Result<Vec<EventEnvelope>, PublishError>;
+}
+
+impl<E: DomainEvent + Serialize> Raised for E {
+    fn envelopes(&self, cx: &Context) -> Result<Vec<EventEnvelope>, PublishError> {
+        Ok(vec![
+            EventEnvelope::json(self.name(), self)?.correlated_with(cx),
+        ])
+    }
+}
+
+impl<E: DomainEvent + Serialize> Raised for Option<E> {
+    fn envelopes(&self, cx: &Context) -> Result<Vec<EventEnvelope>, PublishError> {
+        self.as_ref()
+            .map_or(Ok(Vec::new()), |event| event.envelopes(cx))
+    }
+}
+
+impl<E: DomainEvent + Serialize> Raised for Vec<E> {
+    fn envelopes(&self, cx: &Context) -> Result<Vec<EventEnvelope>, PublishError> {
+        let mut all = Vec::with_capacity(self.len());
+        for event in self {
+            all.extend(event.envelopes(cx)?);
+        }
+        Ok(all)
+    }
+}
+
+impl Raised for () {
+    fn envelopes(&self, _: &Context) -> Result<Vec<EventEnvelope>, PublishError> {
+        Ok(Vec::new())
     }
 }
 
@@ -99,7 +149,6 @@ impl From<Arc<dyn EventPublisher>> for Events {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::port::outbound::PublishError;
     use crate::testing::RecordedEvents;
     use async_trait::async_trait;
 

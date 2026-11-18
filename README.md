@@ -156,18 +156,32 @@ pub struct Notes {
 impl Notes {
     pub async fn create(&self, cmd: CreateNote, cx: &Context) -> DomainResult<NoteId> {
         let (note, created) = Note::create(cmd.title, cmd.body);
-        let note = self.notes.insert(note).await?;
-        self.events.publish(&created, cx).await;
+        let note = self.notes.add(note, created).raising(&self.events, cx).await?;
         Ok(note.id())
     }
 
     pub async fn archive(&self, id: NoteId, cx: &Context) -> DomainResult<()> {
-        let archived = self.notes.change(&id, Note::archive).await?;
-        self.events.publish(&archived.outcome, cx).await;
+        self.notes.change(&id, Note::archive).raising(&self.events, cx).await?;
+        Ok(())
+    }
+
+    pub async fn edit(&self, id: NoteId, cmd: EditNote, expected: Option<Version>,
+                      cx: &Context) -> DomainResult<()> {
+        self.notes
+            .change(&id, |note| note.edit(cmd.title, cmd.body))
+            .expecting(expected)                // If-Match: 412 when it moved on
+            .raising(&self.events, cx)
+            .announcing_changes()               // also `note.updated`, with the patch
+            .await?;
         Ok(())
     }
 }
 ```
+
+`.raising(…)` publishes what the domain method returned *with* the write. With a
+Postgres store and `persistence.postgres.outbox: true`, the aggregate and its events are
+committed in one transaction and a relay forwards the events to the bus, so a crash can
+lose neither one without the other; any other store publishes right after the write.
 
 The aggregate derives serde and `Aggregate`, and its value objects deserialise through
 their constructors — so a store needs no mapping code, and stored data that breaks an
@@ -254,6 +268,7 @@ persistence:
   postgres:
     url: postgres://notes:secret@db/notes   # better: JENNY__PERSISTENCE__POSTGRES__URL
     max_connections: 10
+    outbox: true      # events committed with their write, relayed to the bus (`messaging`)
 ```
 
 The runtime does the rest before it binds its socket. It runs your migrations

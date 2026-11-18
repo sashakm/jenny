@@ -213,10 +213,11 @@ async fn a_change_is_saved_at_the_next_version_and_a_stale_one_is_refused() {
     ));
     let err = db
         .notes
-        .change_at(&1, Some(second.version()), |note| {
+        .change(&1, |note| {
             note.priority = 9;
             Ok(())
         })
+        .expecting(Some(second.version()))
         .await
         .unwrap_err();
     assert!(matches!(err, DomainError::Stale { .. }), "{err}");

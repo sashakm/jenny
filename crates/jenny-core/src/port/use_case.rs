@@ -24,8 +24,7 @@
 //!
 //! impl Notes {
 //!     pub async fn archive(&self, id: u32, cx: &Context) -> DomainResult<()> {
-//!         let archived = self.notes.change(&id, Note::archive).await?;
-//!         self.events.publish(&archived.outcome, cx).await;
+//!         self.notes.change(&id, Note::archive).raising(&self.events, cx).await?;
 //!         Ok(())
 //!     }
 //! }

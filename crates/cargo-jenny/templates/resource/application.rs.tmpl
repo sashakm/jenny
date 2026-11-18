@@ -49,9 +49,13 @@ impl {{resource_pascal}}s {
         cx: &Context,
     ) -> DomainResult<{{resource_pascal}}Id> {
         let (entity, created) = {{resource_pascal}}::create(cmd.name);
-        let entity = self.store.insert(entity).await?;
-        // Publish only once the state change has been committed.
-        self.events.publish(&created, cx).await;
+        // The entity and the event that says so, together: in one transaction when the
+        // store keeps an outbox, published right after the insert otherwise.
+        let entity = self
+            .store
+            .add(entity, created)
+            .raising(&self.events, cx)
+            .await?;
         Ok(entity.id())
     }
 
@@ -86,13 +90,12 @@ impl {{resource_pascal}}s {
         cx: &Context,
     ) -> DomainResult<()> {
         // The rule about renaming archived entities lives in the aggregate, not here.
-        let renamed = self
-            .store
-            .change_at(&id, expected, |entity| entity.rename(cmd.name))
+        self.store
+            .change(&id, |entity| entity.rename(cmd.name))
+            .expecting(expected)
+            .raising(&self.events, cx)
+            .announcing_changes()
             .await?;
-        if let Some(updated) = renamed.updated() {
-            self.events.publish(&updated, cx).await;
-        }
         Ok(())
     }
 
