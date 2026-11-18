@@ -12,6 +12,7 @@ description = "Postgres/sqlx persistence helpers for the jenny framework"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 async-trait = { workspace = true }
 jenny-core = { workspace = true }
 jenny-macros = { workspace = true }
@@ -22,4 +23,5 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 tokio = { workspace = true }

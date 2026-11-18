@@ -10,16 +10,14 @@ use sqlx::{Pool, Postgres};
 /// connected. A pool can hold handles to a server that has since gone away, so the only
 /// answer worth reporting to a load balancer is one that came back over the wire.
 ///
-/// Register it in the composition root, where the pool lives:
+/// The runtime registers one, named `postgres`, for the pool it builds from
+/// `persistence.postgres` ([`Postgres::health_check`](crate::Postgres::health_check)).
+/// A pool a service builds itself is registered in the composition root:
 ///
 /// ```ignore
-/// // in main.rs, where the pool is constructed
-/// server.register_health_check(DatabaseCheck::new("notes-db", pool.clone()))
+/// // in `build`, where the pool is constructed
+/// server.register_health_check(DatabaseCheck::new("reporting-db", pool.clone()))
 /// ```
-///
-/// The runtime cannot register this for you. It has no way to reach your pool without
-/// either a dependency-injection container or a dependency on `sqlx`, and both would
-/// cost more than the one line above.
 pub struct DatabaseCheck {
     name: String,
     pool: Pool<Postgres>,

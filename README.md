@@ -232,6 +232,37 @@ async fn update(State(notes): State<Notes>, Path(id): Path<Uuid>,
 }
 ```
 
+## Storage
+
+Use cases hold a `Store<A>`, and which one they get is a line in the composition root.
+`Memory<A>` needs nothing; with the `persistence` feature and
+`persistence.postgres.url` set, `PgDocuments<A>` keeps each aggregate as one `jsonb`
+row. Both take the same allowlist, and neither needs mapping code, because the aggregate
+derives serde:
+
+```rust,ignore
+const QUERYABLE: [(&str, ValueKind); 2] = [("title", ValueKind::Text), ("archived", ValueKind::Bool)];
+
+let notes: Arc<dyn Store<Note>> = match server.postgres()? {
+    Some(postgres) => Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)),
+    None => Arc::new(Memory::<Note>::new().queryable(QUERYABLE)),
+};
+```
+
+```yaml
+persistence:
+  postgres:
+    url: postgres://notes:secret@db/notes   # better: JENNY__PERSISTENCE__POSTGRES__URL
+    max_connections: 10
+```
+
+The runtime does the rest before it binds its socket. It runs your migrations
+(`postgres.migrate(sqlx::migrate!())`), creates the document tables under an advisory
+lock so replicas can start together, and adds `postgres` to `/j/health/ready`. Every
+save is a compare-and-swap on the version; listings filter, sort and page inside the
+database. MongoDB, NATS KV, S3-compatible object storage and Apache AGE follow
+(ADR-013).
+
 ## Scaffolding
 
 ```sh
@@ -319,13 +350,15 @@ GET /api/notes?page=2&page_size=20
 token that is not a check is a 400 rather than a silent misparse.
 
 **Filter paths are attacker-controlled**, so nothing executes one without an explicit
-allowlist. Parsing rejects anything that is not a dotted identifier, and the persistence
-translator takes the allowlist as a *required* argument — there is no API that skips it:
+allowlist. Parsing rejects anything that is not a dotted identifier, and every store takes
+the allowlist — each path with the `ValueKind` it holds, so `priority:gt:banana` is a 400
+— before it will list anything. For a hand-written Postgres port, the SQL translator
+takes it as a *required* argument; there is no API that skips it:
 
 ```rust,ignore
 let columns = Columns::new("id", [                   // `id` breaks ties, so pages
-    ("title",      "title",      ColumnKind::Text),    // never overlap or skip rows
-    ("created_at", "created_at", ColumnKind::Timestamp),
+    ("title",      "title",      ValueKind::Text),     // never overlap or skip rows
+    ("created_at", "created_at", ValueKind::Timestamp),
 ]);
 let sql = SqlCriteria::build(&criteria, &columns)?;   // identifiers from `columns`,
 let statement = format!("SELECT … FROM notes{}", sql.tail());  // values bound, not
@@ -343,7 +376,7 @@ growing table never turns one request into a full scan.
 | `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Events`, the outbound ports, `Memory`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
-| `jenny-persistence` | driven adapter | Postgres/sqlx query and mapping helpers |
+| `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` store, criteria to SQL |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, config, health, hosting |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |

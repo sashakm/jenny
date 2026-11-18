@@ -10,6 +10,12 @@ test:
 
 run:
     cargo run -- --config-path config.yaml
+{{#if persistence}}
+
+# Run against the Postgres from `just up`; `/j/health/ready` then reports it.
+run-postgres:
+    JENNY__PERSISTENCE__POSTGRES__URL=postgres://{{project_snake}}:{{project_snake}}@localhost:5432/{{project_snake}} cargo run -- --config-path config.yaml
+{{/if}}
 
 # Development dependencies (Postgres, collector, ...).
 up:

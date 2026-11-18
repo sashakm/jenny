@@ -26,13 +26,15 @@ features:
   set -euo pipefail
   for f in "" telemetry-otlp telemetry-loki telemetry-prometheus \
            telemetry-otlp,telemetry-prometheus telemetry-loki,telemetry-prometheus \
-           telemetry-otlp,telemetry-loki telemetry-otlp,telemetry-loki,telemetry-prometheus; do
+           telemetry-otlp,telemetry-loki telemetry-otlp,telemetry-loki,telemetry-prometheus \
+           persistence persistence,messaging; do
     echo "==> jenny-server [${f:-none}]"
     cargo check -p jenny-server --no-default-features ${f:+--features "$f"}
   done
   for f in "" rest server messaging persistence security openapi \
            server,openapi server,swagger-ui server,messaging server,messaging,openapi \
-           server,telemetry-otlp server,telemetry-prometheus server,telemetry-loki full; do
+           server,persistence server,telemetry-otlp server,telemetry-prometheus \
+           server,telemetry-loki full; do
     echo "==> jenny [${f:-none}]"
     cargo check -p jenny --no-default-features ${f:+--features "$f"}
   done
@@ -93,6 +95,29 @@ test-cli-features:
         --path "$workdir/$name" --jenny-path "$root"
     (cd "$workdir/$name" && cargo test && cargo clippy --all-targets -- -D warnings)
   done
+
+# The database tests read `JENNY_TEST_POSTGRES_URL` and skip without it (fail, under
+# CI). This gives them one: a disposable Postgres 18 on a free port, removed on exit.
+[doc('run the Postgres tests against a throwaway database (needs docker)')]
+test-postgres:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  name="jenny-test-postgres-$$"
+  docker run -d --rm --name "$name" -e POSTGRES_USER=jenny -e POSTGRES_PASSWORD=jenny \
+      -e POSTGRES_DB=jenny -p 127.0.0.1::5432 postgres:18 >/dev/null
+  trap 'docker stop "$name" >/dev/null' EXIT
+  port="$(docker port "$name" 5432/tcp | head -n1 | sed 's/.*://')"
+  # Over TCP: the image's first server, during initdb, listens on the socket only.
+  for _ in $(seq 1 60); do
+    docker exec "$name" pg_isready -h 127.0.0.1 -U jenny -q && break
+    sleep 1
+  done
+  export JENNY_TEST_POSTGRES_URL="postgres://jenny:jenny@127.0.0.1:${port}/jenny"
+  cargo test -p jenny-persistence --test postgres_test
+  cargo test -p jenny-server --features persistence --lib -- postgres configured_pool
+  # The example's end-to-end suite, with its notes in Postgres instead of memory.
+  JENNY__PERSISTENCE__POSTGRES__URL="$JENNY_TEST_POSTGRES_URL" \
+      cargo test -p jenny --features server,persistence --example basic
 
 [doc('doc tests, then all tests under coverage (writes coverage.xml)')]
 ci-test: doc-tests

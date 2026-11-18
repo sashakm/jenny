@@ -65,6 +65,8 @@ pub struct JennyServer {
     events: Option<Arc<jenny_messaging::EventBus>>,
     #[cfg(feature = "messaging")]
     broker: Option<topmesys::EventBroker<topmesys::type_states::Running>>,
+    #[cfg(feature = "persistence")]
+    postgres: Option<jenny_persistence::Postgres>,
 }
 
 /// Leading slash on, trailing slash off. `"/"` or `""` mean "no prefix", which axum
@@ -159,6 +161,9 @@ pub struct ServerParts {
     /// The running event broker, stopped on shutdown so in-flight listeners finish.
     #[cfg(feature = "messaging")]
     broker: Option<topmesys::EventBroker<topmesys::type_states::Running>>,
+    /// The Postgres pool, closed once requests and listeners are done with it.
+    #[cfg(feature = "persistence")]
+    postgres: Option<jenny_persistence::Postgres>,
 }
 
 impl ServerParts {
@@ -185,6 +190,8 @@ impl ServerParts {
             health,
             #[cfg(feature = "messaging")]
             broker,
+            #[cfg(feature = "persistence")]
+            postgres,
         } = self;
 
         let mut requested = shutdown.subscribe();
@@ -235,6 +242,11 @@ impl ServerParts {
         if let Some(broker) = broker {
             broker.stop().await;
         }
+        // Last, because listeners stopping above may still have been writing.
+        #[cfg(feature = "persistence")]
+        if let Some(postgres) = postgres {
+            postgres.close().await;
+        }
         drop(telemetry);
         Ok(result?)
     }
@@ -273,6 +285,8 @@ impl JennyServer {
             events: None,
             #[cfg(feature = "messaging")]
             broker: None,
+            #[cfg(feature = "persistence")]
+            postgres: None,
         }
     }
 
@@ -393,6 +407,51 @@ impl JennyServer {
         Ok(())
     }
 
+    /// The Postgres pool configured under `persistence.postgres`, or `None` when no
+    /// `url` is set.
+    ///
+    /// The pool connects lazily, so this is available during wiring without a database
+    /// being up yet. The runtime then does the rest before it binds its socket: it runs
+    /// the migrations given to [`Postgres::migrate`](jenny_persistence::Postgres::migrate),
+    /// creates the tables of every document store handed out, and registers a
+    /// `postgres` readiness check. A database that is down or a migration that fails
+    /// stops the service at startup, not on its first request.
+    ///
+    /// `None` is what makes "it only needs configuration" work: the same build keeps its
+    /// data in memory until a URL is configured.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use jenny_core::domain::{Aggregate, ValueKind};
+    /// # use jenny_core::memory::Memory;
+    /// # use jenny_core::port::Store;
+    /// # use jenny_server::JennyServer;
+    /// # #[derive(serde::Serialize, serde::Deserialize)] struct Note { id: u32 }
+    /// # impl Aggregate for Note { type Id = u32; const KIND: &'static str = "note"; fn id(&self) -> u32 { self.id } }
+    /// # fn wire(mut server: JennyServer) -> anyhow::Result<()> {
+    /// const QUERYABLE: [(&str, ValueKind); 1] = [("title", ValueKind::Text)];
+    ///
+    /// let notes: Arc<dyn Store<Note>> = match server.postgres()? {
+    ///     Some(postgres) => Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)),
+    ///     None => Arc::new(Memory::<Note>::new().queryable(QUERYABLE)),
+    /// };
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "persistence")]
+    pub fn postgres(&mut self) -> anyhow::Result<Option<jenny_persistence::Postgres>> {
+        if self.postgres.is_none() && self.config.persistence.postgres.url.is_some() {
+            let postgres =
+                jenny_persistence::Postgres::connect_lazy(&self.config.persistence.postgres)?;
+            info!(
+                max_connections = self.config.persistence.postgres.max_connections,
+                "postgres pool configured"
+            );
+            self.postgres = Some(postgres);
+        }
+        Ok(self.postgres.clone())
+    }
+
     /// Configuration and shared resources for wiring adapters up.
     pub fn context(&self) -> &ServerContext {
         &self.context
@@ -460,7 +519,20 @@ impl JennyServer {
             events,
             #[cfg(feature = "messaging")]
             broker,
+            #[cfg(feature = "persistence")]
+            postgres,
         } = self;
+
+        // Schema first: nothing should be served against tables that do not exist yet.
+        #[cfg(feature = "persistence")]
+        if let Some(postgres) = postgres.as_ref() {
+            postgres
+                .prepare()
+                .await
+                .map_err(|e| e.context("preparing the Postgres schema"))?;
+            info!("postgres schema prepared");
+            checks.push(Arc::new(postgres.health_check()));
+        }
 
         #[cfg(feature = "messaging")]
         for adapter in &messaging_adapters {
@@ -626,6 +698,8 @@ impl JennyServer {
             health,
             #[cfg(feature = "messaging")]
             broker,
+            #[cfg(feature = "persistence")]
+            postgres,
         })
     }
 
@@ -1177,6 +1251,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn without_a_postgres_url_there_is_no_pool_and_no_check() {
+        let mut server = server_with("127.0.0.1:0");
+        assert!(server.postgres().unwrap().is_none());
+
+        let parts = server.register(notes()).unwrap().bind().await.unwrap();
+        let (_, ready) = call(parts.router.clone(), "/j/health/ready").await;
+        assert!(
+            ready["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["name"] != "postgres")
+        );
+    }
+
+    /// Needs `JENNY_TEST_POSTGRES_URL`, like jenny-persistence's own database tests.
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn a_configured_pool_is_prepared_before_serving_and_reported_ready() {
+        use jenny_core::port::{Store, StoreExt};
+
+        let url = match std::env::var("JENNY_TEST_POSTGRES_URL") {
+            Ok(url) => url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("JENNY_TEST_POSTGRES_URL must be set in CI")
+            }
+            Err(_) => return eprintln!("skipping: JENNY_TEST_POSTGRES_URL is not set"),
+        };
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Note {
+            id: u32,
+        }
+        impl jenny_core::domain::Aggregate for Note {
+            type Id = u32;
+            const KIND: &'static str = "note";
+            fn id(&self) -> u32 {
+                self.id
+            }
+        }
+
+        let mut server = server_with("127.0.0.1:0");
+        server.config.persistence.postgres.url = Some(url);
+        let postgres = server.postgres().unwrap().expect("a URL is configured");
+        let table = format!("server_test_{}", uuid::Uuid::new_v4().simple());
+        let store = postgres.documents_in::<Note>(&table);
+
+        // The table does not exist until `bind` prepares the schema.
+        let parts = server.register(notes()).unwrap().bind().await.unwrap();
+        store.insert(Note { id: 1 }).await.unwrap();
+        assert_eq!(store.load(&1).await.unwrap().id, 1);
+
+        let (status, ready) = call(parts.router.clone(), "/j/health/ready").await;
+        assert_eq!(status, StatusCode::OK);
+        let check = ready["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "postgres")
+            .expect("the runtime registers the pool's readiness");
+        assert_eq!(check["status"], "up");
+
+        jenny_persistence::sqlx::query(jenny_persistence::sqlx::AssertSqlSafe(format!(
+            "DROP TABLE \"{table}\""
+        )))
+        .execute(postgres.pool())
+        .await
+        .unwrap();
     }
 
     #[cfg(feature = "openapi")]

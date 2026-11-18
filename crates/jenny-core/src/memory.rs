@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::{Aggregate, Check, Criteria, DomainError, DomainResult, Filter};
+use crate::domain::{Aggregate, Check, Criteria, DomainError, DomainResult, Filter, ValueKind};
 use crate::port::outbound::HealthCheck;
 use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 
@@ -25,14 +25,14 @@ use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 /// Postgres in staging.
 ///
 /// ```
-/// # use jenny_core::domain::{Aggregate, Criteria};
+/// # use jenny_core::domain::{Aggregate, Criteria, ValueKind};
 /// # use jenny_core::port::Store;
 /// use jenny_core::memory::Memory;
 /// # #[derive(serde::Serialize, serde::Deserialize)] pub struct Note { id: u32, title: String }
 /// # impl Aggregate for Note { type Id = u32; const KIND: &'static str = "note"; fn id(&self) -> u32 { self.id } }
 ///
 /// # #[tokio::main(flavor = "current_thread")] async fn main() -> jenny_core::domain::DomainResult<()> {
-/// let notes = Memory::<Note>::new().queryable(["title"]);
+/// let notes = Memory::<Note>::new().queryable([("title", ValueKind::Text)]);
 /// notes.insert(Note { id: 1, title: "Shopping".into() }).await?;
 /// notes.insert(Note { id: 2, title: "Gardening".into() }).await?;
 ///
@@ -48,11 +48,15 @@ use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 /// filter is also a question about the data. `filter=password_hash:begins:a` answered
 /// truthfully, one character at a time, discloses a field the API never returns.
 ///
+/// Each path comes with its [`ValueKind`], so a filter value is checked the way a
+/// database store checks it: `priority:gt:banana` is a 400, not an empty page. The same
+/// allowlist serves every store, so moving to Postgres does not mean rewriting it.
+///
 /// Text compares case-insensitively and numbers numerically. Sorting puts missing and
 /// `null` values last, as Postgres does, and ties keep key order, so paging is stable.
 pub struct Memory<A> {
     documents: Mutex<BTreeMap<String, Entry>>,
-    queryable: Vec<String>,
+    queryable: BTreeMap<String, ValueKind>,
     name: String,
     kind: PhantomData<fn() -> A>,
 }
@@ -67,19 +71,22 @@ impl<A: Aggregate> Memory<A> {
     pub fn new() -> Self {
         Self {
             documents: Mutex::new(BTreeMap::new()),
-            queryable: Vec::new(),
+            queryable: BTreeMap::new(),
             name: format!("{}-store", A::KIND),
             kind: PhantomData,
         }
     }
 
-    /// The attribute paths a listing may sort and filter on.
+    /// The attribute paths a listing may sort and filter on, and what each holds.
     pub fn queryable<I, P>(mut self, paths: I) -> Self
     where
-        I: IntoIterator<Item = P>,
+        I: IntoIterator<Item = (P, ValueKind)>,
         P: Into<String>,
     {
-        self.queryable = paths.into_iter().map(Into::into).collect();
+        self.queryable = paths
+            .into_iter()
+            .map(|(path, kind)| (path.into(), kind))
+            .collect();
         self
     }
 
@@ -200,8 +207,11 @@ impl<A: Aggregate> Store<A> for Memory<A> {
     }
 
     async fn list(&self, criteria: &Criteria) -> DomainResult<Vec<A>> {
-        let allowed: Vec<&str> = self.queryable.iter().map(String::as_str).collect();
+        let allowed: Vec<&str> = self.queryable.keys().map(String::as_str).collect();
         criteria.ensure_allowed(&allowed)?;
+        for filter in &criteria.filter {
+            self.queryable[filter.path()].accept(filter)?;
+        }
 
         let mut found: Vec<Entry> = self
             .lock()?
@@ -380,7 +390,11 @@ mod tests {
     }
 
     fn store() -> Memory<Note> {
-        Memory::new().queryable(["title", "priority", "archived"])
+        Memory::new().queryable([
+            ("title", ValueKind::Text),
+            ("priority", ValueKind::Integer),
+            ("archived", ValueKind::Bool),
+        ])
     }
 
     #[tokio::test]
@@ -611,12 +625,6 @@ mod tests {
             ["gamma", "beta"]
         );
         assert_eq!(titles(&notes, filtered("archived:eq:false")).await.len(), 3);
-        // A number compared against text matches nothing rather than guessing.
-        assert!(
-            titles(&notes, filtered("priority:eq:banana"))
-                .await
-                .is_empty()
-        );
 
         let page = Criteria::new()
             .with_sort("title".parse().unwrap())
@@ -625,8 +633,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_value_the_kind_cannot_hold_is_refused_not_matched() {
+        let notes = seeded().await;
+        for filter in [
+            "priority:eq:banana",
+            "archived:gt:true",
+            "priority:contains:1",
+        ] {
+            let criteria = Criteria::new().with_filter(filter.parse().unwrap());
+            assert!(
+                matches!(
+                    notes.list(&criteria).await.unwrap_err(),
+                    DomainError::Invalid { .. }
+                ),
+                "{filter}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_path_outside_the_allowlist_is_refused() {
-        let notes = Memory::<Note>::new().queryable(["title"]);
+        let notes = Memory::<Note>::new().queryable([("title", ValueKind::Text)]);
         let criteria = Criteria::new().with_filter("priority:eq:1".parse().unwrap());
         assert!(matches!(
             notes.list(&criteria).await.unwrap_err(),

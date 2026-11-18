@@ -30,6 +30,80 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{DomainError, DomainResult};
 
+/// What an attribute holds, so that a filter value can be checked before it reaches
+/// storage.
+///
+/// An allowlist names each queryable path with its kind — `("priority",
+/// ValueKind::Integer)` — and every store checks filters against it the same way:
+/// `priority:gt:banana` is a 400 at the edge, not a 500 from a database or a filter that
+/// silently matches nothing.
+///
+/// ```
+/// use jenny_core::domain::query::{Check, ValueKind};
+///
+/// assert!(ValueKind::Integer.check("priority", "10").is_ok());
+/// assert!(ValueKind::Integer.check("priority", "banana").is_err());
+/// assert!(!ValueKind::Bool.supports(Check::Gt));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ValueKind {
+    Text,
+    Integer,
+    Float,
+    Bool,
+    Uuid,
+    Timestamp,
+}
+
+impl ValueKind {
+    /// Refuse a filter value this kind cannot hold. `path` names it in the message.
+    pub fn check(&self, path: &str, value: &str) -> DomainResult<()> {
+        let ok = match self {
+            ValueKind::Text => true,
+            ValueKind::Integer => value.parse::<i64>().is_ok(),
+            ValueKind::Float => value.parse::<f64>().is_ok(),
+            ValueKind::Bool => matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "false" | "t" | "f" | "1" | "0"
+            ),
+            ValueKind::Uuid => uuid::Uuid::parse_str(value).is_ok(),
+            // Left to the store: date formats are many, and a database is better at
+            // them than a hand-rolled check would be.
+            ValueKind::Timestamp => true,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(DomainError::invalid(format!(
+                "`{value}` is not a valid value for `{path}`"
+            )))
+        }
+    }
+
+    /// Whether a check means anything for this kind: substring checks only for text,
+    /// ordering for anything but booleans.
+    pub fn supports(&self, check: Check) -> bool {
+        match check {
+            Check::Begins | Check::Ends | Check::Contains => *self == ValueKind::Text,
+            Check::Eq => true,
+            Check::Gt | Check::St => *self != ValueKind::Bool,
+        }
+    }
+
+    /// [`check`](Self::check) and [`supports`](Self::supports) together, for a whole
+    /// filter.
+    pub fn accept(&self, filter: &Filter) -> DomainResult<()> {
+        if !self.supports(filter.check()) {
+            return Err(DomainError::invalid(format!(
+                "`{}` does not support the `{}` check",
+                filter.path(),
+                filter.check()
+            )));
+        }
+        self.check(filter.path(), filter.value())
+    }
+}
+
 /// Which way a [`Sort`] runs.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

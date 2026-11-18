@@ -3,7 +3,7 @@
 services:
 {{#if persistence}}
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: {{project_snake}}
       POSTGRES_PASSWORD: {{project_snake}}
@@ -16,7 +16,8 @@ services:
       timeout: 3s
       retries: 10
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # Postgres 18 images keep their data under a versioned directory below this.
+      - postgres-data:/var/lib/postgresql
 {{/if}}
 {{#if messaging}}
   nats:

@@ -1948,7 +1948,9 @@ dependencies = [
 name = "jenny-persistence"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "futures",
  "jenny-core",
  "jenny-macros",
  "serde",
@@ -2021,6 +2023,7 @@ dependencies = [
  "http",
  "jenny-core",
  "jenny-messaging",
+ "jenny-persistence",
  "jenny-rest",
  "opentelemetry",
  "opentelemetry-appender-tracing",

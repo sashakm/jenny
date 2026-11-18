@@ -33,6 +33,8 @@ url = { workspace = true }
 
 # Optional: the in-process event bus and messaging adapters.
 jenny-messaging = { workspace = true, optional = true }
+# Optional: a Postgres pool from `persistence.postgres`, prepared before serving.
+jenny-persistence = { workspace = true, optional = true }
 topmesys = { workspace = true, optional = true }
 
 # Optional telemetry backends
@@ -50,6 +52,9 @@ utoipa-swagger-ui = { workspace = true, optional = true }
 default = []
 # The in-process event bus, started and stopped by the runtime.
 messaging = ["dep:jenny-messaging", "dep:topmesys"]
+# A Postgres pool built from `persistence.postgres`: migrated, its document tables
+# created and its readiness checked by the runtime.
+persistence = ["dep:jenny-persistence"]
 # Serve the OpenAPI document at <framework_path>/openapi.json.
 openapi = ["dep:utoipa", "jenny-rest/openapi"]
 # Serve a browsable Swagger UI, with its assets compiled in.

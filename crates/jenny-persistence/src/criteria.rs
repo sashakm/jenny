@@ -23,12 +23,13 @@
 //!
 //! ```
 //! use jenny_core::domain::Criteria;
-//! use jenny_persistence::criteria::{ColumnKind, Columns, SqlCriteria};
+//! use jenny_core::domain::ValueKind;
+//! use jenny_persistence::criteria::{Columns, SqlCriteria};
 //!
 //! let columns = Columns::new("id", [
-//!     ("title", "title", ColumnKind::Text),
-//!     ("created_at", "created_at", ColumnKind::Timestamp),
-//!     ("author.name", "a.name", ColumnKind::Text),
+//!     ("title", "title", ValueKind::Text),
+//!     ("created_at", "created_at", ValueKind::Timestamp),
+//!     ("author.name", "a.name", ValueKind::Text),
 //! ]);
 //!
 //! let criteria = Criteria::new()
@@ -45,64 +46,18 @@
 
 use std::collections::BTreeMap;
 
-use jenny_core::domain::{Check, Criteria, DomainError, DomainResult, Ordering};
+use jenny_core::domain::{Check, Criteria, DomainError, DomainResult, Ordering, ValueKind};
 
-/// What a column holds, so values can be checked and cast.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColumnKind {
-    Text,
-    Integer,
-    Float,
-    Bool,
-    Uuid,
-    Timestamp,
-}
-
-impl ColumnKind {
-    /// The Postgres type a bound parameter is cast to. Bindings go over the wire as
-    /// text, so a comparison against a non-text column needs an explicit cast.
-    fn cast(&self) -> Option<&'static str> {
-        match self {
-            ColumnKind::Text => None,
-            ColumnKind::Integer => Some("::bigint"),
-            ColumnKind::Float => Some("::double precision"),
-            ColumnKind::Bool => Some("::boolean"),
-            ColumnKind::Uuid => Some("::uuid"),
-            ColumnKind::Timestamp => Some("::timestamptz"),
-        }
-    }
-
-    /// Reject a value the database would only reject later, and less helpfully.
-    fn check_value(&self, path: &str, value: &str) -> DomainResult<()> {
-        let ok = match self {
-            ColumnKind::Text => true,
-            ColumnKind::Integer => value.parse::<i64>().is_ok(),
-            ColumnKind::Float => value.parse::<f64>().is_ok(),
-            ColumnKind::Bool => matches!(
-                value.to_ascii_lowercase().as_str(),
-                "true" | "false" | "t" | "f" | "1" | "0"
-            ),
-            ColumnKind::Uuid => uuid::Uuid::parse_str(value).is_ok(),
-            // Left to the database: date formats are many and Postgres is better at
-            // them than a hand-rolled check would be.
-            ColumnKind::Timestamp => true,
-        };
-        if ok {
-            Ok(())
-        } else {
-            Err(DomainError::invalid(format!(
-                "`{value}` is not a valid value for `{path}`"
-            )))
-        }
-    }
-
-    fn supports(&self, check: Check) -> bool {
-        match check {
-            // Substring checks only mean something for text.
-            Check::Begins | Check::Ends | Check::Contains => *self == ColumnKind::Text,
-            Check::Eq => true,
-            Check::Gt | Check::St => *self != ColumnKind::Bool,
-        }
+/// The Postgres type a bound parameter is cast to. Bindings go over the wire as text,
+/// so a comparison against a non-text column needs an explicit cast.
+pub(crate) fn cast(kind: ValueKind) -> Option<&'static str> {
+    match kind {
+        ValueKind::Text => None,
+        ValueKind::Integer => Some("::bigint"),
+        ValueKind::Float => Some("::double precision"),
+        ValueKind::Bool => Some("::boolean"),
+        ValueKind::Uuid => Some("::uuid"),
+        ValueKind::Timestamp => Some("::timestamptz"),
     }
 }
 
@@ -120,13 +75,13 @@ impl ColumnKind {
 #[derive(Clone, Debug)]
 pub struct Columns {
     key: &'static str,
-    paths: BTreeMap<String, (String, ColumnKind)>,
+    paths: BTreeMap<String, (String, ValueKind)>,
 }
 
 impl Columns {
     pub fn new(
         key: &'static str,
-        entries: impl IntoIterator<Item = (&'static str, &'static str, ColumnKind)>,
+        entries: impl IntoIterator<Item = (&'static str, &'static str, ValueKind)>,
     ) -> Self {
         Self {
             key,
@@ -141,11 +96,11 @@ impl Columns {
     pub fn text(key: &'static str, paths: impl IntoIterator<Item = &'static str>) -> Self {
         Self::new(
             key,
-            paths.into_iter().map(|path| (path, path, ColumnKind::Text)),
+            paths.into_iter().map(|path| (path, path, ValueKind::Text)),
         )
     }
 
-    pub fn insert(mut self, path: &str, column: &str, kind: ColumnKind) -> Self {
+    pub fn insert(mut self, path: &str, column: &str, kind: ValueKind) -> Self {
         self.paths
             .insert(path.to_string(), (column.to_string(), kind));
         self
@@ -161,7 +116,7 @@ impl Columns {
         self.paths.keys().map(String::as_str).collect()
     }
 
-    fn resolve(&self, path: &str) -> DomainResult<(&str, ColumnKind)> {
+    fn resolve(&self, path: &str) -> DomainResult<(&str, ValueKind)> {
         self.paths
             .get(path)
             .map(|(column, kind)| (column.as_str(), *kind))
@@ -227,16 +182,9 @@ impl SqlCriteria {
         for filter in &criteria.filter {
             let (column, kind) = columns.resolve(filter.path())?;
 
-            if !kind.supports(filter.check()) {
-                return Err(DomainError::invalid(format!(
-                    "`{}` does not support the `{}` check",
-                    filter.path(),
-                    filter.check()
-                )));
-            }
-            kind.check_value(filter.path(), filter.value())?;
+            kind.accept(filter)?;
 
-            let placeholder = format!("${next}{}", kind.cast().unwrap_or_default());
+            let placeholder = format!("${next}{}", cast(kind).unwrap_or_default());
             next += 1;
 
             let condition = match filter.check() {
@@ -341,12 +289,12 @@ mod tests {
         Columns::new(
             "id",
             [
-                ("title", "title", ColumnKind::Text),
-                ("age", "age", ColumnKind::Integer),
-                ("archived", "archived", ColumnKind::Bool),
-                ("id", "id", ColumnKind::Uuid),
-                ("created_at", "created_at", ColumnKind::Timestamp),
-                ("author.name", "a.name", ColumnKind::Text),
+                ("title", "title", ValueKind::Text),
+                ("age", "age", ValueKind::Integer),
+                ("archived", "archived", ValueKind::Bool),
+                ("id", "id", ValueKind::Uuid),
+                ("created_at", "created_at", ValueKind::Timestamp),
+                ("author.name", "a.name", ValueKind::Text),
             ],
         )
     }
@@ -382,7 +330,7 @@ mod tests {
 
     #[test]
     fn the_key_is_not_repeated_when_the_client_sorts_by_it() {
-        let columns = columns().insert("id", "id", ColumnKind::Uuid);
+        let columns = columns().insert("id", "id", ValueKind::Uuid);
         let criteria = Criteria::new().with_sort("-id".parse().unwrap());
         let sql = SqlCriteria::build(&criteria, &columns).unwrap();
         assert_eq!(sql.order_by(), " ORDER BY id DESC");

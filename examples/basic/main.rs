@@ -15,6 +15,16 @@
 //! cargo run --example basic --features server -- --config-path examples/basic/config.yaml
 //! ```
 //!
+//! That keeps the notes in memory. With the `persistence` feature and a database URL
+//! they live in Postgres instead, one `jsonb` row each, the table created at startup:
+//!
+//! ```sh
+//! docker run -d --rm -p 5432:5432 -e POSTGRES_PASSWORD=notes postgres:18
+//! JENNY__PERSISTENCE__POSTGRES__URL=postgres://postgres:notes@localhost/postgres \
+//!   cargo run --example basic --features server,persistence -- \
+//!   --config-path examples/basic/config.yaml
+//! ```
+//!
 //! Then poke at it:
 //!
 //! ```sh
@@ -43,6 +53,7 @@ mod example_test;
 
 use std::sync::Arc;
 
+use jenny::domain::ValueKind;
 use jenny::memory::Memory;
 use jenny::rest::RestAdapter;
 use jenny::server::JennyServer;
@@ -53,6 +64,7 @@ use serde::Deserialize;
 use adapter::outbound::events::EventLog;
 use application::Notes;
 use domain::model::Note;
+use domain::port::NoteStore;
 
 /// This service's own configuration, read from `applications.my-notes`. The framework
 /// imposes no schema on it — the shape below is entirely ours.
@@ -69,6 +81,34 @@ impl Default for NotesConfig {
     }
 }
 
+/// What a note listing may sort and filter on, and what each attribute holds.
+///
+/// The security boundary for client-supplied criteria: a listing that names anything
+/// else is refused before it reaches the data, so `filter=…` cannot become a question
+/// about a field the API never shows. Every store takes the same list.
+const QUERYABLE: [(&str, ValueKind); 3] = [
+    ("title", ValueKind::Text),
+    ("body", ValueKind::Text),
+    ("archived", ValueKind::Bool),
+];
+
+/// Where notes live: Postgres when the `persistence` feature is on and
+/// `persistence.postgres.url` is configured, memory otherwise. One line each, because a
+/// store needs nothing but the aggregate's serde derives; the runtime creates the table
+/// and reports the database's readiness.
+#[cfg(feature = "persistence")]
+fn note_store(server: &mut JennyServer) -> anyhow::Result<Arc<NoteStore>> {
+    Ok(match server.postgres()? {
+        Some(postgres) => Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)),
+        None => Arc::new(Memory::<Note>::new().queryable(QUERYABLE)),
+    })
+}
+
+#[cfg(not(feature = "persistence"))]
+fn note_store(_: &mut JennyServer) -> anyhow::Result<Arc<NoteStore>> {
+    Ok(Arc::new(Memory::<Note>::new().queryable(QUERYABLE)))
+}
+
 /// Wire the service together.
 ///
 /// Read it top to bottom and you have the entire dependency graph: driven adapters
@@ -82,11 +122,7 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     tracing::info!("my-notes says: {}", config.greeting);
 
     // --- driven adapters: the outside world, as the domain's ports see it ----------
-    //
-    // The queryable paths are the security boundary for client-supplied criteria: a
-    // listing that sorts or filters on anything else is refused before it reaches the
-    // data, so `filter=…` cannot become a question about a field the API never shows.
-    let store = Arc::new(Memory::<Note>::new().queryable(["title", "body", "archived"]));
+    let store = note_store(&mut server)?;
 
     // With the `messaging` feature the runtime has already started an in-process bus,
     // so the port comes from it and one publish fans out to every listener. Without
@@ -103,7 +139,7 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     server.context_mut().provide(store.clone());
 
     // --- application: use cases over those ports ----------------------------------
-    let notes = Notes::new(store.clone(), Events::new(events));
+    let notes = Notes::new(store, Events::new(events));
 
     // --- driving adapter: HTTP in -------------------------------------------------
     // No mount path given, so it takes `server.api_path` from configuration, which
@@ -117,13 +153,9 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
         .accept_json_patch()?
         .mount(adapter::inbound::rest::routes(notes))?;
 
-    Ok(server
+    server
         .with_version(jenny::service_version!())
-        .register(rest)?
-        // `/health/ready` reports the store, so a load balancer stops sending traffic
-        // when it is unusable — while `/health/live` stays up, because restarting the
-        // process would not fix a broken dependency.
-        .register_health_check(store))
+        .register(rest)
 }
 
 #[tokio::main]

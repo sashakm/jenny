@@ -1,6 +1,6 @@
 # Configuration for {{project_kebab}}.
 #
-# The runtime reads `server`, `telemetry` and `messaging`. Everything under
+# The runtime reads `server`, `telemetry`, `messaging` and `persistence`. Everything under
 # `applications.<name>` is yours, passed through untouched.
 #
 # Any value can be overridden by an environment variable
@@ -30,6 +30,16 @@ telemetry:
 
 messaging:
   buffer_size: 64
+{{/if}}
+{{#if persistence}}
+
+persistence:
+  postgres:
+    # Unset, the service keeps its data in memory. It carries the password, so set it
+    # through the environment (JENNY__PERSISTENCE__POSTGRES__URL) rather than here;
+    # `just up` starts the Postgres from compose.yaml and `just run-postgres` uses it.
+    # url: postgres://{{project_snake}}:{{project_snake}}@localhost:5432/{{project_snake}}
+    max_connections: 10
 {{/if}}
 
 applications:

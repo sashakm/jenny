@@ -182,7 +182,7 @@ fn add_resource(args: AddResourceArgs) -> Result<()> {
     println!("Wire it up in src/lib.rs:");
     println!();
     println!(
-        "    let {plural}_store = Arc::new(Memory::<{pascal}>::new().queryable([\"name\"]));\n\
+        "    let {plural}_store = Arc::new(Memory::<{pascal}>::new().queryable([(\"name\", ValueKind::Text)]));\n\
          \x20   let {plural} = {pascal}s::new({plural}_store.clone(), events.clone());",
         plural = resource.plural,
         pascal = resource.pascal,

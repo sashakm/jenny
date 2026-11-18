@@ -1,6 +1,6 @@
 # ADR-010: Generic Listing Criteria
 
-**Status:** Accepted
+**Status:** Accepted — the column type is the core's `ValueKind`, shared with the in-memory and document stores (ADR-015)
 **Date:** 2026-08-24
 
 ## Context

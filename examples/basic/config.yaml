@@ -1,7 +1,9 @@
 # Configuration for the `basic` example.
 #
-# `server`, `telemetry` and (with its feature) `messaging` are the only sections the
-# jenny runtime interprets.
+# `server`, `telemetry` and (with their features) `messaging` and `persistence` are the
+# only sections the jenny runtime interprets. Notes are kept in memory unless
+# `persistence.postgres.url` is set — best through JENNY__PERSISTENCE__POSTGRES__URL,
+# since it carries the password.
 # Everything under `applications.<name>` is passed through untouched and read by the
 # service itself — see `NotesConfig` in main.rs.
 #

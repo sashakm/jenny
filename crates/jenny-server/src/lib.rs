@@ -17,6 +17,9 @@
 //!   ([`HealthCheck`]); `framework_path` defaults to `/j`.
 //! - **Metrics** — `<framework_path>/metrics`, with the `telemetry-prometheus` feature.
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the background.
+//! - **Postgres** — with the `persistence` feature, a pool from `persistence.postgres`
+//!   ([`JennyServer::postgres`]), migrated, its document tables created and its
+//!   readiness checked before the socket is bound.
 //! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
 //!
 //! ### No injection container
@@ -46,6 +49,9 @@ mod openapi;
 mod server;
 pub mod telemetry;
 
+#[cfg(feature = "persistence")]
+#[doc(inline)]
+pub use config::PersistenceConfig;
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
     DEFAULT_EVENT_BUFFER, DEFAULT_EVENT_NAMESPACE, DEFAULT_FRAMEWORK_PATH,
