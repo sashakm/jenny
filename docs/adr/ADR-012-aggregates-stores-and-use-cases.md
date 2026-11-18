@@ -214,6 +214,7 @@ measured is the backend's business, not something each use case is handed.
 
 ## Not built yet
 
-- Database, document and key-value stores (ADR-013).
+- Document and key-value stores other than Postgres (ADR-013).
 
-Mapping `Version` onto `ETag`/`If-Match`, listed here originally, is built (ADR-014).
+Listed here originally and built since: mapping `Version` onto `ETag`/`If-Match`
+(ADR-014), and the Postgres stores (ADR-015).

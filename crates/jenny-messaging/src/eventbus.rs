@@ -11,8 +11,9 @@ use crate::headers;
 /// Publishes domain events onto a [`topmesys`] broker.
 ///
 /// This is the driven adapter that satisfies [`EventPublisher`]. The application layer
-/// only ever sees the port; swapping this for a broker client, or for an outbox writer
-/// that a relay drains later, is a change in the composition root and nowhere else.
+/// only ever sees the port, so swapping this for a broker client is a change in the
+/// composition root and nowhere else. With a Postgres outbox, this is also where the
+/// relay forwards committed events to (ADR-016).
 ///
 /// Event names are prefixed with the bus's namespace, so an event named
 /// `"note.created"` published on a bus prefixed `"my-service"` is routed as

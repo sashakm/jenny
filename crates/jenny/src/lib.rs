@@ -14,7 +14,7 @@
 //! | [`jenny::port`](port) | the boundary | [`Store`], [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
 //! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving) |
-//! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, criteria to SQL, `QueryFormat`, `DatabaseCheck` |
+//! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 //! | [`jenny::task`](task) | driving adapter | the clock: [`Task`](task::Task), [`ScheduledTask`](task::ScheduledTask) |
 //! | [`jenny::memory`](memory) | driven adapter | [`Memory`](memory::Memory), an in-memory [`Store`] |
@@ -67,7 +67,7 @@
 //! | `rest` | the axum driving adapter |
 //! | `server` | the runtime and composition root (implies `rest`) |
 //! | `messaging` | the event bus and messaging adapter |
-//! | `persistence` | Postgres: document stores, criteria to SQL; with `server`, a pool from `persistence.postgres` |
+//! | `persistence` | Postgres: document and table stores, the outbox, criteria to SQL; with `server`, a pool from `persistence.postgres` |
 //! | `security` | authentication and Cedar authorization |
 //! | `openapi` | OpenAPI schemas for the REST wire types |
 //! | `swagger-ui` | a browsable Swagger UI, assets compiled in (implies `openapi`) |

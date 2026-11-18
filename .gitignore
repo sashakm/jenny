@@ -1,2 +1,4 @@
+.claude/worktrees
+.*swp
 /target
 coverage.xml

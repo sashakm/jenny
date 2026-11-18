@@ -610,8 +610,8 @@ impl JennyServer {
             }
         }
 
-        // Checks for what the runtime itself owns. Anything it does not own — a
-        // database pool above all — is registered by the composition root.
+        // Checks for what the runtime itself owns, the Postgres pool among them (above).
+        // Anything it does not own is registered by the composition root.
         #[cfg(feature = "telemetry-otlp")]
         if let Some(endpoint) = config.telemetry.otlp_endpoint.as_deref()
             && let Some(check) = crate::health::Reachable::from_url("otlp", "telemetry", endpoint)

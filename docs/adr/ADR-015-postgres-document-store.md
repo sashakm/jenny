@@ -90,7 +90,8 @@ match nothing where Postgres refused.
 
 `ValueKind` now lives in `jenny_core::domain::query`, with the value checks and
 the check-applicability rules. `ColumnKind` is removed. `Memory::queryable`,
-`PgDocuments::queryable` and `Columns` all take `(path, ValueKind)`. A document store
+`PgDocuments::queryable` and `PgTable::queryable` take `(path, ValueKind)` pairs, and
+`Columns` takes `(path, column, ValueKind)` triples. A document store
 turns each allowlisted dotted path into `(document #>> '{a,b}')`, cast to the kind's SQL
 type. Paths are written into the statement only from this allowlist, which is code, and
 are checked to be dotted field names. Client-supplied values are bound parameters, as

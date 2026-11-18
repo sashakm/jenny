@@ -25,6 +25,9 @@ src/
 ```sh
 just up      # development dependencies, if any
 just run     # the service
+{{#if persistence}}
+just run-postgres   # the service, storing in the Postgres from `just up`
+{{/if}}
 just test
 ```
 

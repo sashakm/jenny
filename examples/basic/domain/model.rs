@@ -95,8 +95,8 @@ impl std::fmt::Display for NoteTitle {
 ///
 /// State changes go through methods that enforce the rules and hand back the event
 /// they raised. The aggregate does not publish anything — raising and publishing are
-/// separate jobs, and publishing is the application layer's, after the state change
-/// has been persisted.
+/// separate jobs. The use case hands what was raised to the write that persists the
+/// change, which publishes it with the write, in one transaction where it can.
 ///
 /// `#[derive(Aggregate)]` makes `id` its identity and `"note"` its kind, which is all a
 /// store needs to know about it.
