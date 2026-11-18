@@ -1,6 +1,6 @@
 # ADR-013: Storage Backends
 
-**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); NATS KV is built, with versions of its own rather than bucket revisions (ADR-017); object storage is built (ADR-018); MongoDB is deferred; AGE is not built
+**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); NATS KV is built, with versions of its own rather than bucket revisions (ADR-017); object storage is built (ADR-018); AGE is built, in `jenny-persistence` behind a `graph` feature (ADR-019); MongoDB is deferred
 **Date:** 2026-11-18
 
 ## Context
@@ -118,8 +118,9 @@ identifiers in filter paths (ADR-010) and gets the same answer.
 
 ## Not built yet
 
-AGE. Postgres is built — the document and table stores, the pool and migrations
-(ADR-015) and the outbox (ADR-016) — and so are NATS KV (ADR-017) and object storage
-(ADR-018).
 MongoDB is deferred: the Postgres document store covers the need it was planned for,
 and the adapter can be added when a service asks for a dedicated document database.
+Everything else here is built: Postgres — the document and table stores, the pool and
+migrations (ADR-015) and the outbox (ADR-016) — NATS KV (ADR-017), object storage
+(ADR-018) and AGE (ADR-019). A graph write does not yet commit with the outbox, which
+the AGE section above anticipates; ADR-019 records it.

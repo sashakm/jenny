@@ -28,6 +28,9 @@ just run     # the service
 {{#if persistence}}
 just run-postgres   # the service, storing in the Postgres from `just up`
 {{/if}}
+{{#if graph}}
+                    # (which has Apache AGE, for `postgres.graph(…)`)
+{{/if}}
 {{#if objects}}
 just run-objects    # the service, with the S3-compatible store from `just up`
 {{/if}}

@@ -5,7 +5,8 @@
 //! application/     use cases — orchestration, and nothing else
 //! adapter/
 //!   inbound/rest   HTTP in: DTOs, TryFrom, status codes
-//!   outbound/      the driven side: an event publisher (the note store is jenny's)
+//!   outbound/      the driven side: an event publisher and the links between notes
+//!                  (the note store is jenny's)
 //! main.rs          the composition root — the only file that knows every layer
 //! ```
 //!
@@ -40,6 +41,16 @@
 //!   --config-path examples/basic/config.yaml
 //! ```
 //!
+//! Links between notes are kept in memory as well, or, with the `graph` feature and a
+//! database that has Apache AGE, in a graph beside the notes:
+//!
+//! ```sh
+//! docker run -d --rm -p 5432:5432 -e POSTGRES_PASSWORD=notes apache/age:release_PG18_1.8.0
+//! JENNY__PERSISTENCE__POSTGRES__URL=postgres://postgres:notes@localhost/postgres \
+//!   cargo run --example basic --features server,graph -- \
+//!   --config-path examples/basic/config.yaml
+//! ```
+//!
 //! Then poke at it:
 //!
 //! ```sh
@@ -52,6 +63,8 @@
 //! curl localhost:8000/api/notes
 //! curl -X PUT localhost:8000/api/notes/$ID/attachment -H 'content-type: text/plain' \
 //!   --data-binary 'milk, eggs'                        # 204; GET returns the file
+//! curl -X PUT localhost:8000/api/notes/$ID/links/$OTHER  # 204, given a second note
+//! curl localhost:8000/api/notes/$ID/links             # {"to": [OTHER], "from": []}
 //! curl -X POST localhost:8000/api/notes/$ID/archive   # 204
 //! curl -X POST localhost:8000/api/notes/$ID/archive   # 409, already archived
 //! curl -X POST localhost:8000/api/notes -H 'content-type: application/json' \
@@ -79,9 +92,10 @@ use serde::Deserialize;
 
 #[cfg(not(feature = "messaging"))]
 use adapter::outbound::events::EventLog;
+use adapter::outbound::links::MemoryLinks;
 use application::Notes;
 use domain::model::Note;
-use domain::port::{Attachments, NoteStore};
+use domain::port::{Attachments, NoteLinks, NoteStore};
 
 /// This service's own configuration, read from `applications.my-notes`. The framework
 /// imposes no schema on it — the shape below is entirely ours.
@@ -140,6 +154,19 @@ fn attachments(server: &mut JennyServer) -> anyhow::Result<Arc<Attachments>> {
     Ok(Arc::new(MemoryBlobs::new()))
 }
 
+/// Where links between notes live: an Apache AGE graph named `notes`, in the same
+/// database as the notes, with the `graph` feature and `persistence.postgres.url` set,
+/// else memory. The runtime creates the graph before serving.
+fn note_links(server: &mut JennyServer) -> anyhow::Result<Arc<dyn NoteLinks>> {
+    #[cfg(feature = "graph")]
+    if let Some(postgres) = server.postgres()? {
+        let graph = postgres.graph("notes");
+        return Ok(Arc::new(adapter::outbound::links::GraphLinks::new(graph)));
+    }
+    let _ = server;
+    Ok(Arc::new(MemoryLinks::default()))
+}
+
 /// Wire the service together.
 ///
 /// Read it top to bottom and you have the entire dependency graph: driven adapters
@@ -155,6 +182,7 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     // --- driven adapters: the outside world, as the domain's ports see it ----------
     let store = note_store(&mut server)?;
     let attachments = attachments(&mut server)?;
+    let links = note_links(&mut server)?;
 
     // With the `messaging` feature the runtime has already started an in-process bus,
     // so the port comes from it and one publish fans out to every listener. Without
@@ -171,7 +199,7 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     server.context_mut().provide(store.clone());
 
     // --- application: use cases over those ports ----------------------------------
-    let notes = Notes::new(store, attachments, Events::new(events));
+    let notes = Notes::new(store, attachments, links, Events::new(events));
 
     // --- driving adapter: HTTP in -------------------------------------------------
     // No mount path given, so it takes `server.api_path` from configuration, which

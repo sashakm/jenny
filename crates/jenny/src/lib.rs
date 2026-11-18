@@ -15,7 +15,7 @@
 //! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
 //! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving), `kv::NatsKv` store |
 //! | `jenny::objects` | driven adapter | `ObjectBlobs` over S3 and compatibles, files or memory; `ObjectsConfig` |
-//! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck` |
+//! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck`; with `graph`, Apache AGE's `Graph` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 //! | [`jenny::task`](task) | driving adapter | the clock: [`Task`](task::Task), [`ScheduledTask`](task::ScheduledTask) |
 //! | [`jenny::memory`](memory) | driven adapter | [`Memory`](memory::Memory), an in-memory [`Store`]; [`MemoryBlobs`](memory::MemoryBlobs), in-memory [`Blobs`](port::Blobs); and [`Queryable`](memory::Queryable), the criteria evaluator it shares with the NATS store |
@@ -69,6 +69,7 @@
 //! | `server` | the runtime and composition root (implies `rest`) |
 //! | `messaging` | the event bus, the NATS gateway and the NATS key-value store; with `server`, a connection from `messaging.nats` |
 //! | `persistence` | Postgres: document and table stores, the outbox, criteria to SQL; with `server`, a pool from `persistence.postgres` |
+//! | `graph` | Apache AGE graphs in that Postgres, queried in Cypher, created before serving (implies `persistence`) |
 //! | `objects` | blob storage — S3 and compatibles, local files, memory — behind [`Blobs`](port::Blobs); with `server`, a store from `objects` |
 //! | `security` | authentication and Cedar authorization |
 //! | `openapi` | OpenAPI schemas for the REST wire types |

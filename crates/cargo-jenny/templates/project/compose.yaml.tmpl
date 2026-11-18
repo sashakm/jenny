@@ -3,7 +3,12 @@
 services:
 {{#if persistence}}
   postgres:
+{{#if graph}}
+    # Postgres 18 with Apache AGE preloaded, for graphs (`Postgres::graph`).
+    image: apache/age:release_PG18_1.8.0
+{{else}}
     image: postgres:18-alpine
+{{/if}}
     environment:
       POSTGRES_USER: {{project_snake}}
       POSTGRES_PASSWORD: {{project_snake}}

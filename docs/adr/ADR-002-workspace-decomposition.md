@@ -22,7 +22,7 @@ rather than along topics.
 | `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; `Memory`, `Queryable`, `Blobs`, `MemoryBlobs`; tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Versioned`/`IfMatch`, auth and CORS layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway, `NatsKv` store |
-| `jenny-persistence` | driven adapter | Postgres: the pool, `PgDocuments` and `PgTable` stores, the outbox and its relay, criteria to SQL |
+| `jenny-persistence` | driven adapter | Postgres: the pool, `PgDocuments` and `PgTable` stores, the outbox and its relay, criteria to SQL, Apache AGE graphs (feature `graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: the `Blobs` port over `object_store` (S3 and compatibles, files, memory) |
 | `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, configuration, telemetry, health, hosting |
@@ -74,11 +74,12 @@ rest         = ["dep:jenny-rest"]
 server       = ["dep:jenny-server", "rest"]     # the runtime hosts REST adapters
 messaging    = ["dep:jenny-messaging", "jenny-server?/messaging"]
 persistence  = ["dep:jenny-persistence", "jenny-server?/persistence"]
+graph        = ["persistence", "jenny-persistence/graph"]
 security     = ["dep:jenny-security"]
 openapi      = ["jenny-macros/openapi", "jenny-rest?/openapi", "jenny-server?/openapi"]
 swagger-ui   = ["openapi", "jenny-server?/swagger-ui"]
 telemetry-otlp / telemetry-prometheus / telemetry-loki   # each implies `server`
-full         = ["rest", "server", "messaging", "persistence", "security", "openapi"]
+full         = ["rest", "server", "messaging", "persistence", "graph", "security", "openapi"]
 ```
 
 Nothing is on by default. Compile time and binary size stay proportional to what a

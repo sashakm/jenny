@@ -31,10 +31,14 @@ features:
     echo "==> jenny-server [${f:-none}]"
     cargo check -p jenny-server --no-default-features ${f:+--features "$f"}
   done
-  for f in "" rest server messaging persistence objects security openapi \
+  for f in "" graph; do
+    echo "==> jenny-persistence [${f:-none}]"
+    cargo check -p jenny-persistence --no-default-features ${f:+--features "$f"}
+  done
+  for f in "" rest server messaging persistence graph objects security openapi \
            server,openapi server,swagger-ui server,messaging server,messaging,openapi \
-           server,persistence server,objects server,telemetry-otlp server,telemetry-prometheus \
-           server,telemetry-loki full; do
+           server,persistence server,graph server,objects server,telemetry-otlp \
+           server,telemetry-prometheus server,telemetry-loki full; do
     echo "==> jenny [${f:-none}]"
     cargo check -p jenny --no-default-features ${f:+--features "$f"}
   done
@@ -87,8 +91,8 @@ test-cli-features:
   cargo build -p cargo-jenny
   # One target dir for every generated project, so dependencies build once.
   export CARGO_TARGET_DIR="$workdir/target"
-  for features in persistence messaging objects security openapi swagger-ui telemetry \
-                  persistence,messaging,objects,security,swagger-ui,telemetry; do
+  for features in persistence graph messaging objects security openapi swagger-ui telemetry \
+                  persistence,graph,messaging,objects,security,swagger-ui,telemetry; do
     name="svc-${features//,/-}"
     echo "==> cargo jenny new --features $features"
     "$root/target/debug/cargo-jenny" jenny new "$name" --features "$features" \
@@ -144,6 +148,36 @@ test-nats:
   # The example's end-to-end suite, with its notes in a NATS bucket.
   JENNY__MESSAGING__NATS__URL="$JENNY_TEST_NATS_URL" JENNY__MESSAGING__NAMESPACE="example-$$" \
       cargo test -p jenny --features server,messaging --example basic
+
+# The graph tests read `JENNY_TEST_AGE_URL` and skip without it (fail, under CI). This
+# gives them one, twice: Postgres 18 with Apache AGE preloaded, as the image ships it,
+# then without the preload, where each transaction loads AGE itself.
+[doc('run the Apache AGE graph tests against throwaway databases (needs docker)')]
+test-age:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  names=()
+  trap 'docker stop "${names[@]}" >/dev/null' EXIT
+  for preload in shared_preload_libraries=age none; do
+    name="jenny-test-age-$$-${#names[@]}"
+    command=(postgres)
+    [ "$preload" != none ] && command+=(-c "$preload")
+    docker run -d --rm --name "$name" -e POSTGRES_USER=jenny -e POSTGRES_PASSWORD=jenny \
+        -e POSTGRES_DB=jenny -p 127.0.0.1::5432 apache/age:release_PG18_1.8.0 \
+        "${command[@]}" >/dev/null
+    names+=("$name")
+    port="$(docker port "$name" 5432/tcp | head -n1 | sed 's/.*://')"
+    for _ in $(seq 1 60); do
+      docker exec "$name" pg_isready -h 127.0.0.1 -U jenny -q && break
+      sleep 1
+    done
+    echo "==> AGE, preloaded: $preload"
+    export JENNY_TEST_AGE_URL="postgres://jenny:jenny@127.0.0.1:${port}/jenny"
+    cargo test -p jenny-persistence --features graph --test graph_test
+    # The example's end-to-end suite, its notes in Postgres and their links in a graph.
+    JENNY__PERSISTENCE__POSTGRES__URL="$JENNY_TEST_AGE_URL" \
+        cargo test -p jenny --features server,graph --example basic
+  done
 
 [doc('doc tests, then all tests under coverage (writes coverage.xml)')]
 ci-test: doc-tests

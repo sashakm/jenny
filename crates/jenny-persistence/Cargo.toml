@@ -25,5 +25,17 @@ tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+# Apache AGE graphs (`Postgres::graph`): openCypher queries through the same pool.
+graph = []
+
 [dev-dependencies]
 futures = { workspace = true }
+
+[[test]]
+name = "graph_test"
+required-features = ["graph"]
+
+# The graph module is behind a feature, so docs.rs would otherwise leave it out.
+[package.metadata.docs.rs]
+all-features = true

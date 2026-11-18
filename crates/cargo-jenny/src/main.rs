@@ -52,8 +52,8 @@ struct NewArgs {
     /// Name of the service. May be a path, in which case its last segment is the name.
     name: String,
 
-    /// Optional pieces: persistence, messaging, objects, security, openapi, swagger-ui,
-    /// telemetry.
+    /// Optional pieces: persistence, graph (Apache AGE; implies persistence), messaging,
+    /// objects, security, openapi, swagger-ui, telemetry.
     #[arg(long, value_delimiter = ',')]
     features: Vec<String>,
 

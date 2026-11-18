@@ -1,6 +1,6 @@
 # ADR-009: The `cargo jenny` Scaffolder
 
-**Status:** Accepted — implemented; the generated resource layout follows ADR-012 (a store port and no outbound adapter, wiring printed for `src/lib.rs`) and ADR-014; with `persistence`, a project stores in Postgres when configured and memory otherwise (ADR-015), with the outbox on when `messaging` is too (ADR-016)
+**Status:** Accepted — implemented; the generated resource layout follows ADR-012 (a store port and no outbound adapter, wiring printed for `src/lib.rs`) and ADR-014; with `persistence`, a project stores in Postgres when configured and memory otherwise (ADR-015), with the outbox on when `messaging` is too (ADR-016); `graph` implies `persistence` and runs Postgres with Apache AGE in `compose.yaml` (ADR-019)
 **Date:** 2026-08-24
 
 ## Context

@@ -43,6 +43,10 @@ persistence:
     # `just up` starts the Postgres from compose.yaml and `just run-postgres` uses it.
     # url: postgres://{{project_snake}}:{{project_snake}}@localhost:5432/{{project_snake}}
     max_connections: 10
+{{#if graph}}
+    # Creates the tables, and the Apache AGE extension and graphs, before serving.
+    create_tables: true
+{{/if}}
 {{#if messaging}}
     # Commit the events a change raises in the same transaction as the change, and
     # forward them to the event bus from there, so a crash cannot lose one.

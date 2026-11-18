@@ -18,6 +18,7 @@ impl Features {
     /// it was generated for.
     pub const KNOWN: &'static [&'static str] = &[
         "persistence",
+        "graph",
         "messaging",
         "objects",
         "security",
@@ -38,6 +39,10 @@ impl Features {
                 }
                 features.insert(name.to_string());
             }
+        }
+        // A graph lives in the Postgres that `persistence` configures and wires.
+        if features.contains("graph") {
+            features.insert("persistence".to_string());
         }
         Ok(Self(features))
     }
@@ -178,6 +183,7 @@ fn base_bindings(project: &ProjectNames, features: &Features) -> Bindings {
         .set("project_kebab", project.kebab.clone())
         .set("project_snake", project.snake.clone())
         .flag("persistence", features.has("persistence"))
+        .flag("graph", features.has("graph"))
         .flag("messaging", features.has("messaging"))
         .flag("objects", features.has("objects"))
         .flag("security", features.has("security"))
@@ -390,6 +396,10 @@ mod tests {
         assert!(features.has("persistence"));
         assert!(features.has("messaging"));
         assert!(!features.has("security"));
+
+        let graph = Features::parse(&["graph".to_string()]).unwrap();
+        assert!(graph.has("persistence"), "a graph needs the database");
+        assert_eq!(graph.cargo_list(), "\"server\", \"graph\", \"persistence\"");
 
         let err = Features::parse(&["persistince".to_string()]).unwrap_err();
         assert!(err.to_string().contains("unknown feature"), "{err}");

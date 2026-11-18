@@ -6,6 +6,8 @@
 # since it carries the password — or `messaging.nats.url` (JENNY__MESSAGING__NATS__URL).
 # Attachments are kept in memory unless `objects.url` is set (with the `objects`
 # feature): `s3://bucket/prefix` with the standard AWS_* variables, or `file:///dir`.
+# Links between notes are kept in memory unless the `graph` feature is on and
+# `persistence.postgres.url` names a database with Apache AGE.
 # Everything under `applications.<name>` is passed through untouched and read by the
 # service itself — see `NotesConfig` in main.rs.
 #

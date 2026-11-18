@@ -14,6 +14,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, PgPool};
 
 use crate::documents::PgDocuments;
+#[cfg(feature = "graph")]
+use crate::graph::Graph;
 use crate::health::DatabaseCheck;
 use crate::outbox::{self, OutboxRelay, OutboxState};
 use crate::table::{PgTable, TableShape};
@@ -46,9 +48,10 @@ pub struct PostgresConfig {
     /// How long a query waits for a free connection before failing. Defaults to 5.
     pub acquire_timeout_seconds: u64,
     /// Create the tables document stores need, and the outbox's, if they are missing,
-    /// before serving. Defaults to `true`; turn it off where the schema is owned by
-    /// migrations alone, and create them from [`PgDocuments::schema`] and
-    /// [`Postgres::outbox_schema`].
+    /// before serving — and, with the `graph` feature, the AGE extension and every
+    /// graph handed out. Defaults to `true`; turn it off where the schema is owned by
+    /// migrations alone, and create them from [`PgDocuments::schema`],
+    /// [`Postgres::outbox_schema`] and `Graph::schema`.
     pub create_tables: bool,
     /// Commit the events a change raises in the same transaction as the change, and
     /// have the runtime forward them to the event bus (ADR-016). Defaults to `false`;
@@ -114,6 +117,9 @@ struct Inner {
     shapes: Mutex<Vec<Arc<TableShape>>>,
     migrator: Mutex<Option<Arc<Migrator>>>,
     outbox: Arc<OutboxState>,
+    /// Every graph handed out, created or checked before serving.
+    #[cfg(feature = "graph")]
+    graphs: Mutex<Vec<Graph>>,
 }
 
 impl Postgres {
@@ -148,6 +154,8 @@ impl Postgres {
                 shapes: Mutex::new(Vec::new()),
                 migrator: Mutex::new(None),
                 outbox: Arc::default(),
+                #[cfg(feature = "graph")]
+                graphs: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -190,6 +198,24 @@ impl Postgres {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(shape.clone());
         PgTable::with_shape(self.inner.pool.clone(), shape).with_outbox(self.inner.outbox.clone())
+    }
+
+    /// The Apache AGE graph `name`, queried in openCypher through this pool (see
+    /// [`graph`](crate::graph)).
+    ///
+    /// [`prepare`](Self::prepare) creates the extension and the graph when
+    /// `create_tables` is on, and otherwise checks that they exist, so a database
+    /// without AGE stops the service at startup. Panics when `name` is not a plain
+    /// lower-case identifier.
+    #[cfg(feature = "graph")]
+    pub fn graph(&self, name: &str) -> Graph {
+        let graph = Graph::new(self.inner.pool.clone(), name);
+        self.inner
+            .graphs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(graph.clone());
+        graph
     }
 
     /// Commit the events raised with a change in the same transaction as the change,
@@ -240,8 +266,8 @@ impl Postgres {
         self
     }
 
-    /// Run the migrations, create the document tables, then check the table stores'
-    /// tables against the catalogue, once per process start.
+    /// Run the migrations, create the document tables (and graphs), then check the
+    /// table stores' tables (and graphs) against the catalogue, once per process start.
     ///
     /// Safe to run from several replicas at once: sqlx's migrator takes its own lock,
     /// and table creation runs in one transaction under an advisory lock, because two
@@ -263,6 +289,8 @@ impl Postgres {
         if self.inner.create_tables {
             self.create_document_tables().await?;
         }
+        #[cfg(feature = "graph")]
+        self.prepare_graphs().await?;
 
         // After the migrations, which are what create these.
         let shapes = self
@@ -314,6 +342,59 @@ impl Postgres {
             .commit()
             .await
             .context("committing the document tables")?;
+        Ok(())
+    }
+
+    /// Create the graphs under the schema lock, or, when the schema is someone else's
+    /// job, check that the migrations made them.
+    #[cfg(feature = "graph")]
+    async fn prepare_graphs(&self) -> anyhow::Result<()> {
+        let graphs = self
+            .inner
+            .graphs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if graphs.is_empty() {
+            return Ok(());
+        }
+        if !self.inner.create_tables {
+            for graph in graphs {
+                let exists = graph
+                    .exists()
+                    .await
+                    .with_context(|| format!("checking graph `{}`", graph.name()))?;
+                anyhow::ensure!(
+                    exists,
+                    "graph `{}` does not exist, and create_tables is off: create it in a \
+                     migration (`Graph::schema` is the SQL)",
+                    graph.name()
+                );
+            }
+            return Ok(());
+        }
+        let mut transaction = self
+            .inner
+            .pool
+            .begin()
+            .await
+            .context("connecting to Postgres")?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('jenny.prepare'))")
+            .execute(&mut *transaction)
+            .await
+            .context("taking the schema lock")?;
+        for graph in graphs {
+            graph.create(&mut transaction).await.with_context(|| {
+                format!(
+                    "creating graph `{}` (does this database have Apache AGE?)",
+                    graph.name()
+                )
+            })?;
+        }
+        transaction
+            .commit()
+            .await
+            .context("committing the graphs")?;
         Ok(())
     }
 

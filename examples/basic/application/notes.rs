@@ -8,19 +8,20 @@ use jenny::{
 };
 
 use crate::domain::model::{Note, NoteId};
-use crate::domain::port::{Attachments, NoteStore};
+use crate::domain::port::{Attachments, Links, NoteLinks, NoteStore};
 
 use super::command::{CreateNote, EditNote};
 
 /// Everything you can do with a note.
 ///
 /// Cheap to clone — every field is a shared handle — so a driving adapter can hold its
-/// own copy. Swapping the in-memory store for Postgres, or memory for S3, is a change in
-/// `main.rs` and nowhere else.
+/// own copy. Swapping the in-memory store for Postgres, memory for S3, or a set of links
+/// for a graph, is a change in `main.rs` and nowhere else.
 #[derive(Clone)]
 pub struct Notes {
     notes: Arc<NoteStore>,
     attachments: Arc<Attachments>,
+    links: Arc<dyn NoteLinks>,
     events: Events,
 }
 
@@ -31,10 +32,16 @@ fn attachment_key(id: NoteId) -> String {
 
 #[use_cases]
 impl Notes {
-    pub fn new(notes: Arc<NoteStore>, attachments: Arc<Attachments>, events: Events) -> Self {
+    pub fn new(
+        notes: Arc<NoteStore>,
+        attachments: Arc<Attachments>,
+        links: Arc<dyn NoteLinks>,
+        events: Events,
+    ) -> Self {
         Self {
             notes,
             attachments,
+            links,
             events,
         }
     }
@@ -92,10 +99,10 @@ impl Notes {
         Ok(())
     }
 
-    /// Delete a note and its attachment.
+    /// Delete a note, its links and its attachment.
     ///
-    /// The attachment goes second: if removing it fails, what is left behind is a blob
-    /// nothing refers to, never a note that refers to a missing file.
+    /// The note goes first: if what follows fails, what is left behind is a link or a
+    /// blob that points at nothing, never a note that lost its links or its file.
     pub async fn delete(
         &self,
         id: NoteId,
@@ -103,8 +110,27 @@ impl Notes {
         _cx: &Context,
     ) -> DomainResult<Note> {
         let removed = self.notes.remove(&id, expected).await?;
+        self.links.forget(id).await?;
         self.attachments.delete(&attachment_key(id)).await?;
         Ok(removed)
+    }
+
+    /// `from` refers to `to` from now on. Both must exist, and which links a note may
+    /// have is the note's rule.
+    pub async fn link(&self, from: NoteId, to: NoteId, _cx: &Context) -> DomainResult<()> {
+        self.notes.load(&from).await?.ensure_linkable_to(to)?;
+        self.notes.load(&to).await?;
+        self.links.link(from, to).await
+    }
+
+    pub async fn unlink(&self, from: NoteId, to: NoteId, _cx: &Context) -> DomainResult<()> {
+        self.links.unlink(from, to).await
+    }
+
+    /// What a note refers to, and what refers to it.
+    pub async fn links(&self, id: NoteId, _cx: &Context) -> DomainResult<Links> {
+        self.notes.load(&id).await?;
+        self.links.links(id).await
     }
 
     /// Attach a file to a note, replacing the one it had. The note itself does not
@@ -132,11 +158,14 @@ mod tests {
     use jenny::memory::{Memory, MemoryBlobs};
     use jenny::testing::RecordedEvents;
 
+    use crate::adapter::outbound::links::MemoryLinks;
+
     fn notes() -> (Notes, Arc<RecordedEvents>) {
         let events = Arc::new(RecordedEvents::default());
         let notes = Notes::new(
             Arc::new(Memory::<Note>::new().queryable([("title", ValueKind::Text)])),
             Arc::new(MemoryBlobs::new()),
+            Arc::new(MemoryLinks::default()),
             Events::new(events.clone()),
         );
         (notes, events)
@@ -320,5 +349,41 @@ mod tests {
         notes.archive(id, &cx).await.unwrap();
         let err = notes.attach(id, file(), &cx).await.unwrap_err();
         assert!(matches!(err, DomainError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn links_are_seen_from_both_ends_and_go_with_the_note() {
+        let (notes, _) = notes();
+        let cx = Context::new();
+        let recipe = notes.create(create("Recipe"), &cx).await.unwrap();
+        let shopping = notes.create(create("Shopping"), &cx).await.unwrap();
+
+        notes.link(recipe, shopping, &cx).await.unwrap();
+        notes.link(recipe, shopping, &cx).await.unwrap();
+        assert_eq!(
+            notes.links(recipe, &cx).await.unwrap(),
+            Links {
+                to: vec![shopping],
+                from: vec![]
+            }
+        );
+        assert_eq!(notes.links(shopping, &cx).await.unwrap().from, [recipe]);
+
+        notes.delete(shopping, None, &cx).await.unwrap();
+        assert_eq!(notes.links(recipe, &cx).await.unwrap(), Links::default());
+    }
+
+    #[tokio::test]
+    async fn a_link_needs_two_notes_that_exist() {
+        let (notes, _) = notes();
+        let cx = Context::new();
+        let id = notes.create(create("Shopping"), &cx).await.unwrap();
+
+        let err = notes.link(id, id, &cx).await.unwrap_err();
+        assert!(matches!(err, DomainError::Invalid { .. }), "{err}");
+        let err = notes.link(id, NoteId::generate(), &cx).await.unwrap_err();
+        assert!(matches!(err, DomainError::NotFound), "{err}");
+        let err = notes.links(NoteId::generate(), &cx).await.unwrap_err();
+        assert!(matches!(err, DomainError::NotFound), "{err}");
     }
 }
