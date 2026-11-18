@@ -108,10 +108,16 @@ test: ci-test
 # The tarballs are verified through a temporary local registry, which cargo extracts
 # into `registry/src/-<hash>/` once per crate *version*. Without a version bump a second
 # run would build against the first run's sources, so those extractions are cleared.
+#
+# The compiled crates have the same problem: cargo trusts a registry crate's version and
+# never rechecks its sources, so a jenny-core built by the last run is reused even when
+# its tarball changed. Verification therefore builds in its own target dir, with every
+# jenny artifact cleared first; third-party dependencies stay cached.
 [doc('package and verify every publishable crate without uploading')]
 package *args:
   rm -rf "${CARGO_HOME:-$HOME/.cargo}"/registry/src/-*/jenny-* "${CARGO_HOME:-$HOME/.cargo}"/registry/src/-*/cargo-jenny-*
-  cargo package --workspace {{args}}
+  rm -rf target/package-verify/debug/.fingerprint/*jenny* target/package-verify/debug/deps/*jenny* target/package-verify/debug/build/*jenny*
+  cargo package --workspace --target-dir target/package-verify {{args}}
 
 # Build against the declared `rust-version` (needs `rustup toolchain install 1.94`).
 [doc('check the workspace on the declared rust-version (1.94)')]

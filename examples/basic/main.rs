@@ -29,6 +29,9 @@
 //! curl -X POST localhost:8000/api/notes/$ID/archive   # 409, already archived
 //! curl -X POST localhost:8000/api/notes -H 'content-type: application/json' \
 //!   -d '{"title": "  "}'                              # 400, title must not be empty
+//! curl -X PATCH localhost:8000/api/notes/$ID -H 'if-match: "1"' \
+//!   -H 'content-type: application/json-patch+json' \
+//!   -d '[{"op": "replace", "path": "/body", "value": "eggs"}]'  # 204, 412 once it moved on
 //! ```
 
 mod adapter;
@@ -105,8 +108,13 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     // --- driving adapter: HTTP in -------------------------------------------------
     // No mount path given, so it takes `server.api_path` from configuration, which
     // itself defaults to `/api`.
+    //
+    // It accepts JSON Patch, so every route with a GET and a PUT also answers PATCH,
+    // derived from those two. Drop that line and the adapter is plainly
+    // representational: PUT replaces, PATCH is 405.
     let rest = RestAdapter::new("my-notes")?
         .describe("Note taking")
+        .accept_json_patch()?
         .mount(adapter::inbound::rest::routes(notes))?;
 
     Ok(server

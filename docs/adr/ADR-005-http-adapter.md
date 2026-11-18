@@ -1,6 +1,6 @@
 # ADR-005: The HTTP Adapter — axum and tower
 
-**Status:** Accepted
+**Status:** Accepted — the JSON Patch mode and conditional requests are ADR-014
 **Date:** 2026-08-24
 
 ## Context

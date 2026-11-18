@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::domain::{Aggregate, Check, Criteria, DomainError, DomainResult, Filter};
 use crate::port::outbound::HealthCheck;
-use crate::port::store::{Loaded, Store, Version, encode};
+use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 
 /// Aggregates kept in a map, as the JSON documents a database-backed store would write.
 ///
@@ -187,11 +187,15 @@ impl<A: Aggregate> Store<A> for Memory<A> {
         Loaded::written(aggregate.into_inner(), next)
     }
 
-    async fn remove(&self, id: &A::Id) -> DomainResult<A> {
-        let entry = self
-            .lock()?
-            .remove(&id.to_string())
-            .ok_or_else(DomainError::not_found)?;
+    async fn remove(&self, id: &A::Id, expected: Option<Version>) -> DomainResult<A> {
+        let key = id.to_string();
+        let entry = {
+            let mut documents = self.lock()?;
+            let current = documents.get(&key).ok_or_else(DomainError::not_found)?;
+            // Under the same lock as the removal, so nobody can save in between.
+            expect_version::<A>(id, expected, current.version)?;
+            documents.remove(&key).expect("checked above")
+        };
         Ok(Loaded::<A>::decode(entry.document, entry.version)?.into_inner())
     }
 
@@ -476,7 +480,7 @@ mod tests {
         let notes = store();
         notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
         let loaded = notes.load(&1).await.unwrap();
-        notes.remove(&1).await.unwrap();
+        notes.remove(&1, None).await.unwrap();
 
         assert!(matches!(
             notes.save(loaded).await.unwrap_err(),
@@ -489,11 +493,54 @@ mod tests {
         let notes = store();
         notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
 
-        assert_eq!(notes.remove(&1).await.unwrap().title.0, "Shopping");
+        assert_eq!(notes.remove(&1, None).await.unwrap().title.0, "Shopping");
         assert!(matches!(
-            notes.remove(&1).await.unwrap_err(),
+            notes.remove(&1, None).await.unwrap_err(),
             DomainError::NotFound
         ));
+        assert!(notes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_change_at_a_version_that_has_moved_on_is_stale() {
+        let notes = store();
+        notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
+        notes.change(&1, Note::archive).await.unwrap();
+
+        let err = notes
+            .change_at(&1, Some(Version::FIRST), |note| {
+                note.priority = 9;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Stale { .. }), "{err}");
+        assert!(err.to_string().contains("at version 2, not 1"), "{err}");
+        assert_eq!(notes.load(&1).await.unwrap().priority, 2);
+
+        let current = notes.load(&1).await.unwrap().version();
+        notes
+            .change_at(&1, Some(current), |note| {
+                note.priority = 9;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(notes.load(&1).await.unwrap().priority, 9);
+    }
+
+    #[tokio::test]
+    async fn a_conditional_remove_only_removes_the_expected_version() {
+        let notes = store();
+        notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
+        notes.change(&1, Note::archive).await.unwrap();
+
+        assert!(matches!(
+            notes.remove(&1, Some(Version::FIRST)).await.unwrap_err(),
+            DomainError::Stale { .. }
+        ));
+        assert_eq!(notes.len(), 1);
+        notes.remove(&1, Some(Version::new(2))).await.unwrap();
         assert!(notes.is_empty());
     }
 

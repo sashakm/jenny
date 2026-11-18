@@ -2,6 +2,7 @@
 
 use std::ops::{Deref, DerefMut};
 
+use axum::body::Bytes;
 use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::response::{IntoResponse, Response};
 use http::{Method, StatusCode, request::Parts};
@@ -12,6 +13,7 @@ use uuid::Uuid;
 use jenny_core::domain::{Criteria, DomainError, MAX_PAGE_SIZE, Page, Principal, Urn};
 use jenny_core::port::Context;
 
+use crate::patch::PatchedPaths;
 use crate::problem::Problem;
 use crate::request_id::RequestId;
 use crate::security::AttachedAuthorizer;
@@ -184,23 +186,64 @@ where
     type Rejection = Problem;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(patched) = req.extensions().get::<PatchedPaths>().cloned() {
+            return from_patched(req, state, patched).await;
+        }
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(value)) => Ok(Json(value)),
-            Err(rejection) => {
-                let problem = Problem::invalid(rejection.body_text());
-                // A body too large is a distinct failure and deserves its own status.
-                Err(if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                    Problem::new(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "urn:jenny:problem:payload-too-large",
-                        "Payload Too Large",
-                    )
-                    .with_detail(rejection.body_text())
-                } else {
-                    problem
-                })
-            }
+            Err(rejection) => Err(body_problem(rejection.status(), rejection.body_text())),
         }
+    }
+}
+
+/// A body sent on by a derived `PATCH` (see [`crate::patch`]): the patched
+/// representation, which may carry fields this type does not take. Those are ignored as
+/// usual — unless the patch is what changed them, which would otherwise succeed without
+/// effect.
+async fn from_patched<T, S>(
+    req: Request,
+    state: &S,
+    patched: PatchedPaths,
+) -> Result<Json<T>, Problem>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    let bytes = Bytes::from_request(req, state)
+        .await
+        .map_err(|rejection| body_problem(rejection.status(), rejection.body_text()))?;
+    patched.mark_checked();
+
+    let mut ignored = Vec::new();
+    let value: T =
+        serde_ignored::deserialize(&mut serde_json::Deserializer::from_slice(&bytes), |path| {
+            ignored.push(crate::patch::pointer(&path))
+        })
+        .map_err(|e| {
+            Problem::invalid(format!(
+                "Failed to deserialize the JSON body into the target type: {e}"
+            ))
+        })?;
+
+    match ignored.iter().find_map(|path| patched.changed_within(path)) {
+        Some(changed) => Err(Problem::unprocessable(format!(
+            "`{changed}` cannot be changed through this resource"
+        ))),
+        None => Ok(Json(value)),
+    }
+}
+
+pub(crate) fn body_problem(status: StatusCode, text: String) -> Problem {
+    // A body too large is a distinct failure and deserves its own status.
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        Problem::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "urn:jenny:problem:payload-too-large",
+            "Payload Too Large",
+        )
+        .with_detail(text)
+    } else {
+        Problem::invalid(text)
     }
 }
 

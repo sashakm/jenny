@@ -215,5 +215,5 @@ measured is the backend's business, not something each use case is handed.
 ## Not built yet
 
 - Database, document and key-value stores (ADR-013).
-- Mapping `Version` to `ETag`/`If-Match` and telling a stale write apart from a domain
-  conflict over HTTP. Both are decided with the JSON Patch mode of the REST adapter.
+
+Mapping `Version` onto `ETag`/`If-Match`, listed here originally, is built (ADR-014).

@@ -1,5 +1,7 @@
 //! Declaring a resource's HTTP surface.
 
+use std::collections::BTreeMap;
+
 use axum::handler::Handler;
 use axum::routing::{self, MethodRouter};
 use axum::{Extension, Router};
@@ -72,6 +74,28 @@ pub struct Routes<S = ()> {
     labels: Vec<Label>,
     endpoints: Vec<Endpoint>,
     router: Router<S>,
+    /// Each template's `GET` and `PUT`, kept beside the router and layered exactly like
+    /// it, so that the JSON Patch mode can derive a `PATCH` that calls them.
+    replaceable: BTreeMap<String, Replaceable<S>>,
+}
+
+/// What a route template offers for deriving a `PATCH`.
+struct Replaceable<S> {
+    get: Option<MethodRouter<S>>,
+    put: Option<MethodRouter<S>>,
+    /// The template has a `PATCH` of its own, or a raw `route(…)` that may answer
+    /// anything: deriving one would collide with it.
+    claimed: bool,
+}
+
+impl<S> Default for Replaceable<S> {
+    fn default() -> Self {
+        Self {
+            get: None,
+            put: None,
+            claimed: false,
+        }
+    }
 }
 
 impl<S> Routes<S>
@@ -87,6 +111,7 @@ where
             labels: Vec::new(),
             endpoints: Vec::new(),
             router: Router::new(),
+            replaceable: BTreeMap::new(),
         }
     }
 
@@ -168,6 +193,7 @@ where
     /// ```
     pub fn route(mut self, path: &str, method_router: MethodRouter<S>) -> Self {
         let path = normalize_path(path);
+        self.replaceable.entry(path.clone()).or_default().claimed = true;
         self.endpoints.push(Endpoint {
             method: "*".to_string(),
             path: path.clone(),
@@ -191,6 +217,12 @@ where
             Into<std::convert::Infallible> + 'static,
         <L::Service as tower::Service<axum::extract::Request>>::Future: Send + 'static,
     {
+        // The copies kept for a derived PATCH get the layer too, so a PATCH reaches the
+        // GET and PUT through exactly what a direct request would pass.
+        for replaceable in self.replaceable.values_mut() {
+            replaceable.get = replaceable.get.take().map(|get| get.layer(layer.clone()));
+            replaceable.put = replaceable.put.take().map(|put| put.layer(layer.clone()));
+        }
         self.router = self.router.layer(layer);
         self
     }
@@ -198,12 +230,26 @@ where
     /// Supply the state the handlers extract with [`State`](axum::extract::State),
     /// producing a resource ready to be mounted.
     pub fn with_state(self, state: S) -> Routes<()> {
+        let replaceable = self
+            .replaceable
+            .into_iter()
+            .map(|(path, replaceable)| {
+                let with_state = |router: MethodRouter<S>| router.with_state(state.clone());
+                let replaceable = Replaceable {
+                    get: replaceable.get.map(with_state),
+                    put: replaceable.put.map(with_state),
+                    claimed: replaceable.claimed,
+                };
+                (path, replaceable)
+            })
+            .collect();
         Routes {
             name: self.name,
             description: self.description,
             labels: self.labels,
             endpoints: self.endpoints,
             router: self.router.with_state(state),
+            replaceable,
         }
     }
 
@@ -226,6 +272,13 @@ where
 
     fn method(mut self, method: Method, path: &str, method_router: MethodRouter<S>) -> Self {
         let path = normalize_path(path);
+        let replaceable = self.replaceable.entry(path.clone()).or_default();
+        match method {
+            Method::GET => replaceable.get = Some(method_router.clone()),
+            Method::PUT => replaceable.put = Some(method_router.clone()),
+            Method::PATCH => replaceable.claimed = true,
+            _ => {}
+        }
         self.endpoints.push(Endpoint {
             method: method.to_string(),
             path: path.clone(),
@@ -238,10 +291,43 @@ where
 }
 
 impl Routes<()> {
+    /// The templates the JSON Patch mode derives a `PATCH` for: those with both a `GET`
+    /// and a `PUT`, and no `PATCH` or raw route of their own.
+    pub(crate) fn patchable(&self) -> Vec<String> {
+        self.replaceable
+            .iter()
+            .filter(|(_, r)| r.get.is_some() && r.put.is_some() && !r.claimed)
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     /// Stamp this resource's URN onto every request it serves, and hand back the
-    /// router. Called by [`RestAdapter::mount`](crate::RestAdapter::mount).
-    pub(crate) fn into_router(self, urn: Urn) -> Router {
-        self.router.layer(Extension(ResourceUrn(urn)))
+    /// router. Called by [`RestAdapter::mount`](crate::RestAdapter::mount), which
+    /// passes `json_patch` when the adapter accepts JSON Patch.
+    ///
+    /// Derived `PATCH` routes are added before the URN layer, so they carry the URN
+    /// like any other route, and the adapter-wide layers applied after mounting —
+    /// authentication, the authorization gate — wrap them as well.
+    pub(crate) fn into_router(self, urn: Urn, json_patch: bool) -> Router {
+        let mut router = self.router;
+        if json_patch {
+            for (path, replaceable) in self.replaceable {
+                if let Replaceable {
+                    get: Some(get),
+                    put: Some(put),
+                    claimed: false,
+                } = replaceable
+                {
+                    router = router.route(
+                        &path,
+                        routing::patch(move |request: axum::extract::Request| {
+                            crate::patch::derived(get.clone(), put.clone(), request)
+                        }),
+                    );
+                }
+            }
+        }
+        router.layer(Extension(ResourceUrn(urn)))
     }
 }
 
@@ -307,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn several_methods_can_share_one_path() {
-        let app = sample().into_router(Urn::root("app").unwrap().child("notes").unwrap());
+        let app = sample().into_router(Urn::root("app").unwrap().child("notes").unwrap(), false);
 
         for (method, expected) in [(Method::GET, "list"), (Method::POST, "create")] {
             let response = app
@@ -329,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_method_that_was_not_declared_is_not_allowed() {
-        let app = sample().into_router(Urn::root("app").unwrap().child("notes").unwrap());
+        let app = sample().into_router(Urn::root("app").unwrap().child("notes").unwrap(), false);
         let response = app
             .oneshot(
                 http::Request::builder()
@@ -349,7 +435,7 @@ mod tests {
 
         let routes: Routes =
             Routes::new("notes").get("/notes", |id: RouteId| async move { id.to_string() });
-        let app = routes.into_router(Urn::root("app").unwrap().child("notes").unwrap());
+        let app = routes.into_router(Urn::root("app").unwrap().child("notes").unwrap(), false);
 
         let response = app
             .oneshot(http::Request::get("/notes").body(Body::empty()).unwrap())
@@ -372,7 +458,7 @@ mod tests {
         let routes = Routes::new("greet")
             .get("/greet", |State(g): State<Greeting>| async move { g.0 })
             .with_state(Greeting("hello"));
-        let app = routes.into_router(Urn::root("app").unwrap().child("greet").unwrap());
+        let app = routes.into_router(Urn::root("app").unwrap().child("greet").unwrap(), false);
 
         let response = app
             .oneshot(http::Request::get("/greet").body(Body::empty()).unwrap())
@@ -390,7 +476,7 @@ mod tests {
         );
         assert_eq!(routes.endpoints()[0].to_string(), "* /hooks/{provider}");
 
-        let app = routes.into_router(Urn::root("app").unwrap().child("hooks").unwrap());
+        let app = routes.into_router(Urn::root("app").unwrap().child("hooks").unwrap(), false);
         let response = app
             .oneshot(
                 http::Request::put("/hooks/stripe")

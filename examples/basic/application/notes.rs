@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use jenny::{Context, Criteria, DomainResult, Events, Loaded, StoreExt, use_cases};
+use jenny::{Context, Criteria, DomainResult, Events, Loaded, StoreExt, Version, use_cases};
 
 use crate::domain::model::{Note, NoteId};
 use crate::domain::port::NoteStore;
@@ -45,15 +45,22 @@ impl Notes {
         self.notes.load(&id).await
     }
 
-    /// Replace a note's contents.
+    /// Replace a note's contents — if it is still at `expected`, when the caller says
+    /// which version it read (an HTTP `If-Match`).
     ///
     /// Listeners hear a `note.updated` carrying exactly what changed, as a JSON Patch.
     /// An edit that changes nothing writes nothing and publishes nothing.
-    pub async fn edit(&self, id: NoteId, cmd: EditNote, cx: &Context) -> DomainResult<()> {
+    pub async fn edit(
+        &self,
+        id: NoteId,
+        cmd: EditNote,
+        expected: Option<Version>,
+        cx: &Context,
+    ) -> DomainResult<()> {
         // The rule about editing archived notes lives in the aggregate, not here.
         let edited = self
             .notes
-            .change(&id, |note| note.edit(cmd.title, cmd.body))
+            .change_at(&id, expected, |note| note.edit(cmd.title, cmd.body))
             .await?;
         if let Some(updated) = edited.updated() {
             self.events.publish(&updated, cx).await;
@@ -67,8 +74,13 @@ impl Notes {
         Ok(())
     }
 
-    pub async fn delete(&self, id: NoteId, _cx: &Context) -> DomainResult<Note> {
-        self.notes.remove(&id).await
+    pub async fn delete(
+        &self,
+        id: NoteId,
+        expected: Option<Version>,
+        _cx: &Context,
+    ) -> DomainResult<Note> {
+        self.notes.remove(&id, expected).await
     }
 }
 
@@ -132,7 +144,7 @@ mod tests {
         let id = notes.create(create("Shopping"), &cx).await.unwrap();
 
         notes
-            .edit(id, edit("Groceries", "body"), &cx)
+            .edit(id, edit("Groceries", "body"), None, &cx)
             .await
             .unwrap();
 
@@ -155,7 +167,10 @@ mod tests {
         let cx = Context::new();
         let id = notes.create(create("Shopping"), &cx).await.unwrap();
 
-        notes.edit(id, edit("Shopping", "body"), &cx).await.unwrap();
+        notes
+            .edit(id, edit("Shopping", "body"), None, &cx)
+            .await
+            .unwrap();
 
         assert_eq!(events.names(), ["note.created"]);
         assert_eq!(notes.fetch(id, &cx).await.unwrap().version().get(), 1);
@@ -186,8 +201,33 @@ mod tests {
         let id = notes.create(create("Shopping"), &cx).await.unwrap();
         notes.archive(id, &cx).await.unwrap();
 
-        let err = notes.edit(id, edit("Nope", ""), &cx).await.unwrap_err();
+        let err = notes
+            .edit(id, edit("Nope", ""), None, &cx)
+            .await
+            .unwrap_err();
         assert!(matches!(err, DomainError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn an_edit_against_a_version_that_moved_on_is_stale() {
+        let (notes, _) = notes();
+        let cx = Context::new();
+        let id = notes.create(create("Shopping"), &cx).await.unwrap();
+        let read = notes.fetch(id, &cx).await.unwrap().version();
+        notes
+            .edit(id, edit("Groceries", "body"), Some(read), &cx)
+            .await
+            .unwrap();
+
+        let err = notes
+            .edit(id, edit("Lost update", "body"), Some(read), &cx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Stale { .. }), "{err}");
+        assert_eq!(
+            notes.fetch(id, &cx).await.unwrap().title().as_str(),
+            "Groceries"
+        );
     }
 
     #[tokio::test]
@@ -196,10 +236,10 @@ mod tests {
         let cx = Context::new();
         let id = notes.create(create("Shopping"), &cx).await.unwrap();
 
-        let removed = notes.delete(id, &cx).await.unwrap();
+        let removed = notes.delete(id, None, &cx).await.unwrap();
         assert_eq!(removed.id(), id);
         assert!(matches!(
-            notes.delete(id, &cx).await.unwrap_err(),
+            notes.delete(id, None, &cx).await.unwrap_err(),
             DomainError::NotFound
         ));
         assert!(notes.list(&Criteria::new(), &cx).await.unwrap().is_empty());

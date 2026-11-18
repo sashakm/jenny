@@ -81,9 +81,12 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     let {{resource_plural}} = {{resource_pascal}}s::new({{resource_plural}}_store.clone(), events);
 
     // --- driving adapter: HTTP in --------------------------------------------------
-    // No path given, so it takes `server.api_path` from configuration.
+    // No path given, so it takes `server.api_path` from configuration. It accepts JSON
+    // Patch, so every route with a GET and a PUT also answers PATCH, derived from those
+    // two; drop that line and PATCH is 405.
     let rest = RestAdapter::new("{{project_kebab}}")?
         .describe("{{project_kebab}}")
+        .accept_json_patch()?
         .mount(adapter::inbound::rest::{{resource_snake}}::routes({{resource_plural}}))?;
 {{#if openapi}}
     // The schemas `#[derive(Dto)]` produced, served at `<framework_path>/openapi.json`.

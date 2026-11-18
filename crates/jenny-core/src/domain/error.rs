@@ -21,6 +21,7 @@ pub type ErrorSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// | [`Unauthenticated`](Self::Unauthenticated) | 401 | `UNAUTHENTICATED` |
 /// | [`Forbidden`](Self::Forbidden) | 403 | `PERMISSION_DENIED` |
 /// | [`Conflict`](Self::Conflict) | 409 | `ABORTED` |
+/// | [`Stale`](Self::Stale) | 412 | `FAILED_PRECONDITION` |
 /// | [`Internal`](Self::Internal) | 500 | `INTERNAL` |
 #[derive(Debug, Error)]
 pub enum DomainError {
@@ -45,10 +46,17 @@ pub enum DomainError {
     #[error("forbidden: {detail}")]
     Forbidden { detail: String },
 
-    /// The operation conflicts with the current state — a duplicate, or a stale
-    /// version in an optimistic-concurrency check.
+    /// The operation conflicts with the current state — a duplicate, or another writer
+    /// saving first while this one was working.
     #[error("conflict: {detail}")]
     Conflict { detail: String },
+
+    /// The caller said which version it expected, and that is no longer the current
+    /// one. Distinct from [`Conflict`](Self::Conflict) because the caller asked to be
+    /// told: it sent a precondition (an HTTP `If-Match`), and the answer is that it
+    /// failed, so the caller should re-read before trying again.
+    #[error("stale: {detail}")]
+    Stale { detail: String },
 
     /// Something failed that the caller can do nothing about. `source` is the error
     /// behind it, so the whole chain reaches the logs even though none of it reaches
@@ -91,6 +99,12 @@ impl DomainError {
         }
     }
 
+    pub fn stale(detail: impl Into<String>) -> Self {
+        Self::Stale {
+            detail: detail.into(),
+        }
+    }
+
     pub fn internal(detail: impl Into<String>) -> Self {
         Self::Internal {
             detail: detail.into(),
@@ -116,6 +130,7 @@ impl DomainError {
             Self::Unauthenticated { .. } => "unauthenticated",
             Self::Forbidden { .. } => "forbidden",
             Self::Conflict { .. } => "conflict",
+            Self::Stale { .. } => "stale",
             Self::Internal { .. } => "internal",
         }
     }
