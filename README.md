@@ -300,7 +300,6 @@ objects:
   url: s3://attachments/notes        # AWS S3, or anything S3-compatible
   options:                           # object_store's option names, over AWS_*
     endpoint: http://localhost:9000
-    conditional_put: etag            # put_if_absent / put_if_match on S3
 ```
 
 On AWS the URL is enough; credentials come from the role, as for any AWS SDK.
