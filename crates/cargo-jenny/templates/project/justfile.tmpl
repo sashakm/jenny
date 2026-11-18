@@ -16,6 +16,13 @@ run:
 run-postgres:
     JENNY__PERSISTENCE__POSTGRES__URL=postgres://{{project_snake}}:{{project_snake}}@localhost:5432/{{project_snake}} cargo run -- --config-path config.yaml
 {{/if}}
+{{#if objects}}
+
+# Run with the object store from `just up` configured: `server.objects()` hands it to
+# whatever wires it in, and `/j/health/ready` reports it from then on.
+run-objects:
+    JENNY__OBJECTS__URL=s3://{{project_kebab}} AWS_ENDPOINT=http://localhost:9000 AWS_ALLOW_HTTP=true AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID={{project_snake}} AWS_SECRET_ACCESS_KEY={{project_snake}}-secret cargo run -- --config-path config.yaml
+{{/if}}
 
 # Development dependencies (Postgres, collector, ...).
 up:

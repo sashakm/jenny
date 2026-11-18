@@ -53,3 +53,17 @@ persistence:
 applications:
   {{project_kebab}}:
     greeting: "hello from config.yaml"
+{{#if objects}}
+
+# Object storage. Unset, there is none and `server.objects()` is `None`. `just up`
+# starts one and `just run-objects` points the service at it. On AWS the URL is enough:
+# the standard AWS_* variables and the service's role supply the rest. Options carry
+# secrets, so set them through the environment (JENNY__OBJECTS__OPTIONS__...). The whole
+# section is commented out because an `objects:` with nothing under it is not a section.
+# objects:
+#   url: s3://{{project_kebab}}
+#   options:
+#     endpoint: http://localhost:9000
+#     allow_http: "true"
+#     conditional_put: etag   # for Blobs::put_if_absent / put_if_match
+{{/if}}

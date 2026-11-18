@@ -35,6 +35,8 @@ url = { workspace = true }
 jenny-messaging = { workspace = true, optional = true }
 # Optional: a Postgres pool from `persistence.postgres`, prepared before serving.
 jenny-persistence = { workspace = true, optional = true }
+# Optional: an object store from `objects`.
+jenny-objects = { workspace = true, optional = true }
 topmesys = { workspace = true, optional = true }
 
 # Optional telemetry backends
@@ -55,6 +57,9 @@ messaging = ["dep:jenny-messaging", "dep:topmesys"]
 # A Postgres pool built from `persistence.postgres`: migrated, its document tables
 # created and its readiness checked by the runtime.
 persistence = ["dep:jenny-persistence"]
+# Blob storage from `objects.url` (S3 and compatibles, files, memory), with a readiness
+# check.
+objects = ["dep:jenny-objects"]
 # Serve the OpenAPI document at <framework_path>/openapi.json.
 openapi = ["dep:utoipa", "jenny-rest/openapi"]
 # Serve a browsable Swagger UI, with its assets compiled in.

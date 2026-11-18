@@ -8,6 +8,7 @@ members = [
     "crates/jenny-persistence",
     "crates/jenny-security",
     "crates/jenny-messaging",
+    "crates/jenny-objects",
     "crates/jenny-rest",
     "crates/jenny-server",
 ]
@@ -28,6 +29,7 @@ jenny-macros = { path = "crates/jenny-macros", version = "0.1.0" }
 jenny-persistence = { path = "crates/jenny-persistence", version = "0.1.0" }
 jenny-security = { path = "crates/jenny-security", version = "0.1.0" }
 jenny-messaging = { path = "crates/jenny-messaging", version = "0.1.0" }
+jenny-objects = { path = "crates/jenny-objects", version = "0.1.0" }
 jenny-rest = { path = "crates/jenny-rest", version = "0.1.0" }
 jenny-server = { path = "crates/jenny-server", version = "0.1.0" }
 
@@ -81,6 +83,7 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 tracing-opentelemetry = "0.34"
 tracing-loki = "0.2"
+object_store = { version = "0.14", default-features = false, features = ["aws", "fs"] }
 opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.33", features = [

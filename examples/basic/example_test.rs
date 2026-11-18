@@ -92,7 +92,8 @@ async fn health_endpoints_describe_the_service(svc: &Service) {
     let (status, ready) = svc.get("/j/health/ready").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ready["status"], "up");
-    // Notes are in memory here; with a backend configured, `postgres` or `nats` is listed.
+    // Notes are in memory here; with a backend configured, `postgres`, `nats` or
+    // `objects` is listed.
     assert!(
         ready["checks"]
             .as_array()
@@ -235,6 +236,43 @@ async fn a_domain_rule_becomes_the_right_status(svc: &Service) {
     assert_eq!(status, StatusCode::CONFLICT);
 
     svc.delete(&format!("/api/notes/{id}")).await;
+}
+
+async fn a_note_can_carry_an_attachment(svc: &Service) {
+    let (_, id) = svc.post("/api/notes", json!({ "title": "Receipt" })).await;
+    let id: Uuid = serde_json::from_value(id).unwrap();
+    let attachment = svc.url(&format!("/api/notes/{id}/attachment"));
+
+    let response = svc
+        .client
+        .put(&attachment)
+        .header("content-type", "image/png")
+        .body(&b"\x89PNG not really"[..])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = svc.client.get(&attachment).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(&response.bytes().await.unwrap()[..], b"\x89PNG not really");
+
+    // A file has a GET and a PUT, but no JSON to patch.
+    let (status, _) = svc
+        .patch(
+            &format!("/api/notes/{id}/attachment"),
+            json!([{ "op": "remove", "path": "/x" }]),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    // Deleting the note deletes its file.
+    let (status, _) = svc.delete(&format!("/api/notes/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let response = svc.client.get(&attachment).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 async fn notes_can_be_patched_and_writes_can_be_made_conditional(svc: &Service) {
@@ -386,6 +424,7 @@ async fn the_example_service_works_end_to_end() {
     listings_can_be_sorted_filtered_and_paged(&svc).await;
     a_domain_rule_becomes_the_right_status(&svc).await;
     notes_can_be_patched_and_writes_can_be_made_conditional(&svc).await;
+    a_note_can_carry_an_attachment(&svc).await;
     failures_are_problem_documents(&svc).await;
 
     handle.shutdown();

@@ -9,12 +9,13 @@ changes are fine, and removing a low-value feature beats adapting it.
 | Crate | Ring | Holds |
 |---|---|---|
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
-| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Events`, outbound ports, `Memory` + `Queryable`, tasks |
+| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Blobs`, `Events`, outbound ports, `Memory` + `Queryable`, `MemoryBlobs`, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `Nats` + `NatsKv` key-value store, `MessagingAdapter` (declaration only) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
+| `crates/jenny-objects` | driven adapter | `object_store`: `ObjectBlobs` (the `Blobs` port over S3 and compatibles, files, memory), `ObjectsConfig`, `ObjectsCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
-| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection (`messaging`), hosting, graceful shutdown |
+| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection (`messaging`), the object store (`objects`), hosting, graceful shutdown |
 | `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
@@ -56,6 +57,7 @@ just test-cli           # scaffold a default project; it must build, test and li
 just test-cli-features  # the same once per optional feature (slow; shared target dir)
 just test-postgres      # database tests + the example against a disposable Postgres 18 (docker)
 just test-nats          # key-value tests + the example against a disposable NATS (docker)
+just test-objects       # object-storage tests + the example against a disposable S3 (RustFS, docker)
 just msrv               # cargo +1.94 check, the declared rust-version
 just package            # package + verify every crate as crates.io will see it
 ```
@@ -96,10 +98,17 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   cloned request again appends to `MatchedPath` and duplicates the private `UrlParams`.
   `Routes` keeps layered copies of each GET and PUT for this; a new way of adding or
   layering routes must keep them in step (ADR-014).
-- **Backend tests read `JENNY_TEST_POSTGRES_URL` / `JENNY_TEST_NATS_URL`**: unset, they
-  print "skipping" and pass; unset under `CI`, they fail. So `just test-all` passing says
-  nothing about them — run `just test-postgres` / `just test-nats` for any change in a
-  store or its runtime wiring. Each test uses a table or bucket of its own and drops it.
+- **Backend tests read `JENNY_TEST_POSTGRES_URL` / `JENNY_TEST_NATS_URL` /
+  `JENNY_TEST_S3_URL`** (the last with the standard `AWS_*` variables): unset, they print
+  "skipping" and pass; unset under `CI`, they fail. So `just test-all` passing says
+  nothing about them — run `just test-postgres` / `just test-nats` / `just test-objects`
+  for any change in a store or its runtime wiring. Each test uses a table, bucket or key
+  prefix of its own and removes it.
+- **S3 conditional writes need `conditional_put: etag`.** Without it `object_store`
+  refuses `put_if_absent`/`put_if_match`, and `ObjectBlobs` reports which option is
+  missing; it never falls back to an unconditional write. Readiness lists the bucket
+  rather than `HEAD`ing a key, because S3 answers both a missing key and a missing bucket
+  with 404.
 - **Listing rules live in two places.** `Memory` and `NatsKv` evaluate criteria through
   `jenny_core::memory::Queryable`; the Postgres stores translate them in
   `jenny-persistence/src/criteria.rs`. A listing change needs both, and the known
@@ -137,5 +146,5 @@ check publishability. Details: `RELEASING.md`.
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
 the OpenAPI document (ADR-014), events raised with a `remove` and `LISTEN/NOTIFY` for relays (ADR-016), a `migrations/`
-directory in the scaffold (ADR-015), the object-storage and AGE adapters (ADR-013; MongoDB is deferred), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
+directory in the scaffold (ADR-015), the AGE adapter (ADR-013; MongoDB is deferred), Azure/GCS, streaming and multipart blobs (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

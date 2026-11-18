@@ -27,6 +27,28 @@ services:
       - "4222:4222"
       - "8222:8222"
 {{/if}}
+{{#if objects}}
+  # S3-compatible object storage for `just run-objects` (config.yaml, `objects`).
+  objects:
+    image: rustfs/rustfs:1.0.6
+    environment:
+      RUSTFS_ACCESS_KEY: {{project_snake}}
+      RUSTFS_SECRET_KEY: {{project_snake}}-secret
+    ports:
+      - "9000:9000"
+    volumes:
+      - objects-data:/data
+  # A bucket is infrastructure, so it is made here, once, and never by the service.
+  objects-bucket:
+    image: curlimages/curl:8.11.1
+    depends_on: [objects]
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 aws:amz:us-east-1:s3
+        --user {{project_snake}}:{{project_snake}}-secret
+        -X PUT http://objects:9000/{{project_kebab}} | grep -qE '200|409'; do sleep 1; done
+{{/if}}
 {{#if telemetry}}
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
@@ -38,15 +60,20 @@ services:
       - "4318:4318"
 {{/if}}
 {{#if no_services}}
-  # Nothing to run yet. Regenerate with --features persistence,messaging to get
-  # Postgres and NATS here.
+  # Nothing to run yet. Regenerate with --features persistence,messaging,objects to get
+  # Postgres, NATS and an S3-compatible store here.
   placeholder:
     image: alpine:3
     command: ["true"]
     profiles: ["never"]
 {{/if}}
-{{#if persistence}}
+{{#if volumes}}
 
 volumes:
+{{#if persistence}}
   postgres-data:
+{{/if}}
+{{#if objects}}
+  objects-data:
+{{/if}}
 {{/if}}

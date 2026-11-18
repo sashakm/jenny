@@ -1,5 +1,5 @@
-//! An in-memory [`Store`] — for tests, prototypes and services that start without a
-//! database.
+//! An in-memory [`Store`] and [`Blobs`] — for tests, prototypes and services that start
+//! without a database or an object store.
 //!
 //! A driven adapter, living in the core for the same reason [`task`](crate::task) does:
 //! it needs nothing beyond what the core already depends on, and every service wants
@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::{Aggregate, Check, Criteria, DomainError, DomainResult, Filter, ValueKind};
+use crate::port::blobs::{Access, Blob, BlobInfo, Blobs, check_key, is_under};
 use crate::port::outbound::HealthCheck;
 use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 
@@ -297,6 +298,113 @@ impl Queryable {
             .skip(criteria.page.offset() as usize)
             .take(criteria.page.limit() as usize)
             .collect())
+    }
+}
+
+/// Blobs kept in a map — for tests, and services that start without an object store.
+///
+/// Keeps the [`Blobs`] contract the S3 adapter keeps: the same key rules, conditional
+/// writes that refuse rather than overwrite, `list` by path. Each write gets a fresh
+/// entity tag. There are no [signed URLs](Blobs::signed_url): nothing outside the
+/// process could follow one.
+#[derive(Debug, Default)]
+pub struct MemoryBlobs {
+    blobs: Mutex<BTreeMap<String, (Blob, BlobInfo)>>,
+    writes: std::sync::atomic::AtomicU64,
+}
+
+impl MemoryBlobs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> DomainResult<MutexGuard<'_, BTreeMap<String, (Blob, BlobInfo)>>> {
+        self.blobs
+            .lock()
+            .map_err(|e| DomainError::internal(format!("blob store is poisoned: {e}")))
+    }
+
+    fn store(
+        &self,
+        blobs: &mut BTreeMap<String, (Blob, BlobInfo)>,
+        key: &str,
+        blob: Blob,
+    ) -> BlobInfo {
+        let write = self
+            .writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let info = BlobInfo {
+            key: key.to_string(),
+            size: blob.bytes().len() as u64,
+            etag: Some(format!("\"{write}\"")),
+            modified: chrono::Utc::now(),
+        };
+        blobs.insert(key.to_string(), (blob, info.clone()));
+        info
+    }
+}
+
+#[async_trait]
+impl Blobs for MemoryBlobs {
+    async fn put(&self, key: &str, blob: Blob) -> DomainResult<BlobInfo> {
+        check_key(key)?;
+        let mut blobs = self.lock()?;
+        Ok(self.store(&mut blobs, key, blob))
+    }
+
+    async fn put_if_absent(&self, key: &str, blob: Blob) -> DomainResult<BlobInfo> {
+        check_key(key)?;
+        let mut blobs = self.lock()?;
+        if blobs.contains_key(key) {
+            return Err(DomainError::conflict(format!(
+                "a blob `{key}` already exists"
+            )));
+        }
+        Ok(self.store(&mut blobs, key, blob))
+    }
+
+    async fn put_if_match(&self, key: &str, blob: Blob, etag: &str) -> DomainResult<BlobInfo> {
+        check_key(key)?;
+        let mut blobs = self.lock()?;
+        let current = blobs.get(key).ok_or_else(DomainError::not_found)?;
+        if current.1.etag.as_deref() != Some(etag) {
+            return Err(DomainError::stale(format!(
+                "blob `{key}` changed since entity tag {etag}"
+            )));
+        }
+        Ok(self.store(&mut blobs, key, blob))
+    }
+
+    async fn get(&self, key: &str) -> DomainResult<Option<(Blob, BlobInfo)>> {
+        check_key(key)?;
+        Ok(self.lock()?.get(key).cloned())
+    }
+
+    async fn head(&self, key: &str) -> DomainResult<Option<BlobInfo>> {
+        check_key(key)?;
+        Ok(self.lock()?.get(key).map(|(_, info)| info.clone()))
+    }
+
+    async fn delete(&self, key: &str) -> DomainResult<()> {
+        check_key(key)?;
+        self.lock()?.remove(key);
+        Ok(())
+    }
+
+    async fn list(&self, prefix: &str) -> DomainResult<Vec<BlobInfo>> {
+        Ok(self
+            .lock()?
+            .iter()
+            .filter(|(key, _)| is_under(key, prefix))
+            .map(|(_, (_, info))| info.clone())
+            .collect())
+    }
+
+    async fn signed_url(&self, _: &str, _: Access, _: std::time::Duration) -> DomainResult<String> {
+        Err(DomainError::internal(
+            "an in-memory blob store has no URLs; signed URLs need an object store others can reach",
+        ))
     }
 }
 
@@ -872,6 +980,73 @@ mod tests {
         let criteria = Criteria::new().with_sort("title".parse().unwrap());
         assert!(notes.list(&criteria).await.is_err());
         assert!(notes.list(&Criteria::new()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn blobs_keep_the_contract_the_s3_adapter_keeps() {
+        let blobs = MemoryBlobs::new();
+        let first = blobs
+            .put(
+                "avatars/1.png",
+                Blob::new(b"png".to_vec()).with_content_type("image/png"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.size, 3);
+
+        let (blob, info) = blobs.get("avatars/1.png").await.unwrap().unwrap();
+        assert_eq!(blob.bytes().as_ref(), b"png");
+        assert_eq!(blob.content_type(), Some("image/png"));
+        assert_eq!(info.etag, first.etag);
+
+        assert!(matches!(
+            blobs
+                .put_if_absent("avatars/1.png", Blob::new(b"x".to_vec()))
+                .await
+                .unwrap_err(),
+            DomainError::Conflict { .. }
+        ));
+        let etag = first.etag.clone().unwrap();
+        let second = blobs
+            .put_if_match("avatars/1.png", Blob::new(b"v2".to_vec()), &etag)
+            .await
+            .unwrap();
+        assert_ne!(second.etag, first.etag);
+        assert!(matches!(
+            blobs
+                .put_if_match("avatars/1.png", Blob::new(b"v3".to_vec()), &etag)
+                .await
+                .unwrap_err(),
+            DomainError::Stale { .. }
+        ));
+
+        blobs
+            .put("avatarsx/2.png", Blob::new(b"x".to_vec()))
+            .await
+            .unwrap();
+        let listed: Vec<String> = blobs
+            .list("avatars")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.key)
+            .collect();
+        assert_eq!(listed, ["avatars/1.png"]);
+
+        blobs.delete("avatars/1.png").await.unwrap();
+        blobs.delete("avatars/1.png").await.unwrap();
+        assert!(blobs.head("avatars/1.png").await.unwrap().is_none());
+        assert!(blobs.put("a//b", Blob::new(Vec::new())).await.is_err());
+        assert!(
+            blobs
+                .signed_url(
+                    "avatarsx/2.png",
+                    Access::Read,
+                    std::time::Duration::from_secs(60)
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[test]

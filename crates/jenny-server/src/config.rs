@@ -245,6 +245,9 @@ pub struct ServerConfig {
     pub messaging: MessagingConfig,
     #[cfg(feature = "persistence")]
     pub persistence: PersistenceConfig,
+    /// Where blobs live. Applies with the `objects` feature.
+    #[cfg(feature = "objects")]
+    pub objects: jenny_objects::ObjectsConfig,
 }
 
 /// The merged configuration tree, file and environment.

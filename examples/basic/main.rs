@@ -31,6 +31,15 @@
 //!   --config-path examples/basic/config.yaml
 //! ```
 //!
+//! Attachments stay in memory too, unless the `objects` feature and an `objects.url` put
+//! them elsewhere — a directory is enough to try it, an S3 bucket in production:
+//!
+//! ```sh
+//! JENNY__OBJECTS__URL=file:///tmp/notes \
+//!   cargo run --example basic --features server,objects -- \
+//!   --config-path examples/basic/config.yaml
+//! ```
+//!
 //! Then poke at it:
 //!
 //! ```sh
@@ -41,6 +50,8 @@
 //!   -d '{"title": "Shopping", "body": "milk"}' | tr -d '"')
 //!
 //! curl localhost:8000/api/notes
+//! curl -X PUT localhost:8000/api/notes/$ID/attachment -H 'content-type: text/plain' \
+//!   --data-binary 'milk, eggs'                        # 204; GET returns the file
 //! curl -X POST localhost:8000/api/notes/$ID/archive   # 204
 //! curl -X POST localhost:8000/api/notes/$ID/archive   # 409, already archived
 //! curl -X POST localhost:8000/api/notes -H 'content-type: application/json' \
@@ -60,7 +71,7 @@ mod example_test;
 use std::sync::Arc;
 
 use jenny::domain::ValueKind;
-use jenny::memory::Memory;
+use jenny::memory::{Memory, MemoryBlobs};
 use jenny::rest::RestAdapter;
 use jenny::server::JennyServer;
 use jenny::{EventPublisher, Events};
@@ -70,7 +81,7 @@ use serde::Deserialize;
 use adapter::outbound::events::EventLog;
 use application::Notes;
 use domain::model::Note;
-use domain::port::NoteStore;
+use domain::port::{Attachments, NoteStore};
 
 /// This service's own configuration, read from `applications.my-notes`. The framework
 /// imposes no schema on it — the shape below is entirely ours.
@@ -118,6 +129,17 @@ fn note_store(server: &mut JennyServer) -> anyhow::Result<Arc<NoteStore>> {
     Ok(Arc::new(Memory::<Note>::new().queryable(QUERYABLE)))
 }
 
+/// Where attachments live: an object store when `objects.url` is set (with the
+/// `objects` feature) — an S3 bucket, a directory — else memory.
+fn attachments(server: &mut JennyServer) -> anyhow::Result<Arc<Attachments>> {
+    #[cfg(feature = "objects")]
+    if let Some(objects) = server.objects()? {
+        return Ok(objects);
+    }
+    let _ = server;
+    Ok(Arc::new(MemoryBlobs::new()))
+}
+
 /// Wire the service together.
 ///
 /// Read it top to bottom and you have the entire dependency graph: driven adapters
@@ -132,6 +154,7 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
 
     // --- driven adapters: the outside world, as the domain's ports see it ----------
     let store = note_store(&mut server)?;
+    let attachments = attachments(&mut server)?;
 
     // With the `messaging` feature the runtime has already started an in-process bus,
     // so the port comes from it and one publish fans out to every listener. Without
@@ -148,7 +171,7 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     server.context_mut().provide(store.clone());
 
     // --- application: use cases over those ports ----------------------------------
-    let notes = Notes::new(store, Events::new(events));
+    let notes = Notes::new(store, attachments, Events::new(events));
 
     // --- driving adapter: HTTP in -------------------------------------------------
     // No mount path given, so it takes `server.api_path` from configuration, which
