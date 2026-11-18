@@ -19,6 +19,10 @@ use anyhow::Result;
 use jenny::Events;
 use jenny::domain::ValueKind;
 use jenny::memory::Memory;
+{{#if objects}}
+use jenny::memory::MemoryBlobs;
+use jenny::port::Blobs;
+{{/if}}
 use jenny::rest::RestAdapter;
 use jenny::server::JennyServer;
 use serde::Deserialize;
@@ -94,6 +98,16 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
 {{else}}
     let {{resource_plural}}_store =
         Arc::new(Memory::<{{resource_pascal}}>::new().queryable({{resource_screaming}}_QUERYABLE));
+{{/if}}
+{{#if objects}}
+
+    // Files go through the `Blobs` port: the object store `objects.url` names (an S3
+    // bucket, a directory), or memory without one. Once asked for, the store is in
+    // `/j/health/ready`. Hand it to the use cases that keep files.
+    let _blobs: Arc<dyn Blobs> = match server.objects()? {
+        Some(objects) => objects,
+        None => Arc::new(MemoryBlobs::new()),
+    };
 {{/if}}
 {{#if messaging}}
 

@@ -18,8 +18,8 @@ run-postgres:
 {{/if}}
 {{#if objects}}
 
-# Run with the object store from `just up` configured: `server.objects()` hands it to
-# whatever wires it in, and `/j/health/ready` reports it from then on.
+# Run with the object store from `just up`: `build` takes it from `server.objects()`
+# instead of memory, and `/j/health/ready` reports it.
 run-objects:
     JENNY__OBJECTS__URL=s3://{{project_kebab}} AWS_ENDPOINT=http://localhost:9000 AWS_ALLOW_HTTP=true AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID={{project_snake}} AWS_SECRET_ACCESS_KEY={{project_snake}}-secret cargo run -- --config-path config.yaml
 {{/if}}

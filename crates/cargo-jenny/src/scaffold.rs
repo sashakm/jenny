@@ -192,10 +192,11 @@ fn base_bindings(project: &ProjectNames, features: &Features) -> Bindings {
             features.has("openapi") || features.has("swagger-ui"),
         )
         .flag("telemetry", features.has("telemetry"))
-        // `build` borrows the server mutably to start the bus or to build the pool.
+        // `build` borrows the server mutably to start the bus, or to build the pool or
+        // the object store.
         .flag(
             "mutable_server",
-            features.has("messaging") || features.has("persistence"),
+            features.has("messaging") || features.has("persistence") || features.has("objects"),
         )
 }
 
