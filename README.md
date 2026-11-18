@@ -20,7 +20,7 @@ introduces it.
   cron ─┘                           │
                                     ▼
                              outbound ports          ← traits the domain owns
-                    repository · event publisher · storage
+                       store · event publisher · storage
                                     │
                             adapter/outbound         ← infrastructure
                     postgres · eventbus · object store
@@ -180,8 +180,8 @@ And `main` is the dependency graph, readable top to bottom:
 async fn main() -> anyhow::Result<()> {
     let mut server = JennyServer::from_args()?;          // config + telemetry up
 
-    let store = Arc::new(Memory::<Note>::new().queryable(["title"])); // driven adapter
-    let events = Events::new(server.events()?);
+    let store = Arc::new(Memory::<Note>::new().queryable(QUERYABLE)); // driven adapter
+    let events = Events::new(server.events()?);       // the in-process bus (`messaging`)
     let notes = Notes::new(store.clone(), events);                    // application
 
     let rest = RestAdapter::new("my-notes")?                     // driving adapter
@@ -245,9 +245,9 @@ ring structure, a starter resource, `Cargo.toml`, `config.yaml`, `justfile`,
 `Dockerfile`, a `compose.yaml` carrying only the services your features actually need,
 and an end-to-end test that boots the real composition root.
 
-`add resource` stubs a vertical slice across every ring — aggregate, repository port,
-use cases, REST routes, tests — inserts the `mod` declarations, and prints the wiring
-snippet rather than editing `main.rs`, because the composition root is the one file
+`add resource` stubs a vertical slice across every ring — aggregate, store port, use
+cases, REST routes, tests — inserts the `mod` declarations, and prints the wiring
+snippet rather than editing `src/lib.rs`, because the composition root is the one file
 worth reading top to bottom.
 
 ## What the runtime gives you

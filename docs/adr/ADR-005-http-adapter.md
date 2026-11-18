@@ -46,7 +46,7 @@ than three, and reaching for raw axum is expected rather than an escape hatch.
 There is no trait to implement:
 
 ```rust,ignore
-pub fn routes(notes: Arc<Notes>) -> Routes {
+pub fn routes(notes: Notes) -> Routes {
     Routes::new("notes")
         .describe("Note lifecycle")
         .get("/notes", list)

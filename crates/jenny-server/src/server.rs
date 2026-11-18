@@ -42,10 +42,10 @@ use crate::{
 ///     let mut server = JennyServer::from_args()?;   // config loaded, telemetry up
 ///
 ///     // let config: MyConfig = server.context().app_section("my-notes")?;
-///     // let repo = Arc::new(PgNoteRepository::new(pool));       // driven adapter
-///     // let use_cases = Arc::new(NoteUseCases::new(repo));      // application
-///     // let adapter = RestAdapter::new("my-notes", "/api")?     // driving adapter
-///     //     .mount(rest::notes::routes(use_cases))?;
+///     // let store = Arc::new(Memory::<Note>::new());              // driven adapter
+///     // let notes = Notes::new(store, Events::new(Arc::new(EventLog))); // application
+///     // let adapter = RestAdapter::new("my-notes")?              // driving adapter
+///     //     .mount(rest::notes::routes(notes))?;
 ///     // server = server.register(adapter)?;
 ///
 ///     server.run().await

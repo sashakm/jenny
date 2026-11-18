@@ -1,6 +1,7 @@
 # Configuration for the `basic` example.
 #
-# `server` and `telemetry` are the only sections the jenny runtime interprets.
+# `server`, `telemetry` and (with its feature) `messaging` are the only sections the
+# jenny runtime interprets.
 # Everything under `applications.<name>` is passed through untouched and read by the
 # service itself — see `NotesConfig` in main.rs.
 #

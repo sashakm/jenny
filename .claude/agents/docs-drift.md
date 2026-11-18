@@ -8,8 +8,11 @@ You audit the jenny framework's documentation for drift from its code. You do no
 anything: you report what is wrong, where, and what it should say, so the caller can fix
 it in the same change.
 
-Work on the tree you were started in (usually a worktree at the commit under review).
-Run `git log --oneline -5` first and name the commit you audited in your report.
+Audit the commit you were asked to, and name it in your report. Run `git log --oneline
+-5` first: an isolated worktree starts from the default branch, not from the branch
+under review, so it is often somewhere else. If it is, extract the commit into a fresh
+directory of your own (`git archive <commit> | tar -x -C <dir>`), audit that copy, and
+delete it when you are done.
 
 ## What drifts, in order of how often
 

@@ -23,9 +23,9 @@ name and a shape.
 async fn main() -> anyhow::Result<()> {
     let mut server = JennyServer::from_args()?;                   // config + telemetry
 
-    let repository = Arc::new(PgNoteRepository::new(pool));       // driven adapter
-    let events: Arc<dyn EventPublisher> = Arc::new(EventBus::new(bus, "my-notes"));
-    let notes = Arc::new(Notes::new(repository.clone(), events)); // application
+    let store = Arc::new(Memory::<Note>::new());                  // driven adapter
+    let events = Events::new(server.events()?);                   // the in-process bus
+    let notes = Notes::new(store.clone(), events);                // application
 
     let rest = RestAdapter::new("my-notes")?                      // driving adapter
         .mount(adapter::inbound::rest::routes(notes))?;
