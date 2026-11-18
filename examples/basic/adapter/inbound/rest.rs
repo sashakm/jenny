@@ -11,8 +11,15 @@
 //! overwriting a change made in between. And `NoteRequest` accepts the whole
 //! [`NoteResponse`], ignoring `id` and `archived`, so a patch applies to exactly what a
 //! client read — and one that tries to change `archived` is refused with 422.
+//!
+//! The attachment has a GET and a PUT too, but it is a file, not JSON, so its derived
+//! PATCH answers 415: no patch format applies to it.
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
+use axum::http::{HeaderMap, header::CONTENT_TYPE};
+use axum::response::{IntoResponse, Response};
+use jenny::port::Blob;
 use jenny::rest::{ApiResult, Ctx, IfMatch, Json, Listing, Routes, StatusCode, Versioned};
 use jenny::{DomainError, Dto, Validate};
 use serde::{Deserialize, Serialize};
@@ -150,10 +157,39 @@ async fn delete(
     Ok(Json(NoteResponse::from(&removed)))
 }
 
+/// The body as it came, with its media type: an attachment is whatever the client sent.
+async fn attach(
+    State(notes): State<Notes>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    cx: Ctx,
+    body: Bytes,
+) -> ApiResult<StatusCode> {
+    let mut file = Blob::new(body);
+    if let Some(media) = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()) {
+        file = file.with_content_type(media);
+    }
+    notes.attach(NoteId::from_uuid(id), file, &cx).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn attachment(
+    State(notes): State<Notes>,
+    Path(id): Path<Uuid>,
+    cx: Ctx,
+) -> ApiResult<Response> {
+    let file = notes.attachment(NoteId::from_uuid(id), &cx).await?;
+    let media = file
+        .content_type()
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    Ok(([(CONTENT_TYPE, media)], file.into_bytes()).into_response())
+}
+
 /// The whole adapter, as one value. No trait to implement, nothing to erase.
 pub fn routes(notes: Notes) -> Routes {
     Routes::new("notes")
-        .describe("Create, read, update, archive and delete notes")
+        .describe("Create, read, update, archive and delete notes, and attach a file")
         .label("kind", "crud")
         .get("/notes", list)
         .post("/notes", create)
@@ -161,5 +197,7 @@ pub fn routes(notes: Notes) -> Routes {
         .put("/notes/{id}", update)
         .delete("/notes/{id}", delete)
         .post("/notes/{id}/archive", archive)
+        .get("/notes/{id}/attachment", attachment)
+        .put("/notes/{id}/attachment", attach)
         .with_state(notes)
 }

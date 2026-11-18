@@ -52,7 +52,8 @@ struct NewArgs {
     /// Name of the service. May be a path, in which case its last segment is the name.
     name: String,
 
-    /// Optional pieces: persistence, messaging, security, openapi, swagger-ui, telemetry.
+    /// Optional pieces: persistence, messaging, objects, security, openapi, swagger-ui,
+    /// telemetry.
     #[arg(long, value_delimiter = ',')]
     features: Vec<String>,
 
@@ -145,7 +146,10 @@ fn new_project(args: NewArgs) -> Result<()> {
     report(&plan);
     println!();
     println!("  cd {}", root.display());
-    if features.has("persistence") || features.has("messaging") || features.has("telemetry") {
+    if ["persistence", "messaging", "objects", "telemetry"]
+        .iter()
+        .any(|feature| features.has(feature))
+    {
         println!("  just up      # development dependencies");
     }
     println!("  just test");

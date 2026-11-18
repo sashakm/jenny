@@ -150,6 +150,17 @@ impl Note {
         Ok(())
     }
 
+    /// Whether a file may be attached. Not to an archived note: an attachment is part of
+    /// what the note says, and an archived note says nothing new.
+    pub fn ensure_attachable(&self) -> DomainResult<()> {
+        if self.archived {
+            return Err(DomainError::conflict(
+                "an archived note takes no attachment",
+            ));
+        }
+        Ok(())
+    }
+
     /// Archive a note. Archiving twice is a conflict, not a silent no-op — the caller
     /// asked for a state change that cannot happen, and deserves to hear about it.
     pub fn archive(&mut self) -> DomainResult<NoteArchived> {

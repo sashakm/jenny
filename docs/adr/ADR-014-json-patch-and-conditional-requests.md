@@ -1,6 +1,6 @@
 # ADR-014: JSON Patch and Conditional Requests
 
-**Status:** Accepted — implemented; `change_at(id, expected, f)` is now `change(id, f).expecting(expected)` (ADR-016)
+**Status:** Accepted — implemented; `change_at(id, expected, f)` is now `change(id, f).expecting(expected)` (ADR-016); a resource whose `GET` is not JSON answers the derived `PATCH` with 415 (ADR-018)
 **Date:** 2026-11-18
 
 ## Context

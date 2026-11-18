@@ -15,10 +15,17 @@
 //! ```
 //!
 //! — and the use cases hold an `Arc<dyn NoteRepository>` instead. Nothing else changes.
+//!
+//! Attachments are bytes, not aggregates, so they go through the other storage port,
+//! [`Blobs`]: an S3 bucket, a directory or memory, chosen in `main.rs`.
 
 use jenny::Store;
+use jenny::port::Blobs;
 
 use super::model::Note;
 
 /// Where notes live.
 pub type NoteStore = dyn Store<Note>;
+
+/// Where the files attached to notes live.
+pub type Attachments = dyn Blobs;

@@ -17,6 +17,7 @@ jenny-macros = { workspace = true }
 jenny-persistence = { workspace = true, optional = true }
 jenny-security = { workspace = true, optional = true }
 jenny-messaging = { workspace = true, optional = true }
+jenny-objects = { workspace = true, optional = true }
 jenny-rest = { workspace = true, optional = true }
 jenny-server = { workspace = true, optional = true }
 
@@ -32,6 +33,9 @@ messaging = ["dep:jenny-messaging", "jenny-server?/messaging"]
 # Postgres stores and helpers (driven adapter); with `server`, a pool from
 # `persistence.postgres` that the runtime prepares before serving.
 persistence = ["dep:jenny-persistence", "jenny-server?/persistence"]
+# Blob storage: S3 and compatibles, local files or memory, behind the `Blobs` port;
+# with `server`, a store from `objects`.
+objects = ["dep:jenny-objects", "jenny-server?/objects"]
 # Authentication (JWT, API key) and Cedar policy authorization.
 security = ["dep:jenny-security"]
 # OpenAPI schema generation for the REST wire types.
@@ -43,7 +47,7 @@ telemetry-otlp = ["server", "jenny-server/telemetry-otlp"]
 telemetry-prometheus = ["server", "jenny-server/telemetry-prometheus"]
 telemetry-loki = ["server", "jenny-server/telemetry-loki"]
 # Everything.
-full = ["rest", "server", "messaging", "persistence", "security", "openapi"]
+full = ["rest", "server", "messaging", "persistence", "objects", "security", "openapi"]
 
 [dev-dependencies]
 anyhow = { workspace = true }

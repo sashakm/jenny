@@ -5,7 +5,7 @@
 //! - [`use_case`] — the **driving** side. The outside world calls in. A use case is a
 //!   method on a plain struct; a REST handler, a message consumer or a scheduled task
 //!   is a driving adapter that calls it.
-//! - [`store`], [`events`] and [`outbound`] — the **driven** side. The application
+//! - [`store`], [`blobs`], [`events`] and [`outbound`] — the **driven** side. The application
 //!   calls out. A store, an event publisher, a token verifier: the trait is owned by
 //!   the inside, the implementation lives in a driven adapter.
 //!
@@ -28,12 +28,15 @@
 //! fn count_notes(repo: &Arc<dyn NoteRepository>) -> usize { repo.count() }
 //! ```
 
+pub mod blobs;
 pub mod context;
 pub mod events;
 pub mod outbound;
 pub mod store;
 pub mod use_case;
 
+#[doc(inline)]
+pub use blobs::{Access, Blob, BlobInfo, Blobs};
 #[doc(inline)]
 pub use context::{Context, Extensions};
 #[doc(inline)]

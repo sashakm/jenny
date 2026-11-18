@@ -19,10 +19,11 @@ rather than along topics.
 
 | Crate | Ring | Contains |
 |---|---|---|
-| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; `Memory`, `Queryable`; tasks |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; `Memory`, `Queryable`, `Blobs`, `MemoryBlobs`; tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Versioned`/`IfMatch`, auth and CORS layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: the pool, `PgDocuments` and `PgTable` stores, the outbox and its relay, criteria to SQL |
+| `jenny-objects` | driven adapter | `ObjectBlobs`: the `Blobs` port over `object_store` (S3 and compatibles, files, memory) |
 | `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, configuration, telemetry, health, hosting |
 | `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
@@ -38,10 +39,12 @@ jenny (facade)
 ├── jenny-rest        → jenny-core
 ├── jenny-messaging   → jenny-core
 ├── jenny-persistence → jenny-core, jenny-macros
+├── jenny-objects     → jenny-core
 ├── jenny-security    → jenny-core
 └── jenny-server      → jenny-core, jenny-rest
                        → jenny-messaging   (feature `messaging`)
                        → jenny-persistence (feature `persistence`)
+                       → jenny-objects     (feature `objects`)
 
 cargo-jenny                         (standalone binary; depends on none of the above)
 ```

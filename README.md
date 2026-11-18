@@ -224,9 +224,10 @@ curl 'localhost:8000/api/notes?sort=-title&filter=title:contains:shop&page_size=
 ```
 
 [`examples/basic`](examples/basic) is the complete version — domain, use cases, both
-adapter directions, memory, Postgres or NATS from configuration, and an end-to-end test
-that boots the actual composition root (`just test-postgres` and `just test-nats` run it
-against each backend too).
+adapter directions, memory, Postgres or NATS from configuration, attachments in memory or
+an object store, and an end-to-end test that boots the actual composition root
+(`just test-postgres`, `just test-nats` and `just test-objects` run it against each
+backend too).
 
 ### Two REST modes
 
@@ -287,7 +288,25 @@ instead: with the `messaging` feature and `messaging.nats.url` pointing at a NAT
 JetStream enabled (`nats-server -js`), `server.nats()` hands out a connection and
 `nats.kv::<Session>()` a store in the bucket `<namespace>-session`, created before the
 server starts. Versions, conditional writes and listings behave exactly as in memory —
-listing reads every key, so it suits hundreds of aggregates, not millions. S3-compatible object storage and Apache AGE follow (ADR-013).
+listing reads every key, so it suits hundreds of aggregates, not millions.
+
+Files are not aggregates, so they have a port of their own: `Blobs` — put (also only
+if absent, or only if unchanged since an entity tag), get, list by path, delete, and
+signed URLs that let a browser upload or download directly. With the `objects` feature,
+`objects.url` picks the store and `server.objects()` hands it out:
+
+```yaml
+objects:
+  url: s3://attachments/notes        # AWS S3, or anything S3-compatible
+  options:                           # object_store's option names, over AWS_*
+    endpoint: http://localhost:9000
+    conditional_put: etag            # put_if_absent / put_if_match on S3
+```
+
+On AWS the URL is enough; credentials come from the role, as for any AWS SDK.
+`file:///var/lib/blobs` and `memory://` need no infrastructure, and
+`jenny::memory::MemoryBlobs` keeps the same contract in tests. The example keeps note
+attachments this way (ADR-018). Apache AGE follows (ADR-013).
 
 ## Scaffolding
 
@@ -330,7 +349,8 @@ Its own endpoints live under `server.framework_path` (`/j`), namespaced away fro
 `/j/health/status` reports the framework version, your service's version (pass
 `jenny::service_version!()`), and a check per dependency. The runtime registers checks
 for what it owns — the OTLP endpoint, the in-process bus, the Postgres pool it built from
-`persistence.postgres`, the NATS connection from `messaging.nats.url`. A pool you build yourself is one line:
+`persistence.postgres`, the NATS connection from `messaging.nats.url`, the object store
+from `objects.url`. A pool you build yourself is one line:
 
 ```rust,ignore
 server.register_health_check(DatabaseCheck::new("reporting-db", pool.clone()))
@@ -400,16 +420,17 @@ reads every key to list; see above.)
 | Crate | Ring | Role |
 |---|---|---|
 | `jenny` | — | facade: feature-gated re-exports |
-| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Events`, the outbound ports, `Memory`, tasks |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Blobs`, `Events`, the outbound ports, `Memory`, `MemoryBlobs`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL |
+| `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, config, health, hosting |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 
-Features: `rest`, `server` (implies `rest`), `messaging`, `persistence`, `security`,
+Features: `rest`, `server` (implies `rest`), `messaging`, `persistence`, `objects`, `security`,
 `openapi`, `swagger-ui`, `telemetry-otlp` / `telemetry-prometheus` / `telemetry-loki`,
 `full`.
 

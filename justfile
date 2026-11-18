@@ -27,13 +27,13 @@ features:
   for f in "" telemetry-otlp telemetry-loki telemetry-prometheus \
            telemetry-otlp,telemetry-prometheus telemetry-loki,telemetry-prometheus \
            telemetry-otlp,telemetry-loki telemetry-otlp,telemetry-loki,telemetry-prometheus \
-           persistence persistence,messaging; do
+           persistence persistence,messaging objects objects,persistence; do
     echo "==> jenny-server [${f:-none}]"
     cargo check -p jenny-server --no-default-features ${f:+--features "$f"}
   done
-  for f in "" rest server messaging persistence security openapi \
+  for f in "" rest server messaging persistence objects security openapi \
            server,openapi server,swagger-ui server,messaging server,messaging,openapi \
-           server,persistence server,telemetry-otlp server,telemetry-prometheus \
+           server,persistence server,objects server,telemetry-otlp server,telemetry-prometheus \
            server,telemetry-loki full; do
     echo "==> jenny [${f:-none}]"
     cargo check -p jenny --no-default-features ${f:+--features "$f"}
@@ -87,8 +87,8 @@ test-cli-features:
   cargo build -p cargo-jenny
   # One target dir for every generated project, so dependencies build once.
   export CARGO_TARGET_DIR="$workdir/target"
-  for features in persistence messaging security openapi swagger-ui telemetry \
-                  persistence,messaging,security,swagger-ui,telemetry; do
+  for features in persistence messaging objects security openapi swagger-ui telemetry \
+                  persistence,messaging,objects,security,swagger-ui,telemetry; do
     name="svc-${features//,/-}"
     echo "==> cargo jenny new --features $features"
     "$root/target/debug/cargo-jenny" jenny new "$name" --features "$features" \
@@ -174,3 +174,31 @@ package *args:
 [doc('check the workspace on the declared rust-version (1.94)')]
 msrv:
   cargo +1.94 check --workspace --all-features --all-targets --locked
+
+# The object-storage tests read `JENNY_TEST_S3_URL` and the standard `AWS_*` variables,
+# and skip without them (fail, under CI). This starts RustFS, an S3-compatible server
+# that checks signatures — so the signed-URL tests prove something — on a free port.
+[doc('object-storage tests against a disposable S3-compatible server (RustFS, docker)')]
+test-objects:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  name="jenny-test-s3-$$"
+  docker run -d --rm --name "$name" -p 127.0.0.1::9000 \
+      -e RUSTFS_ACCESS_KEY=jenny -e RUSTFS_SECRET_KEY=jenny-secret rustfs/rustfs:1.0.6 >/dev/null
+  trap 'docker stop "$name" >/dev/null' EXIT
+  port="$(docker port "$name" 9000/tcp | head -n1 | sed 's/.*://')"
+  endpoint="http://127.0.0.1:${port}"
+  # Buckets are infrastructure, not the service's to create: make one, signed, by hand,
+  # retried until the server has started.
+  for attempt in $(seq 1 30); do
+    curl -sf -o /dev/null --aws-sigv4 "aws:amz:us-east-1:s3" --user jenny:jenny-secret \
+        -X PUT "$endpoint/jenny-test" && break
+    [ "$attempt" = 30 ] && { echo "the S3 server never accepted a bucket" >&2; exit 1; }
+    sleep 1
+  done
+  export JENNY_TEST_S3_URL="s3://jenny-test" AWS_ENDPOINT="$endpoint" AWS_ALLOW_HTTP=true \
+      AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=jenny AWS_SECRET_ACCESS_KEY=jenny-secret
+  cargo test -p jenny-objects --test objects_test
+  # The example's end-to-end suite, with its attachments in the bucket.
+  JENNY__OBJECTS__URL="$JENNY_TEST_S3_URL/example-$$" \
+      cargo test -p jenny --features server,objects --example basic

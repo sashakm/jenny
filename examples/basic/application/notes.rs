@@ -2,28 +2,41 @@
 
 use std::sync::Arc;
 
-use jenny::{Context, Criteria, DomainResult, Events, Loaded, StoreExt, Version, use_cases};
+use jenny::port::Blob;
+use jenny::{
+    Context, Criteria, DomainError, DomainResult, Events, Loaded, StoreExt, Version, use_cases,
+};
 
 use crate::domain::model::{Note, NoteId};
-use crate::domain::port::NoteStore;
+use crate::domain::port::{Attachments, NoteStore};
 
 use super::command::{CreateNote, EditNote};
 
 /// Everything you can do with a note.
 ///
-/// Cheap to clone — both fields are shared handles — so a driving adapter can hold its
-/// own copy. Swapping the in-memory store for Postgres is a change in `main.rs` and
-/// nowhere else.
+/// Cheap to clone — every field is a shared handle — so a driving adapter can hold its
+/// own copy. Swapping the in-memory store for Postgres, or memory for S3, is a change in
+/// `main.rs` and nowhere else.
 #[derive(Clone)]
 pub struct Notes {
     notes: Arc<NoteStore>,
+    attachments: Arc<Attachments>,
     events: Events,
+}
+
+/// Where a note's attachment is kept. One per note, so the note's id is the key.
+fn attachment_key(id: NoteId) -> String {
+    format!("notes/{id}/attachment")
 }
 
 #[use_cases]
 impl Notes {
-    pub fn new(notes: Arc<NoteStore>, events: Events) -> Self {
-        Self { notes, events }
+    pub fn new(notes: Arc<NoteStore>, attachments: Arc<Attachments>, events: Events) -> Self {
+        Self {
+            notes,
+            attachments,
+            events,
+        }
     }
 
     pub async fn create(&self, cmd: CreateNote, cx: &Context) -> DomainResult<NoteId> {
@@ -79,13 +92,35 @@ impl Notes {
         Ok(())
     }
 
+    /// Delete a note and its attachment.
+    ///
+    /// The attachment goes second: if removing it fails, what is left behind is a blob
+    /// nothing refers to, never a note that refers to a missing file.
     pub async fn delete(
         &self,
         id: NoteId,
         expected: Option<Version>,
         _cx: &Context,
     ) -> DomainResult<Note> {
-        self.notes.remove(&id, expected).await
+        let removed = self.notes.remove(&id, expected).await?;
+        self.attachments.delete(&attachment_key(id)).await?;
+        Ok(removed)
+    }
+
+    /// Attach a file to a note, replacing the one it had. The note itself does not
+    /// change; whether it may take one is the note's rule.
+    pub async fn attach(&self, id: NoteId, file: Blob, _cx: &Context) -> DomainResult<()> {
+        self.notes.load(&id).await?.ensure_attachable()?;
+        self.attachments.put(&attachment_key(id), file).await?;
+        Ok(())
+    }
+
+    /// The file attached to a note.
+    pub async fn attachment(&self, id: NoteId, _cx: &Context) -> DomainResult<Blob> {
+        match self.attachments.get(&attachment_key(id)).await? {
+            Some((file, _)) => Ok(file),
+            None => Err(DomainError::not_found()),
+        }
     }
 }
 
@@ -93,15 +128,15 @@ impl Notes {
 mod tests {
     use super::*;
     use crate::domain::model::NoteTitle;
-    use jenny::DomainError;
     use jenny::domain::ValueKind;
-    use jenny::memory::Memory;
+    use jenny::memory::{Memory, MemoryBlobs};
     use jenny::testing::RecordedEvents;
 
     fn notes() -> (Notes, Arc<RecordedEvents>) {
         let events = Arc::new(RecordedEvents::default());
         let notes = Notes::new(
             Arc::new(Memory::<Note>::new().queryable([("title", ValueKind::Text)])),
+            Arc::new(MemoryBlobs::new()),
             Events::new(events.clone()),
         );
         (notes, events)
@@ -249,5 +284,41 @@ mod tests {
             DomainError::NotFound
         ));
         assert!(notes.list(&Criteria::new(), &cx).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_attachment_is_kept_beside_its_note_and_goes_with_it() {
+        let (notes, _) = notes();
+        let cx = Context::new();
+        let id = notes.create(create("Shopping"), &cx).await.unwrap();
+
+        let file = Blob::new(b"milk, eggs".to_vec()).with_content_type("text/plain");
+        notes.attach(id, file.clone(), &cx).await.unwrap();
+        assert_eq!(notes.attachment(id, &cx).await.unwrap(), file);
+        assert_eq!(notes.fetch(id, &cx).await.unwrap().version().get(), 1);
+
+        notes.delete(id, None, &cx).await.unwrap();
+        assert!(matches!(
+            notes.attachment(id, &cx).await.unwrap_err(),
+            DomainError::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_a_note_that_exists_and_is_not_archived_takes_an_attachment() {
+        let (notes, _) = notes();
+        let cx = Context::new();
+        let file = || Blob::new(b"x".to_vec());
+
+        let err = notes
+            .attach(NoteId::generate(), file(), &cx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::NotFound));
+
+        let id = notes.create(create("Shopping"), &cx).await.unwrap();
+        notes.archive(id, &cx).await.unwrap();
+        let err = notes.attach(id, file(), &cx).await.unwrap_err();
+        assert!(matches!(err, DomainError::Conflict { .. }));
     }
 }

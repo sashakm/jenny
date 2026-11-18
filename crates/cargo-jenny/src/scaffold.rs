@@ -19,6 +19,7 @@ impl Features {
     pub const KNOWN: &'static [&'static str] = &[
         "persistence",
         "messaging",
+        "objects",
         "security",
         "openapi",
         "swagger-ui",
@@ -178,6 +179,7 @@ fn base_bindings(project: &ProjectNames, features: &Features) -> Bindings {
         .set("project_snake", project.snake.clone())
         .flag("persistence", features.has("persistence"))
         .flag("messaging", features.has("messaging"))
+        .flag("objects", features.has("objects"))
         .flag("security", features.has("security"))
         .flag(
             "openapi",
@@ -228,7 +230,13 @@ pub fn plan_project(
             "no_services",
             !features.has("persistence")
                 && !features.has("messaging")
+                && !features.has("objects")
                 && !features.has("telemetry"),
+        )
+        // ...and whether any of them keeps data in a named volume.
+        .flag(
+            "volumes",
+            features.has("persistence") || features.has("objects"),
         );
 
     for (path, source) in [

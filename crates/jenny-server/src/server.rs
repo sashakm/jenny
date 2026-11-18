@@ -69,6 +69,8 @@ pub struct JennyServer {
     postgres: Option<jenny_persistence::Postgres>,
     #[cfg(feature = "messaging")]
     nats: Option<jenny_messaging::kv::Nats>,
+    #[cfg(feature = "objects")]
+    objects: Option<Arc<jenny_objects::ObjectBlobs>>,
 }
 
 /// Leading slash on, trailing slash off. `"/"` or `""` mean "no prefix", which axum
@@ -303,6 +305,8 @@ impl JennyServer {
             postgres: None,
             #[cfg(feature = "messaging")]
             nats: None,
+            #[cfg(feature = "objects")]
+            objects: None,
         }
     }
 
@@ -423,6 +427,43 @@ impl JennyServer {
             self.nats = Some(jenny_messaging::kv::Nats::new(url, prefix));
         }
         self.nats.clone()
+    }
+
+    /// The object store blobs live in, from `objects.url`, or `None` when no URL is
+    /// configured.
+    ///
+    /// `s3://bucket[/prefix]` for S3 and everything that speaks it, configured by
+    /// `objects.options` over the standard `AWS_*` variables; `file:///directory` or
+    /// `memory://` for development. The first call builds it and registers an `objects`
+    /// readiness check, which fails while the bucket cannot be listed.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use jenny_core::memory::MemoryBlobs;
+    /// # use jenny_core::port::Blobs;
+    /// # use jenny_server::JennyServer;
+    /// # fn wire(mut server: JennyServer) -> anyhow::Result<()> {
+    /// let attachments: Arc<dyn Blobs> = match server.objects()? {
+    ///     Some(objects) => objects,
+    ///     None => Arc::new(MemoryBlobs::new()),
+    /// };
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Fails when the URL or an option does not parse.
+    #[cfg(feature = "objects")]
+    pub fn objects(&mut self) -> anyhow::Result<Option<Arc<jenny_objects::ObjectBlobs>>> {
+        if self.objects.is_none() && self.config.objects.url.is_some() {
+            let objects = Arc::new(
+                jenny_objects::ObjectBlobs::from_config(&self.config.objects)
+                    .map_err(|e| e.context("configuring the object store from `objects`"))?,
+            );
+            info!(store = ?objects, "object store configured");
+            self.checks.push(Arc::new(objects.health_check()));
+            self.objects = Some(objects);
+        }
+        Ok(self.objects.clone())
     }
 
     /// The prefix for event topics and NATS buckets.
@@ -595,6 +636,8 @@ impl JennyServer {
             postgres,
             #[cfg(feature = "messaging")]
             nats,
+            #[cfg(feature = "objects")]
+                objects: _,
         } = self;
 
         // Buckets too: a store whose bucket cannot be opened fails here, not later.
@@ -1366,6 +1409,51 @@ mod tests {
             .delete_key_value(format!("{namespace}-session"))
             .await
             .unwrap();
+    }
+
+    #[cfg(feature = "objects")]
+    #[tokio::test]
+    async fn without_an_objects_url_there_is_no_object_store() {
+        let mut server = server_with("127.0.0.1:0");
+        assert!(server.objects().unwrap().is_none());
+    }
+
+    #[cfg(feature = "objects")]
+    #[tokio::test]
+    async fn a_configured_object_store_is_built_once_and_reports_ready() {
+        use jenny_core::port::{Blob, Blobs};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut server = server_with("127.0.0.1:0");
+        server.config.objects.url = Some(format!("file://{}", directory.path().display()));
+        let blobs = server.objects().unwrap().expect("a URL is configured");
+        let again = server.objects().unwrap().unwrap();
+        assert!(
+            Arc::ptr_eq(&blobs, &again),
+            "one store, one readiness check"
+        );
+        blobs.put("a/b", Blob::new(b"x".to_vec())).await.unwrap();
+
+        let parts = server.register(notes()).unwrap().bind().await.unwrap();
+        let (status, ready) = call(parts.router.clone(), "/j/health/ready").await;
+        assert_eq!(status, StatusCode::OK);
+        let checks: Vec<_> = ready["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["name"] == "objects")
+            .collect();
+        assert_eq!(checks.len(), 1, "{ready}");
+        assert_eq!(checks[0]["status"], "up");
+    }
+
+    #[cfg(feature = "objects")]
+    #[tokio::test]
+    async fn an_object_store_url_that_does_not_parse_is_a_wiring_error() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.objects.url = Some("ftp://elsewhere".into());
+        let err = format!("{:#}", server.objects().unwrap_err());
+        assert!(err.contains("objects"), "{err}");
     }
 
     #[cfg(all(feature = "persistence", not(feature = "messaging")))]

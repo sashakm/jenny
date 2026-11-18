@@ -24,6 +24,8 @@
 //! - **NATS key-value buckets** — with `messaging`, a connection from `messaging.nats.url`
 //!   ([`JennyServer::nats`]), its buckets opened and its readiness checked before the
 //!   socket is bound.
+//! - **An object store** — with `objects`, blobs from `objects.url`
+//!   ([`JennyServer::objects`]), its bucket's readiness checked.
 //! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
 //!
 //! ### No injection container

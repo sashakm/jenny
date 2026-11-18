@@ -61,10 +61,27 @@ jobs:
     env:
       JENNY_TEST_POSTGRES_URL: postgres://jenny:jenny@localhost:5432/jenny
       JENNY_TEST_NATS_URL: nats://localhost:4222
+      JENNY_TEST_S3_URL: s3://jenny-test
+      AWS_ENDPOINT: http://localhost:9000
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: jenny
+      AWS_SECRET_ACCESS_KEY: jenny-secret
     steps:
       # Not a service: those cannot be given the `-js` flag JetStream needs.
       - name: Start NATS with JetStream
         run: docker run -d --name nats -p 4222:4222 nats:2-alpine -js
+      # S3-compatible and signature-checking. The bucket is created once it accepts one.
+      - name: Start an S3-compatible object store
+        run: |
+          docker run -d --name s3 -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=jenny -e RUSTFS_SECRET_KEY=jenny-secret rustfs/rustfs:1.0.6
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null --aws-sigv4 "aws:amz:us-east-1:s3" \
+              --user jenny:jenny-secret -X PUT http://localhost:9000/jenny-test && exit 0
+            sleep 1
+          done
+          exit 1
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -88,6 +105,10 @@ jobs:
         run: cargo test -p jenny --features server,messaging --example basic
         env:
           JENNY__MESSAGING__NATS__URL: nats://localhost:4222
+      - name: Run the example with its attachments in S3
+        run: cargo test -p jenny --features server,objects --example basic
+        env:
+          JENNY__OBJECTS__URL: s3://jenny-test/example
       - name: Run the example against Postgres, its events through the outbox
         run: cargo test -p jenny --features server,persistence,messaging --example basic
         env:
