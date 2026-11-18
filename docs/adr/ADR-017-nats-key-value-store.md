@@ -90,7 +90,7 @@ same container in a step, because a service container cannot be given the `-js` 
 ## Consequences
 
 - A service that runs NATS gets a durable store from one setting, with the same version
-  semantics, the same conditional writes and the same listings as every other store.
+  semantics, the same conditional writes and the same listings as `Memory`.
 - A save is a read and a write, where Postgres needs one statement.
 - Listing scales with the bucket, not the page.
 - There is no outbox for this store. `raising` publishes right after the write, as with

@@ -30,6 +30,9 @@ telemetry:
 
 messaging:
   buffer_size: 64
+  # A JetStream key-value store for aggregates (`server.nats()`); compose.yaml starts one.
+  # nats:
+  #   url: nats://localhost:4222
 {{/if}}
 {{#if persistence}}
 

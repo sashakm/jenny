@@ -224,8 +224,9 @@ curl 'localhost:8000/api/notes?sort=-title&filter=title:contains:shop&page_size=
 ```
 
 [`examples/basic`](examples/basic) is the complete version — domain, use cases, both
-adapter directions, memory or Postgres from configuration, and an end-to-end test that
-boots the actual composition root (`just test-postgres` runs it against a database too).
+adapter directions, memory, Postgres or NATS from configuration, and an end-to-end test
+that boots the actual composition root (`just test-postgres` and `just test-nats` run it
+against each backend too).
 
 ### Two REST modes
 
@@ -282,7 +283,8 @@ database. For data other systems query relationally, `postgres.table::<Note>("no
 is the same store over a table of your own with a column per field.
 
 Services that already run NATS can keep aggregates in a JetStream key-value bucket
-instead: with `messaging.nats.url` set, `server.nats()` hands out a connection and
+instead: with the `messaging` feature and `messaging.nats.url` pointing at a NATS with
+JetStream enabled (`nats-server -js`), `server.nats()` hands out a connection and
 `nats.kv::<Session>()` a store in the bucket `<namespace>-session`, created before the
 server starts. Versions, conditional writes and listings behave exactly as in memory —
 listing reads every key, so it suits hundreds of aggregates, not millions. S3-compatible object storage and Apache AGE follow (ADR-013).
@@ -328,7 +330,7 @@ Its own endpoints live under `server.framework_path` (`/j`), namespaced away fro
 `/j/health/status` reports the framework version, your service's version (pass
 `jenny::service_version!()`), and a check per dependency. The runtime registers checks
 for what it owns — the OTLP endpoint, the in-process bus, the Postgres pool it built from
-`persistence.postgres`. A pool you build yourself is one line:
+`persistence.postgres`, the NATS connection from `messaging.nats.url`. A pool you build yourself is one line:
 
 ```rust,ignore
 server.register_health_check(DatabaseCheck::new("reporting-db", pool.clone()))
@@ -389,8 +391,9 @@ let statement = format!("SELECT … FROM notes{}", sql.tail());  // values bound
                                                      // interpolated
 ```
 
-Every listing is paged: `page_size` defaults to 50 and may not exceed 1000, so a
-growing table never turns one request into a full scan.
+Every listing is paged: `page_size` defaults to 50 and may not exceed 1000, so in
+Postgres a growing table never turns one request into a full scan. (The NATS store
+reads every key to list; see above.)
 
 ## Crates
 

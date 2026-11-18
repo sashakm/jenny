@@ -52,8 +52,9 @@ use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 /// database store checks it: `priority:gt:banana` is a 400, not an empty page. The same
 /// allowlist serves every store, so moving to Postgres does not mean rewriting it.
 ///
-/// Text compares case-insensitively and numbers numerically. Sorting puts missing and
-/// `null` values last, as Postgres does, and ties keep key order, so paging is stable.
+/// Text compares case-insensitively and numbers numerically. Missing and `null` values
+/// sort last ascending and first descending, as in Postgres, and ties keep key order, so
+/// paging is stable.
 pub struct Memory<A> {
     documents: Mutex<BTreeMap<String, Entry>>,
     queryable: Queryable,

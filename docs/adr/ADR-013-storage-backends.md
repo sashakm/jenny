@@ -1,6 +1,6 @@
 # ADR-013: Storage Backends
 
-**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); NATS KV is built (ADR-017); MongoDB is deferred; object storage and AGE are not built
+**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); NATS KV is built, with versions of its own rather than bucket revisions (ADR-017); MongoDB is deferred; object storage and AGE are not built
 **Date:** 2026-11-18
 
 ## Context

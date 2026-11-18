@@ -24,6 +24,11 @@
 //! JENNY__PERSISTENCE__POSTGRES__URL=postgres://postgres:notes@localhost/postgres \
 //!   cargo run --example basic --features server,persistence -- \
 //!   --config-path examples/basic/config.yaml
+//!
+//! docker run -d --rm -p 4222:4222 nats:2-alpine -js
+//! JENNY__MESSAGING__NATS__URL=nats://localhost:4222 \
+//!   cargo run --example basic --features server,messaging -- \
+//!   --config-path examples/basic/config.yaml
 //! ```
 //!
 //! Then poke at it:
