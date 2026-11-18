@@ -32,7 +32,7 @@ introduces it.
 |---|---|
 | **Driving (inbound) port** | a use case — a method on a plain struct, observed by `#[jenny::use_cases]` |
 | **Driving adapter** | `Routes` (REST), `MessagingAdapter`, `Task` — translates a protocol into a use-case call |
-| **Driven (outbound) port** | [`Store<A>`] for aggregates (extended by your own port when the domain needs its own queries), plus `EventPublisher`, `Authenticator`, `Authorizer` |
+| **Driven (outbound) port** | [`Store<A>`] for aggregates (extended by your own port when the domain needs its own queries), `Blobs` for files, plus `EventPublisher`, `Authenticator`, `Authorizer` |
 | **Driven adapter** | the implementation: an in-memory or database store, the event bus, JWT verification |
 | **Composition root** | `JennyServer` — the only place that knows every layer |
 
@@ -304,8 +304,10 @@ objects:
 
 On AWS the URL is enough; credentials come from the role, as for any AWS SDK.
 `file:///var/lib/blobs` and `memory://` need no infrastructure, and
-`jenny::memory::MemoryBlobs` keeps the same contract in tests. The example keeps note
-attachments this way (ADR-018).
+`jenny::memory::MemoryBlobs` keeps the same contract in tests. A blob that passes
+through the service is bounded by `server.body_limit` (256 KiB by default); a signed URL
+is the way around it for anything larger. The example keeps note attachments this way
+(ADR-018).
 
 A graph is for questions no store answers — what is connected to what — so its port is
 your domain's own, and its adapter queries Apache AGE in the same Postgres. With the
@@ -379,7 +381,7 @@ an operator moving the convention should not silently relocate a path a develope
 specifically.
 
 Configuration is layered file → env (`JENNY__SERVER__ADDRESS`) → flags. The framework
-reads only `server`, `telemetry`, `messaging` and `persistence`; your
+reads only `server`, `telemetry`, `messaging`, `persistence` and `objects`; your
 `applications.<name>` section passes through untyped, so no schema is imposed on it.
 
 Failures are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem documents —

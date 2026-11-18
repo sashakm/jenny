@@ -2,7 +2,8 @@
 //!
 //! Owning a port is what makes a double this small: implement the trait, record what
 //! arrives. These are the ones every service would otherwise write for itself. For
-//! storage, [`Memory`](crate::memory::Memory) is already the double.
+//! storage, [`Memory`](crate::memory::Memory) is already the double, and
+//! [`MemoryBlobs`](crate::memory::MemoryBlobs) for files.
 
 use std::sync::Mutex;
 

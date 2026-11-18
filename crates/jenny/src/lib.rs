@@ -11,7 +11,7 @@
 //! | Path | Ring | Contents |
 //! |---|---|---|
 //! | [`jenny::domain`](domain) | the hexagon | [`Aggregate`], [`DomainError`], [`DomainEvent`], [`Changes`], [`Validate`], [`Principal`], [`Urn`] |
-//! | [`jenny::port`](port) | the boundary | [`Store`], [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
+//! | [`jenny::port`](port) | the boundary | [`Store`], [`Blobs`](port::Blobs), [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
 //! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving), `kv::NatsKv` store |
 //! | `jenny::objects` | driven adapter | `ObjectBlobs` over S3 and compatibles, files or memory; `ObjectsConfig` |

@@ -114,14 +114,14 @@ backend's. It names a database of its own, so the rest of the suite keeps runnin
 against stock Postgres. `just test-age` runs the graph tests and the example twice
 against `apache/age:release_PG18_1.8.0`: once preloaded, as the image ships, and once
 started with a plain `postgres`, so the `LOAD` path runs too. CI does the same, with
-a service container for the first and a step for the second.
+a service container for the first and a container started by a step for the second.
 
 ### In the example and the scaffold
 
 Notes link to other notes. `NoteLinks` is the domain's port, and
 `adapter/outbound/links.rs` has two answers: `MemoryLinks` over a set, and
-`GraphLinks`, which keeps one `Note` vertex per note (its id only, since the note
-lives in its store) and a `LINKS_TO` edge per link. AGE has no uniqueness constraints,
+`GraphLinks`, which keeps one `Note` vertex per linked note (its id only, since the
+note lives in its store) and a `LINKS_TO` edge per link. AGE has no uniqueness constraints,
 so two concurrent `MERGE`s can both create the same link. `GraphLinks` therefore reads
 with `DISTINCT` and deletes every match, which makes a duplicate harmless. Deleting a
 note forgets its links after the note is gone, the same order attachments use

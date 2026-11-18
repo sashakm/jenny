@@ -13,8 +13,9 @@ Releases are automated with [release-plz](https://release-plz.dev). Configuratio
 3. Merge it. The release job publishes every crate to crates.io in dependency order, tags
    `v<version>` and creates the GitHub release.
 
-All nine crates (`jenny`, `jenny-core`, `jenny-macros`, `jenny-rest`, `jenny-server`,
-`jenny-messaging`, `jenny-persistence`, `jenny-security`, `cargo-jenny`) share one version,
+All ten crates (`jenny`, `jenny-core`, `jenny-macros`, `jenny-rest`, `jenny-server`,
+`jenny-messaging`, `jenny-persistence`, `jenny-objects`, `jenny-security`, `cargo-jenny`)
+share one version,
 `[workspace.package] version` in `Cargo.toml`. They are released together, even when only
 one of them changed (ADR-002).
 
@@ -48,7 +49,7 @@ commit, or squash-merge PRs under a conventional title that carries the `!`.
       store it as the `CARGO_REGISTRY_TOKEN` repository secret.
    2. Uncomment the `CARGO_REGISTRY_TOKEN` line in the `release` job.
    3. Merge the release PR for `0.1.0`.
-4. **Switch to trusted publishing.** For each of the nine crates on crates.io: Settings →
+4. **Switch to trusted publishing.** For each of the ten crates on crates.io: Settings →
    Trusted Publishing → add GitHub, repository `sashakm/jenny`, workflow
    `release-plz.yml`. Then delete the `CARGO_REGISTRY_TOKEN` secret, comment the line out
    again, and revoke the token. From then on the job authenticates with OIDC

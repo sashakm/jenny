@@ -6,7 +6,7 @@
 //! adapter/
 //!   inbound/rest   HTTP in: DTOs, TryFrom, status codes
 //!   outbound/      the driven side: an event publisher and the links between notes
-//!                  (the note store is jenny's)
+//!                  (the note and attachment stores are jenny's)
 //! main.rs          the composition root — the only file that knows every layer
 //! ```
 //!
@@ -59,19 +59,21 @@
 //! ID=$(curl -sX POST localhost:8000/api/notes \
 //!   -H 'content-type: application/json' \
 //!   -d '{"title": "Shopping", "body": "milk"}' | tr -d '"')
+//! OTHER=$(curl -sX POST localhost:8000/api/notes \
+//!   -H 'content-type: application/json' -d '{"title": "Recipe"}' | tr -d '"')
 //!
 //! curl localhost:8000/api/notes
+//! curl -X PATCH localhost:8000/api/notes/$ID -H 'if-match: "1"' \
+//!   -H 'content-type: application/json-patch+json' \
+//!   -d '[{"op": "replace", "path": "/body", "value": "eggs"}]'  # 204, 412 once it moved on
 //! curl -X PUT localhost:8000/api/notes/$ID/attachment -H 'content-type: text/plain' \
 //!   --data-binary 'milk, eggs'                        # 204; GET returns the file
-//! curl -X PUT localhost:8000/api/notes/$ID/links/$OTHER  # 204, given a second note
-//! curl localhost:8000/api/notes/$ID/links             # {"to": [OTHER], "from": []}
+//! curl -X PUT localhost:8000/api/notes/$ID/links/$OTHER   # 204
+//! curl localhost:8000/api/notes/$ID/links             # {"to": ["<OTHER>"], "from": []}
 //! curl -X POST localhost:8000/api/notes/$ID/archive   # 204
 //! curl -X POST localhost:8000/api/notes/$ID/archive   # 409, already archived
 //! curl -X POST localhost:8000/api/notes -H 'content-type: application/json' \
 //!   -d '{"title": "  "}'                              # 400, title must not be empty
-//! curl -X PATCH localhost:8000/api/notes/$ID -H 'if-match: "1"' \
-//!   -H 'content-type: application/json-patch+json' \
-//!   -d '[{"op": "replace", "path": "/body", "value": "eggs"}]'  # 204, 412 once it moved on
 //! ```
 
 mod adapter;

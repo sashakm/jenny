@@ -54,8 +54,8 @@ utoipa-swagger-ui = { workspace = true, optional = true }
 default = []
 # The in-process event bus, started and stopped by the runtime.
 messaging = ["dep:jenny-messaging", "dep:topmesys"]
-# A Postgres pool built from `persistence.postgres`: migrated, its document tables
-# created and its readiness checked by the runtime.
+# A Postgres pool built from `persistence.postgres`: migrated, its document tables (and,
+# with jenny's `graph`, its AGE graphs) created and its readiness checked by the runtime.
 persistence = ["dep:jenny-persistence"]
 # Blob storage from `objects.url` (S3 and compatibles, files, memory), with a readiness
 # check.

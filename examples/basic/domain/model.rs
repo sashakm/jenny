@@ -150,8 +150,6 @@ impl Note {
         Ok(())
     }
 
-    /// Whether a file may be attached. Not to an archived note: an attachment is part of
-    /// what the note says, and an archived note says nothing new.
     /// Whether this note may refer to `other`. Not to itself: a link points elsewhere.
     pub fn ensure_linkable_to(&self, other: NoteId) -> DomainResult<()> {
         if other == self.id {
@@ -160,6 +158,8 @@ impl Note {
         Ok(())
     }
 
+    /// Whether a file may be attached. Not to an archived note: an attachment is part of
+    /// what the note says, and an archived note says nothing new.
     pub fn ensure_attachable(&self) -> DomainResult<()> {
         if self.archived {
             return Err(DomainError::conflict(

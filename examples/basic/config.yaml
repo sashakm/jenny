@@ -1,13 +1,14 @@
 # Configuration for the `basic` example.
 #
-# `server`, `telemetry` and (with their features) `messaging` and `persistence` are the
-# only sections the jenny runtime interprets. Notes are kept in memory unless
+# `server`, `telemetry` and (with their features) `messaging`, `persistence` and
+# `objects` are the only sections the jenny runtime interprets. Notes are kept in memory unless
 # `persistence.postgres.url` is set — best through JENNY__PERSISTENCE__POSTGRES__URL,
 # since it carries the password — or `messaging.nats.url` (JENNY__MESSAGING__NATS__URL).
 # Attachments are kept in memory unless `objects.url` is set (with the `objects`
 # feature): `s3://bucket/prefix` with the standard AWS_* variables, or `file:///dir`.
 # Links between notes are kept in memory unless the `graph` feature is on and
-# `persistence.postgres.url` names a database with Apache AGE.
+# `persistence.postgres.url` is set; that database must then have Apache AGE, or the
+# service stops at startup.
 # Everything under `applications.<name>` is passed through untouched and read by the
 # service itself — see `NotesConfig` in main.rs.
 #

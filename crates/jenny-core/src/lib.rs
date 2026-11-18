@@ -33,7 +33,7 @@
 //!          │  │        │   use cases         │     │                 │
 //!          │  │        └─────────────────────┘     │                 │
 //!          │  └────────────────────────────────────┘                 │
-//!          │     driven adapters: persistence · eventbus · security  │
+//!          │ driven adapters: stores · objects · eventbus · security │
 //!          └─────────────────────────────────────────────────────────┘
 //!               arrows of dependency all point toward the centre
 //! ```

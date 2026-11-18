@@ -10,10 +10,11 @@
 //! That order is the deployment order: a file for defaults you commit, environment
 //! variables for what differs per environment, flags for what differs per run.
 //!
-//! The framework reads the sections it owns — `server`, `telemetry`, and `messaging`
-//! and `persistence` when those features are on. Everything else passes through untyped, so it imposes no schema on your configuration:
-//! an adapter deserialises its own `applications.<name>` section into whatever type
-//! it likes, via [`ServerContext::app_section`](crate::ServerContext::app_section).
+//! The framework reads the sections it owns — `server`, `telemetry`, and `messaging`,
+//! `persistence` and `objects` when those features are on. Everything else passes
+//! through untyped, so it imposes no schema on your configuration: an adapter
+//! deserialises its own `applications.<name>` section into whatever type it likes, via
+//! [`ServerContext::app_section`](crate::ServerContext::app_section).
 //!
 //! ```yaml
 //! server:
@@ -38,6 +39,8 @@
 //!   postgres:
 //!     url: postgres://notes:secret@db/notes   # better: JENNY__PERSISTENCE__POSTGRES__URL
 //!     outbox: true
+//! objects:
+//!   url: s3://attachments/notes   # or file:///dir, memory://; AWS_* for credentials
 //! applications:
 //!   my-notes:            # your shape, your business
 //!     greeting: "hello"

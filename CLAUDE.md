@@ -1,6 +1,6 @@
 # jenny
 
-A pragmatic hexagonal webservice framework for Rust: a cargo workspace of nine crates
+A pragmatic hexagonal webservice framework for Rust: a cargo workspace of ten crates
 behind the `jenny` facade, plus the `cargo jenny` scaffolding CLI. Pre-1.0: breaking
 changes are fine, and removing a low-value feature beats adapting it.
 
@@ -28,8 +28,10 @@ changing it, and write a new one (see the `write-adr` skill) for a new decision.
 - **Dependencies point inward.** `jenny_core::domain` and `jenny_core::port` import no
   web, database or broker crate. No adapter crate depends on another adapter crate; only
   `jenny-server` depends on more than the core (ADR-001, ADR-002).
-- **Storage goes through `Store<A>`, and every save is versioned** (ADR-012). Queries in
-  the domain's own language go on a port that extends it, never on `Store` itself.
+- **Aggregates are stored through `Store<A>`, and every save is versioned** (ADR-012).
+  Queries in the domain's own language go on a port that extends it, never on `Store`
+  itself. Files go through `Blobs` (ADR-018), graphs through a port of the domain's own
+  (ADR-019).
 - **Events that report a write go with the write**: `change(…).raising(&events, cx)` or
   `add(aggregate, raised).raising(…)`, never `change(…).await` then `events.publish(…)`.
   Only then can a Postgres store with an outbox commit them together (ADR-016). No
@@ -156,5 +158,5 @@ check publishability. Details: `RELEASING.md`.
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
 the OpenAPI document (ADR-014), events raised with a `remove` and `LISTEN/NOTIFY` for relays (ADR-016), a `migrations/`
-directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
+directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs, signed URLs with conditions (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

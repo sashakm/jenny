@@ -1,7 +1,7 @@
 # Configuration for {{project_kebab}}.
 #
-# The runtime reads `server`, `telemetry`, `messaging` and `persistence`. Everything under
-# `applications.<name>` is yours, passed through untouched.
+# The runtime reads `server`, `telemetry`, `messaging`, `persistence` and `objects`.
+# Everything under `applications.<name>` is yours, passed through untouched.
 #
 # Any value can be overridden by an environment variable
 # (JENNY__SERVER__ADDRESS=[::]:9000) or a CLI flag (--address).
@@ -44,7 +44,8 @@ persistence:
     # url: postgres://{{project_snake}}:{{project_snake}}@localhost:5432/{{project_snake}}
     max_connections: 10
 {{#if graph}}
-    # Creates the tables, and the Apache AGE extension and graphs, before serving.
+    # Creates the tables before serving, and, for each `postgres.graph(…)`, the Apache
+    # AGE extension and that graph.
     create_tables: true
 {{/if}}
 {{#if messaging}}

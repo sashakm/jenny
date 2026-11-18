@@ -1,6 +1,6 @@
 # ADR-013: Storage Backends
 
-**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); NATS KV is built, with versions of its own rather than bucket revisions (ADR-017); object storage is built (ADR-018); AGE is built, in `jenny-persistence` behind a `graph` feature (ADR-019); MongoDB is deferred
+**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); NATS KV is built, with versions of its own rather than bucket revisions (ADR-017); object storage is built, and provisions no bucket (ADR-018); AGE is built, in `jenny-persistence` behind a `graph` feature (ADR-019); MongoDB is deferred
 **Date:** 2026-11-18
 
 ## Context
@@ -84,13 +84,14 @@ implementation with no future.
 
 openCypher inside Postgres (Apache-2.0), queried through sqlx. It shares the pool, the
 health check, migrations and transactions with the relational store, so a graph write
-and the outbox can commit together. Its releases follow Postgres majors (1.8 is PG18
+could commit together with the outbox; the transaction is shared today
+(`fetch_all_in`), committing with the outbox is not built yet (ADR-019). Its releases follow Postgres majors (1.8 is PG18
 only), and managed availability varies by provider.
 
 A graph does not fit `Store<A>`, because its value is in traversals. The graph port
 stays specific to the domain. What jenny provides is the client, `agtype` decoding,
-and a Cypher builder with bound parameters and an allowlist of labels and relationship
-types. Labels cannot be bound parameters, which is the same injection class as SQL
+and static Cypher queries with bound parameters and an allowlist of labels and
+relationship types (ADR-019 rejected a typed builder). Labels cannot be bound parameters, which is the same injection class as SQL
 identifiers in filter paths (ADR-010) and gets the same answer.
 
 ### Considered and not chosen

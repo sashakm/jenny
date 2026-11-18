@@ -123,6 +123,7 @@ impl Notes {
         self.links.link(from, to).await
     }
 
+    /// `from` no longer refers to `to`. Nothing happens if it did not.
     pub async fn unlink(&self, from: NoteId, to: NoteId, _cx: &Context) -> DomainResult<()> {
         self.links.unlink(from, to).await
     }
