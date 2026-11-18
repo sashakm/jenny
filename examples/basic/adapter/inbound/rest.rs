@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::application::Notes;
 use crate::application::command::{CreateNote, EditNote};
 use crate::domain::model::{Note, NoteId, NoteTitle};
+use crate::domain::port::Links;
 
 /// A note to create or replace.
 ///
@@ -54,6 +55,23 @@ pub struct NoteResponse {
     title: String,
     body: String,
     archived: bool,
+}
+
+/// The notes a note refers to, and the notes that refer to it.
+#[derive(Debug, Serialize)]
+pub struct LinksResponse {
+    to: Vec<Uuid>,
+    from: Vec<Uuid>,
+}
+
+impl From<Links> for LinksResponse {
+    fn from(links: Links) -> Self {
+        let ids = |ids: Vec<NoteId>| ids.iter().map(NoteId::as_uuid).collect();
+        Self {
+            to: ids(links.to),
+            from: ids(links.from),
+        }
+    }
 }
 
 impl From<&Note> for NoteResponse {
@@ -186,10 +204,41 @@ async fn attachment(
     Ok(([(CONTENT_TYPE, media)], file.into_bytes()).into_response())
 }
 
+async fn link(
+    State(notes): State<Notes>,
+    Path((id, target)): Path<(Uuid, Uuid)>,
+    cx: Ctx,
+) -> ApiResult<StatusCode> {
+    notes
+        .link(NoteId::from_uuid(id), NoteId::from_uuid(target), &cx)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unlink(
+    State(notes): State<Notes>,
+    Path((id, target)): Path<(Uuid, Uuid)>,
+    cx: Ctx,
+) -> ApiResult<StatusCode> {
+    notes
+        .unlink(NoteId::from_uuid(id), NoteId::from_uuid(target), &cx)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn links(
+    State(notes): State<Notes>,
+    Path(id): Path<Uuid>,
+    cx: Ctx,
+) -> ApiResult<Json<LinksResponse>> {
+    let links = notes.links(NoteId::from_uuid(id), &cx).await?;
+    Ok(Json(links.into()))
+}
+
 /// The whole adapter, as one value. No trait to implement, nothing to erase.
 pub fn routes(notes: Notes) -> Routes {
     Routes::new("notes")
-        .describe("Create, read, update, archive and delete notes, and attach a file")
+        .describe("Create, read, update, archive and delete notes, attach a file, link them")
         .label("kind", "crud")
         .get("/notes", list)
         .post("/notes", create)
@@ -199,5 +248,8 @@ pub fn routes(notes: Notes) -> Routes {
         .post("/notes/{id}/archive", archive)
         .get("/notes/{id}/attachment", attachment)
         .put("/notes/{id}/attachment", attach)
+        .get("/notes/{id}/links", links)
+        .put("/notes/{id}/links/{target}", link)
+        .delete("/notes/{id}/links/{target}", unlink)
         .with_state(notes)
 }

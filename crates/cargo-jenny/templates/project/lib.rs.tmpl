@@ -76,6 +76,13 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     // With `persistence.postgres.url` configured, {{resource_plural}} live in Postgres:
     // one jsonb row each, the table created before the server starts. Without it they
     // live in memory, which is what the tests use. The use cases cannot tell.
+{{#if graph}}
+    //
+    // A question no store answers — what is connected to what — goes on a port of
+    // your own, and its adapter queries a graph in the same database:
+    // `postgres.graph("{{project_snake}}")`, in Cypher (see `jenny::persistence::graph`).
+    // The runtime creates the graph before serving.
+{{/if}}
     let {{resource_plural}}_store: Arc<{{resource_pascal}}Store> = match server.postgres()? {
         Some(postgres) => Arc::new(
             postgres

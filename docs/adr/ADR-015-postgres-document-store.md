@@ -1,6 +1,6 @@
 # ADR-015: The Postgres Document Store and the Runtime's Pool
 
-**Status:** Accepted — implemented; the outbox is ADR-016
+**Status:** Accepted — implemented; the outbox is ADR-016; `prepare` also creates Apache AGE graphs, under the same lock (ADR-019)
 **Date:** 2026-11-18
 
 ## Context

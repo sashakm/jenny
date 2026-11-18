@@ -36,6 +36,7 @@ Then add whatever the change touched:
 | `crates/jenny-persistence/**`, the runtime's `persistence` wiring, or a store's contract in `jenny-core` | `just test-postgres` | database tests skip without `JENNY_TEST_POSTGRES_URL`, so `test-all` never ran them |
 | `crates/jenny-messaging/src/kv.rs`, the runtime's NATS wiring, `Queryable`, or a store's contract | `just test-nats` | the same, for `JENNY_TEST_NATS_URL` |
 | `crates/jenny-objects/**`, the runtime's `objects` wiring, or the `Blobs` port | `just test-objects` | the same, for `JENNY_TEST_S3_URL` |
+| `crates/jenny-persistence/src/graph.rs`, `Postgres::graph`/`prepare`, or the example's links | `just test-age` | the same, for `JENNY_TEST_AGE_URL` |
 | public API of any crate | `just package`; mark the commit breaking (`!`) if anything was removed or changed | release-plz versions from the commit header |
 
 `just test` is what CI runs (doc tests, then everything under llvm-cov); use it when

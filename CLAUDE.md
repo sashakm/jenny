@@ -12,7 +12,7 @@ changes are fine, and removing a low-value feature beats adapting it.
 | `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Blobs`, `Events`, outbound ports, `Memory` + `Queryable`, `MemoryBlobs`, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `Nats` + `NatsKv` key-value store, `MessagingAdapter` (declaration only) |
-| `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
+| `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck`; Apache AGE `Graph` + `Cypher` (feature `graph`) |
 | `crates/jenny-objects` | driven adapter | `object_store`: `ObjectBlobs` (the `Blobs` port over S3 and compatibles, files, memory), `ObjectsConfig`, `ObjectsCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
 | `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection (`messaging`), the object store (`objects`), hosting, graceful shutdown |
@@ -41,6 +41,8 @@ changing it, and write a new one (see the `write-adr` skill) for a new decision.
   `#[use_cases]` only wraps method bodies; keep it that way.
 - **Filter paths are attacker-controlled.** Nothing turns a `Criteria` into SQL without a
   `Columns` allowlist; identifiers come from it, values are always bound parameters.
+  Cypher gets the same treatment: queries are `&'static str`, values go through `bind`,
+  and labels through `identifier` from the graph's allowlist (ADR-019).
 - **Authorization never pattern-matches request paths.** The HTTP gate asks about the
   matched route template inside its resource and adapter URNs, and policies are Cedar
   (ADR-011). Anything that cannot be evaluated denies.
@@ -58,6 +60,7 @@ just test-cli-features  # the same once per optional feature (slow; shared targe
 just test-postgres      # database tests + the example against a disposable Postgres 18 (docker)
 just test-nats          # key-value tests + the example against a disposable NATS (docker)
 just test-objects       # object-storage tests + the example against a disposable S3 (RustFS, docker)
+just test-age           # graph tests + the example against Postgres with Apache AGE, preloaded and not (docker)
 just msrv               # cargo +1.94 check, the declared rust-version
 just package            # package + verify every crate as crates.io will see it
 ```
@@ -99,11 +102,16 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   `Routes` keeps layered copies of each GET and PUT for this; a new way of adding or
   layering routes must keep them in step (ADR-014).
 - **Backend tests read `JENNY_TEST_POSTGRES_URL` / `JENNY_TEST_NATS_URL` /
-  `JENNY_TEST_S3_URL`** (the last with the standard `AWS_*` variables): unset, they print
-  "skipping" and pass; unset under `CI`, they fail. So `just test-all` passing says
-  nothing about them — run `just test-postgres` / `just test-nats` / `just test-objects`
-  for any change in a store or its runtime wiring. Each test uses a table, bucket or key
-  prefix of its own and removes it.
+  `JENNY_TEST_S3_URL` / `JENNY_TEST_AGE_URL`** (S3 with the standard `AWS_*` variables):
+  unset, they print "skipping" and pass; unset under `CI`, they fail. So `just test-all`
+  passing says nothing about them — run `just test-postgres` / `just test-nats` /
+  `just test-objects` / `just test-age` for any change in a store or its runtime wiring.
+  Each test uses a table, bucket, key prefix or graph of its own and removes it.
+- **AGE needs `ag_catalog` on the search path** for edges and even `create_graph`
+  ("operator does not exist: graphid = graphid"). `Graph` prepends it per transaction
+  with `set_config(…, true)`, so `fetch_all_in` takes a `Transaction`: outside one the
+  setting silently does nothing. Result columns report the type as bare `agtype`, so
+  `Agtype::compatible` accepts both names.
 - **S3 conditional writes need `conditional_put: etag`.** Without it `object_store`
   refuses `put_if_absent`/`put_if_match`, and `ObjectBlobs` reports which option is
   missing; it never falls back to an unconditional write. Readiness lists the bucket
@@ -146,5 +154,5 @@ check publishability. Details: `RELEASING.md`.
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
 the OpenAPI document (ADR-014), events raised with a `remove` and `LISTEN/NOTIFY` for relays (ADR-016), a `migrations/`
-directory in the scaffold (ADR-015), the AGE adapter (ADR-013; MongoDB is deferred), Azure/GCS, streaming and multipart blobs (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
+directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

@@ -13,7 +13,7 @@ use super::event::{NoteArchived, NoteCreated};
 
 /// A note's identity. A newtype rather than a bare `Uuid`, so a note id can never be
 /// passed where an author id was meant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NoteId(Uuid);
 
@@ -152,6 +152,14 @@ impl Note {
 
     /// Whether a file may be attached. Not to an archived note: an attachment is part of
     /// what the note says, and an archived note says nothing new.
+    /// Whether this note may refer to `other`. Not to itself: a link points elsewhere.
+    pub fn ensure_linkable_to(&self, other: NoteId) -> DomainResult<()> {
+        if other == self.id {
+            return Err(DomainError::invalid("a note cannot link to itself"));
+        }
+        Ok(())
+    }
+
     pub fn ensure_attachable(&self) -> DomainResult<()> {
         if self.archived {
             return Err(DomainError::conflict(

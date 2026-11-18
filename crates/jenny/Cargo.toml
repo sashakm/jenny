@@ -33,6 +33,9 @@ messaging = ["dep:jenny-messaging", "jenny-server?/messaging"]
 # Postgres stores and helpers (driven adapter); with `server`, a pool from
 # `persistence.postgres` that the runtime prepares before serving.
 persistence = ["dep:jenny-persistence", "jenny-server?/persistence"]
+# Apache AGE graphs in the same Postgres (`Postgres::graph`): openCypher with bound
+# parameters and an allowlist of labels; the runtime creates each graph before serving.
+graph = ["persistence", "jenny-persistence/graph"]
 # Blob storage: S3 and compatibles, local files or memory, behind the `Blobs` port;
 # with `server`, a store from `objects`.
 objects = ["dep:jenny-objects", "jenny-server?/objects"]
@@ -47,7 +50,7 @@ telemetry-otlp = ["server", "jenny-server/telemetry-otlp"]
 telemetry-prometheus = ["server", "jenny-server/telemetry-prometheus"]
 telemetry-loki = ["server", "jenny-server/telemetry-loki"]
 # Everything.
-full = ["rest", "server", "messaging", "persistence", "objects", "security", "openapi"]
+full = ["rest", "server", "messaging", "persistence", "graph", "objects", "security", "openapi"]
 
 [dev-dependencies]
 anyhow = { workspace = true }

@@ -225,9 +225,9 @@ curl 'localhost:8000/api/notes?sort=-title&filter=title:contains:shop&page_size=
 
 [`examples/basic`](examples/basic) is the complete version — domain, use cases, both
 adapter directions, memory, Postgres or NATS from configuration, attachments in memory or
-an object store, and an end-to-end test that boots the actual composition root
-(`just test-postgres`, `just test-nats` and `just test-objects` run it against each
-backend too).
+an object store, links between notes in memory or an AGE graph, and an end-to-end test
+that boots the actual composition root (`just test-postgres`, `just test-nats`,
+`just test-objects` and `just test-age` run it against each backend too).
 
 ### Two REST modes
 
@@ -306,7 +306,26 @@ objects:
 On AWS the URL is enough; credentials come from the role, as for any AWS SDK.
 `file:///var/lib/blobs` and `memory://` need no infrastructure, and
 `jenny::memory::MemoryBlobs` keeps the same contract in tests. The example keeps note
-attachments this way (ADR-018). Apache AGE follows (ADR-013).
+attachments this way (ADR-018).
+
+A graph is for questions no store answers — what is connected to what — so its port is
+your domain's own, and its adapter queries Apache AGE in the same Postgres. With the
+`graph` feature, `postgres.graph("social")` hands out a graph the runtime creates before
+serving. Queries are static Cypher: values are bound, and labels come from an
+allowlist, because Cypher cannot take them as parameters. Each row decodes with serde:
+
+```rust,ignore
+let social = postgres.graph("social").identifiers(["KNOWS", "FOLLOWS"]);
+let names: Vec<String> = social
+    .cypher("MATCH (:Person {id: $id})-[:{{relation}}]->(f:Person) RETURN f.name")
+    .bind("id", 7)
+    .identifier("relation", "KNOWS")
+    .fetch_all()
+    .await?;
+```
+
+The example keeps the links between notes this way, or in memory without a database
+(ADR-019).
 
 ## Scaffolding
 
@@ -423,16 +442,16 @@ reads every key to list; see above.)
 | `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Blobs`, `Events`, the outbound ports, `Memory`, `MemoryBlobs`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway, `NatsKv` store |
-| `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL |
+| `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL, Apache AGE graphs (`graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, config, health, hosting |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 
-Features: `rest`, `server` (implies `rest`), `messaging`, `persistence`, `objects`, `security`,
-`openapi`, `swagger-ui`, `telemetry-otlp` / `telemetry-prometheus` / `telemetry-loki`,
-`full`.
+Features: `rest`, `server` (implies `rest`), `messaging`, `persistence`, `graph` (implies
+`persistence`), `objects`, `security`, `openapi`, `swagger-ui`, `telemetry-otlp` /
+`telemetry-prometheus` / `telemetry-loki`, `full`.
 
 ## Events
 

@@ -93,7 +93,7 @@ async fn health_endpoints_describe_the_service(svc: &Service) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ready["status"], "up");
     // Notes are in memory here; with a backend configured, `postgres`, `nats` or
-    // `objects` is listed.
+    // `objects` is listed. A graph is in the `postgres` database, so adds no check.
     assert!(
         ready["checks"]
             .as_array()
@@ -275,6 +275,67 @@ async fn a_note_can_carry_an_attachment(svc: &Service) {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+async fn notes_link_to_each_other(svc: &Service) {
+    let mut ids = Vec::new();
+    for title in ["Recipe", "Shopping", "Pantry"] {
+        let (_, id) = svc.post("/api/notes", json!({ "title": title })).await;
+        ids.push(serde_json::from_value::<Uuid>(id).unwrap());
+    }
+    let [recipe, shopping, pantry] = ids[..] else {
+        unreachable!()
+    };
+    let link = |from: Uuid, to: Uuid| format!("/api/notes/{from}/links/{to}");
+
+    // Linking twice is linking once.
+    for (from, to) in [(recipe, shopping), (recipe, pantry), (recipe, pantry)] {
+        assert_eq!(
+            svc.put(&link(from, to), json!(null)).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(
+        svc.put(&link(shopping, pantry), json!(null)).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, links) = svc.get(&format!("/api/notes/{recipe}/links")).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut to = vec![shopping, pantry];
+    to.sort();
+    assert_eq!(links, json!({ "to": to, "from": [] }));
+    let (_, links) = svc.get(&format!("/api/notes/{pantry}/links")).await;
+    let mut from = vec![recipe, shopping];
+    from.sort();
+    assert_eq!(links, json!({ "to": [], "from": from }));
+
+    // A note does not link to itself, nor to one that does not exist.
+    assert_eq!(
+        svc.put(&link(recipe, recipe), json!(null)).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        svc.put(&link(recipe, Uuid::new_v4()), json!(null)).await,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, _) = svc.delete(&link(recipe, shopping)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, links) = svc.get(&format!("/api/notes/{shopping}/links")).await;
+    assert_eq!(links, json!({ "to": [pantry], "from": [] }));
+
+    // A deleted note takes its links with it.
+    let (status, _) = svc.delete(&format!("/api/notes/{pantry}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, links) = svc.get(&format!("/api/notes/{recipe}/links")).await;
+    assert_eq!(links, json!({ "to": [], "from": [] }));
+    let (status, _) = svc.get(&format!("/api/notes/{pantry}/links")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for id in [recipe, shopping] {
+        svc.delete(&format!("/api/notes/{id}")).await;
+    }
+}
+
 async fn notes_can_be_patched_and_writes_can_be_made_conditional(svc: &Service) {
     let (_, id) = svc
         .post("/api/notes", json!({ "title": "Shopping", "body": "milk" }))
@@ -425,6 +486,7 @@ async fn the_example_service_works_end_to_end() {
     a_domain_rule_becomes_the_right_status(&svc).await;
     notes_can_be_patched_and_writes_can_be_made_conditional(&svc).await;
     a_note_can_carry_an_attachment(&svc).await;
+    notes_link_to_each_other(&svc).await;
     failures_are_problem_documents(&svc).await;
 
     handle.shutdown();

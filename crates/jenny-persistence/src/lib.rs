@@ -35,9 +35,18 @@
 //! adapter/outbound/persistence/                      (impl — uses this crate)
 //!      └─ PgNoteRepository: sqlx, SqlCriteria, RepositoryError -> DomainError
 //! ```
+//!
+//! ### Graphs
+//!
+//! With the `graph` feature, `Postgres::graph` hands out an Apache AGE graph in the
+//! same database, for a port whose questions are traversals: openCypher with bound
+//! parameters and an allowlist of labels, rows decoded with serde, the graph created
+//! before serving. See the `graph` module.
 pub mod criteria;
 mod documents;
 mod error;
+#[cfg(feature = "graph")]
+pub mod graph;
 pub mod health;
 mod outbox;
 mod postgres;
@@ -50,6 +59,9 @@ pub use criteria::{Columns, SqlCriteria};
 pub use documents::PgDocuments;
 #[doc(inline)]
 pub use error::*;
+#[cfg(feature = "graph")]
+#[doc(inline)]
+pub use graph::{Cypher, Graph};
 /// What a column holds — the core's [`ValueKind`], the same
 /// one an in-memory store's allowlist uses.
 pub use jenny_core::domain::ValueKind;
