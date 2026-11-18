@@ -342,6 +342,40 @@ async fn only_json_patch_documents_are_accepted() {
 }
 
 #[tokio::test]
+async fn a_resource_that_is_not_json_takes_no_patch() {
+    async fn download() -> ([(&'static str, &'static str); 1], &'static [u8]) {
+        ([("content-type", "image/png")], b"\x89PNG")
+    }
+    async fn upload(body: axum::body::Bytes) -> StatusCode {
+        assert!(!body.is_empty());
+        StatusCode::NO_CONTENT
+    }
+    let router = RestAdapter::new("my-notes")
+        .unwrap()
+        .accept_json_patch()
+        .unwrap()
+        .mount(
+            Routes::new("avatars")
+                .get("/avatars/{id}", download)
+                .put("/avatars/{id}", upload),
+        )
+        .unwrap()
+        .into_router();
+
+    let reply = send(
+        &router,
+        http::Request::patch("/api/avatars/1")
+            .header("content-type", JSON_PATCH_CONTENT_TYPE)
+            .body(Body::from(r#"[{"op":"replace","path":"/x","value":1}]"#))
+            .unwrap(),
+    )
+    .await;
+    // A client error, not the server's: and no `Accept-Patch`, since no format applies.
+    assert_eq!(reply.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert!(!reply.headers.contains_key("accept-patch"));
+}
+
+#[tokio::test]
 async fn patching_something_absent_is_whatever_get_says() {
     let (router, _) = service(true).await;
     let reply = send(

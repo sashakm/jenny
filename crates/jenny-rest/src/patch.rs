@@ -7,7 +7,8 @@
 //! 1. the body must be `application/json-patch+json` (else `415`, with `Accept-Patch`),
 //!    and an RFC 6902 document (else `400`);
 //! 2. the resource's `GET` produces the current representation and its `ETag`; an
-//!    `If-Match` that does not match is `412`;
+//!    `If-Match` that does not match is `412`, and a representation that is not JSON —
+//!    an image, a file — is `415`, since no patch format applies to it;
 //! 3. the patch is applied to that representation; a path that does not resolve is
 //!    `422`, a failed `test` operation `409`;
 //! 4. the result goes to the resource's `PUT`, with `If-Match` set to the `ETag` the
@@ -156,7 +157,14 @@ async fn apply(
             "the resource has changed since the version `If-Match` names",
         ));
     }
-    let before = representation(current, &parts).await?;
+    let Some(before) = representation(current, &parts).await? else {
+        // RFC 5789 §2.2 again, but without `Accept-Patch`: this resource takes none.
+        return Ok(Problem::unsupported_media_type(format!(
+            "{} is not a JSON resource, so it takes no JSON Patch",
+            parts.uri.path()
+        ))
+        .into_response());
+    };
 
     // --- 2. the patch, applied to it ----------------------------------------------
     let mut after = before.clone();
@@ -224,10 +232,12 @@ async fn call(router: MethodRouter, request: Request) -> Response {
     }
 }
 
-async fn representation(response: Response, parts: &Parts) -> Result<Value, Problem> {
+/// The GET's body as JSON; `None` when it is some other media type. A body that claims
+/// to be JSON and is not is the resource's bug, so a 500.
+async fn representation(response: Response, parts: &Parts) -> Result<Option<Value>, Problem> {
     let not_json = || {
         Problem::internal(format!(
-            "GET {} did not return a JSON representation, so PATCH cannot apply to it",
+            "GET {} sent a JSON content type with a body that is not JSON",
             parts.uri.path()
         ))
     };
@@ -240,12 +250,14 @@ async fn representation(response: Response, parts: &Parts) -> Result<Value, Prob
             media == "application/json" || media.ends_with("+json")
         });
     if !is_json {
-        return Err(not_json());
+        return Ok(None);
     }
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .map_err(|_| not_json())?;
-    serde_json::from_slice(&bytes).map_err(|_| not_json())
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| not_json())
 }
 
 /// RFC 5789 §2.2: a failed `test` is a conflict with the current state; any other
