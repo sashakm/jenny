@@ -1,6 +1,6 @@
 # ADR-013: Storage Backends
 
-**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); MongoDB, NATS KV, object storage and AGE are not
+**Status:** Accepted — Postgres is built: document and table stores (ADR-015) and the outbox (ADR-016); NATS KV is built (ADR-017); MongoDB is deferred; object storage and AGE are not built
 **Date:** 2026-11-18
 
 ## Context
@@ -118,5 +118,7 @@ identifiers in filter paths (ADR-010) and gets the same answer.
 
 ## Not built yet
 
-In this order: MongoDB, NATS KV, object storage, AGE. Postgres is built — the document
-and table stores, the pool and migrations (ADR-015) and the outbox (ADR-016).
+Object storage, then AGE. Postgres is built — the document and table stores, the pool
+and migrations (ADR-015) and the outbox (ADR-016) — and so is NATS KV (ADR-017).
+MongoDB is deferred: the Postgres document store covers the need it was planned for,
+and the adapter can be added when a service asks for a dedicated document database.

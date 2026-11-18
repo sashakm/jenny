@@ -56,7 +56,7 @@ use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 /// `null` values last, as Postgres does, and ties keep key order, so paging is stable.
 pub struct Memory<A> {
     documents: Mutex<BTreeMap<String, Entry>>,
-    queryable: BTreeMap<String, ValueKind>,
+    queryable: Queryable,
     name: String,
     kind: PhantomData<fn() -> A>,
 }
@@ -71,7 +71,7 @@ impl<A: Aggregate> Memory<A> {
     pub fn new() -> Self {
         Self {
             documents: Mutex::new(BTreeMap::new()),
-            queryable: BTreeMap::new(),
+            queryable: Queryable::default(),
             name: format!("{}-store", A::KIND),
             kind: PhantomData,
         }
@@ -83,10 +83,7 @@ impl<A: Aggregate> Memory<A> {
         I: IntoIterator<Item = (P, ValueKind)>,
         P: Into<String>,
     {
-        self.queryable = paths
-            .into_iter()
-            .map(|(path, kind)| (path.into(), kind))
-            .collect();
+        self.queryable = Queryable::new(paths);
         self
     }
 
@@ -207,27 +204,86 @@ impl<A: Aggregate> Store<A> for Memory<A> {
     }
 
     async fn list(&self, criteria: &Criteria) -> DomainResult<Vec<A>> {
-        let allowed: Vec<&str> = self.queryable.keys().map(String::as_str).collect();
-        criteria.ensure_allowed(&allowed)?;
-        for filter in &criteria.filter {
-            self.queryable[filter.path()].accept(filter)?;
-        }
-
-        let mut found: Vec<Entry> = self
+        // Snapshot first, so the lock is not held while documents are compared.
+        let documents: Vec<(Version, Value)> = self
             .lock()?
             .values()
-            .filter(|entry| criteria.filter.iter().all(|f| matches(&entry.document, f)))
-            .cloned()
+            .map(|entry| (entry.version, entry.document.clone()))
+            .collect();
+        self.queryable
+            .select(criteria, documents)?
+            .into_iter()
+            .map(|(version, document)| Ok(Loaded::<A>::decode(document, version)?.into_inner()))
+            .collect()
+    }
+}
+
+/// An allowlist of attribute paths, and listing by [`Criteria`] over JSON documents
+/// held in memory.
+///
+/// What [`Memory`] lists with, public for stores that cannot query either — a key-value
+/// bucket — so they filter, sort and page exactly like it. Nothing is queryable until
+/// a path is allowed, because a filter is also a question about the data.
+///
+/// ```
+/// use jenny_core::domain::{Criteria, ValueKind};
+/// use jenny_core::memory::Queryable;
+/// use jenny_core::port::Version;
+/// use serde_json::json;
+///
+/// let queryable = Queryable::new([("title", ValueKind::Text)]);
+/// let documents = vec![
+///     (Version::FIRST, json!({ "title": "Shopping" })),
+///     (Version::FIRST, json!({ "title": "Gardening" })),
+/// ];
+/// let criteria = Criteria::new().with_filter("title:begins:shop".parse()?);
+/// assert_eq!(queryable.select(&criteria, documents)?.len(), 1);
+/// # Ok::<(), jenny_core::domain::DomainError>(())
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct Queryable(BTreeMap<String, ValueKind>);
+
+impl Queryable {
+    pub fn new<I, P>(paths: I) -> Self
+    where
+        I: IntoIterator<Item = (P, ValueKind)>,
+        P: Into<String>,
+    {
+        Self(
+            paths
+                .into_iter()
+                .map(|(path, kind)| (path.into(), kind))
+                .collect(),
+        )
+    }
+
+    /// The documents matching `criteria`, sorted and paged.
+    ///
+    /// `documents` must come in a stable order — key order, say — because ties keep
+    /// it, and that is what makes paging over a sort with duplicates consistent. Fails
+    /// with [`Invalid`](DomainError::Invalid) for a path outside the allowlist or a
+    /// value its kind cannot hold.
+    pub fn select(
+        &self,
+        criteria: &Criteria,
+        documents: Vec<(Version, Value)>,
+    ) -> DomainResult<Vec<(Version, Value)>> {
+        let allowed: Vec<&str> = self.0.keys().map(String::as_str).collect();
+        criteria.ensure_allowed(&allowed)?;
+        for filter in &criteria.filter {
+            self.0[filter.path()].accept(filter)?;
+        }
+
+        let mut found: Vec<(Version, Value)> = documents
+            .into_iter()
+            .filter(|(_, document)| criteria.filter.iter().all(|f| matches(document, f)))
             .collect();
 
         // Later keys first, so earlier ones win under a stable sort — what a client
-        // writing `sort=a&sort=b` means. Ties keep key order, which makes it total.
+        // writing `sort=a&sort=b` means. Ties keep the order they came in.
         for key in criteria.sort.iter().rev() {
-            found.sort_by(|left, right| {
-                let ordering = compare(
-                    lookup(&left.document, key.path()),
-                    lookup(&right.document, key.path()),
-                );
+            found.sort_by(|(_, left), (_, right)| {
+                let ordering = compare(lookup(left, key.path()), lookup(right, key.path()));
                 match key.ordering() {
                     crate::domain::Ordering::Asc => ordering,
                     crate::domain::Ordering::Desc => ordering.reverse(),
@@ -235,12 +291,11 @@ impl<A: Aggregate> Store<A> for Memory<A> {
             });
         }
 
-        found
+        Ok(found
             .into_iter()
             .skip(criteria.page.offset() as usize)
             .take(criteria.page.limit() as usize)
-            .map(|entry| Ok(Loaded::<A>::decode(entry.document, entry.version)?.into_inner()))
-            .collect()
+            .collect())
     }
 }
 

@@ -16,7 +16,8 @@
 //! ```
 //!
 //! That keeps the notes in memory. With the `persistence` feature and a database URL
-//! they live in Postgres instead, one `jsonb` row each, the table created at startup:
+//! they live in Postgres instead, one `jsonb` row each, the table created at startup —
+//! or, with `messaging` and `JENNY__MESSAGING__NATS__URL`, in a NATS key-value bucket:
 //!
 //! ```sh
 //! docker run -d --rm -p 5432:5432 -e POSTGRES_PASSWORD=notes postgres:18
@@ -92,20 +93,23 @@ const QUERYABLE: [(&str, ValueKind); 3] = [
     ("archived", ValueKind::Bool),
 ];
 
-/// Where notes live: Postgres when the `persistence` feature is on and
-/// `persistence.postgres.url` is configured, memory otherwise. One line each, because a
-/// store needs nothing but the aggregate's serde derives; the runtime creates the table
-/// and reports the database's readiness.
-#[cfg(feature = "persistence")]
+/// Where notes live, from configuration: Postgres when `persistence.postgres.url` is set
+/// (with the `persistence` feature), else a NATS key-value bucket when
+/// `messaging.nats.url` is (with `messaging`), else memory.
+///
+/// One line each, because a store needs nothing but the aggregate's serde derives and
+/// every store takes the same allowlist; the runtime prepares the table or the bucket
+/// and reports its readiness.
 fn note_store(server: &mut JennyServer) -> anyhow::Result<Arc<NoteStore>> {
-    Ok(match server.postgres()? {
-        Some(postgres) => Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)),
-        None => Arc::new(Memory::<Note>::new().queryable(QUERYABLE)),
-    })
-}
-
-#[cfg(not(feature = "persistence"))]
-fn note_store(_: &mut JennyServer) -> anyhow::Result<Arc<NoteStore>> {
+    #[cfg(feature = "persistence")]
+    if let Some(postgres) = server.postgres()? {
+        return Ok(Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)));
+    }
+    #[cfg(feature = "messaging")]
+    if let Some(nats) = server.nats() {
+        return Ok(Arc::new(nats.kv::<Note>().queryable(QUERYABLE)));
+    }
+    let _ = server;
     Ok(Arc::new(Memory::<Note>::new().queryable(QUERYABLE)))
 }
 

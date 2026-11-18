@@ -124,6 +124,27 @@ test-postgres:
   JENNY__PERSISTENCE__POSTGRES__OUTBOX=true \
       cargo test -p jenny --features server,persistence,messaging --example basic
 
+# The NATS tests read `JENNY_TEST_NATS_URL` and skip without it (fail, under CI). This
+# gives them one: a disposable NATS with JetStream on a free port, removed on exit.
+[doc('run the NATS key-value tests against a throwaway server (needs docker)')]
+test-nats:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  name="jenny-test-nats-$$"
+  docker run -d --rm --name "$name" -p 127.0.0.1::4222 nats:2-alpine -js >/dev/null
+  trap 'docker stop "$name" >/dev/null' EXIT
+  port="$(docker port "$name" 4222/tcp | head -n1 | sed 's/.*://')"
+  for _ in $(seq 1 30); do
+    docker logs "$name" 2>&1 | grep -q 'Server is ready' && break
+    sleep 1
+  done
+  export JENNY_TEST_NATS_URL="nats://127.0.0.1:${port}"
+  cargo test -p jenny-messaging --test kv_test
+  cargo test -p jenny-server --features messaging --lib -- nats buckets
+  # The example's end-to-end suite, with its notes in a NATS bucket.
+  JENNY__MESSAGING__NATS__URL="$JENNY_TEST_NATS_URL" JENNY__MESSAGING__NAMESPACE="example-$$" \
+      cargo test -p jenny --features server,messaging --example basic
+
 [doc('doc tests, then all tests under coverage (writes coverage.xml)')]
 ci-test: doc-tests
   @cargo llvm-cov --all-targets --all-features --examples --cobertura --output-path coverage.xml

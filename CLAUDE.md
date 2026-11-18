@@ -11,7 +11,7 @@ changes are fine, and removing a low-value feature beats adapting it.
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
 | `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Events`, outbound ports, `Memory`, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
-| `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `MessagingAdapter` (declaration only) |
+| `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `Nats` + `NatsKv` key-value store, `MessagingAdapter` (declaration only) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
 | `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), hosting, graceful shutdown |
@@ -55,6 +55,7 @@ just test               # what CI runs: doc tests + all tests under llvm-cov
 just test-cli           # scaffold a default project; it must build, test and lint clean
 just test-cli-features  # the same once per optional feature (slow; shared target dir)
 just test-postgres      # database tests + the example against a disposable Postgres 18 (docker)
+just test-nats          # key-value tests + the example against a disposable NATS (docker)
 just msrv               # cargo +1.94 check, the declared rust-version
 just package            # package + verify every crate as crates.io will see it
 ```
@@ -95,10 +96,12 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   cloned request again appends to `MatchedPath` and duplicates the private `UrlParams`.
   `Routes` keeps layered copies of each GET and PUT for this; a new way of adding or
   layering routes must keep them in step (ADR-014).
-- **Database tests read `JENNY_TEST_POSTGRES_URL`**: unset, they print "skipping" and
-  pass; unset under `CI`, they fail. So `just test-all` passing says nothing about
-  Postgres — run `just test-postgres` for any change in `jenny-persistence` or in the
-  runtime's `persistence` wiring. Each test uses a table of its own and drops it.
+- **Backend tests read `JENNY_TEST_POSTGRES_URL` / `JENNY_TEST_NATS_URL`**: unset, they
+  print "skipping" and pass; unset under `CI`, they fail. So `just test-all` passing says
+  nothing about them — run `just test-postgres` / `just test-nats` for any change in a
+  store or its runtime wiring. Each test uses a table or bucket of its own and drops it.
+- **Every store lists with the same rules.** `Memory` and `NatsKv` both evaluate
+  criteria through `jenny_core::memory::Queryable`; a listing change goes there, once.
 - **`/tmp` has a per-user quota** that a few scaffolded target dirs fill. Run the slow
   gates with `TMPDIR=$PWD/target/tmp` when they fail with "Disk quota exceeded".
 - **The outbox delivers at least once**, in order per relay, a moment after the request.
