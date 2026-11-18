@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use jenny::Events;
+use jenny::domain::ValueKind;
 use jenny::memory::Memory;
 use jenny::rest::RestAdapter;
 use jenny::server::JennyServer;
@@ -29,6 +30,17 @@ use adapter::outbound::events::EventLog;
 {{/if}}
 use application::{{resource_snake}}::{{resource_pascal}}s;
 use domain::model::{{resource_snake}}::{{resource_pascal}};
+{{#if persistence}}
+use domain::port::{{resource_snake}}_store::{{resource_pascal}}Store;
+{{/if}}
+
+/// What a {{resource_snake}} listing may sort and filter on, and what each attribute holds.
+///
+/// The security boundary for client-supplied criteria: a listing that names anything
+/// else is refused before it reaches the data, so `filter=…` cannot become a question
+/// about a field the API never shows. Every store takes the same list.
+const {{resource_screaming}}_QUERYABLE: [(&str, ValueKind); 2] =
+    [("name", ValueKind::Text), ("archived", ValueKind::Bool)];
 
 /// This service's own configuration, from `applications.{{project_kebab}}`. The
 /// framework imposes no schema on it — the shape below is entirely ours.
@@ -47,7 +59,7 @@ impl Default for Config {
 
 /// Wire the service together. Shared by `main` and the integration test, so the test
 /// exercises the real composition root.
-{{#if messaging}}
+{{#if mutable_server}}
 pub fn build(mut server: JennyServer) -> Result<JennyServer> {
 {{else}}
 pub fn build(server: JennyServer) -> Result<JennyServer> {
@@ -59,14 +71,22 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     tracing::info!("{{project_kebab}} says: {}", config.greeting);
 
     // --- driven adapters: the outside world, as the domain's ports see it ----------
-    //
-    // The queryable paths are the security boundary for client-supplied criteria: a
-    // listing that sorts or filters on anything else is refused before it reaches the
-    // data, so `filter=…` cannot become a question about a field the API never shows.
-    let {{resource_plural}}_store = Arc::new(Memory::<{{resource_pascal}}>::new().queryable(["name", "archived"]));
 {{#if persistence}}
-    // `jenny::persistence` holds the Postgres building blocks for a store of your own
-    // when the data outgrows memory; the use cases below do not change.
+    //
+    // With `persistence.postgres.url` configured, {{resource_plural}} live in Postgres:
+    // one jsonb row each, the table created before the server starts. Without it they
+    // live in memory, which is what the tests use. The use cases cannot tell.
+    let {{resource_plural}}_store: Arc<{{resource_pascal}}Store> = match server.postgres()? {
+        Some(postgres) => Arc::new(
+            postgres
+                .documents::<{{resource_pascal}}>()
+                .queryable({{resource_screaming}}_QUERYABLE),
+        ),
+        None => Arc::new(Memory::<{{resource_pascal}}>::new().queryable({{resource_screaming}}_QUERYABLE)),
+    };
+{{else}}
+    let {{resource_plural}}_store =
+        Arc::new(Memory::<{{resource_pascal}}>::new().queryable({{resource_screaming}}_QUERYABLE));
 {{/if}}
 {{#if messaging}}
 
@@ -78,7 +98,7 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
 {{/if}}
 
     // --- application: use cases over those ports -----------------------------------
-    let {{resource_plural}} = {{resource_pascal}}s::new({{resource_plural}}_store.clone(), events);
+    let {{resource_plural}} = {{resource_pascal}}s::new({{resource_plural}}_store, events);
 
     // --- driving adapter: HTTP in --------------------------------------------------
     // No path given, so it takes `server.api_path` from configuration. It accepts JSON
@@ -95,11 +115,7 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     );
 {{/if}}
 
-    Ok(server
+    server
         .with_version(jenny::service_version!())
-        .register(rest)?
-        // `/health/ready` reports the store, so a load balancer stops sending traffic
-        // when it is unusable — while `/health/live` stays up, because restarting the
-        // process would not fix a broken dependency.
-        .register_health_check({{resource_plural}}_store))
+        .register(rest)
 }

@@ -41,6 +41,7 @@ jenny (facade)
 ├── jenny-security    → jenny-core
 └── jenny-server      → jenny-core, jenny-rest
                        → jenny-messaging   (feature `messaging`)
+                       → jenny-persistence (feature `persistence`)
 
 cargo-jenny                         (standalone binary; depends on none of the above)
 ```
@@ -69,7 +70,7 @@ default = []
 rest         = ["dep:jenny-rest"]
 server       = ["dep:jenny-server", "rest"]     # the runtime hosts REST adapters
 messaging    = ["dep:jenny-messaging", "jenny-server?/messaging"]
-persistence  = ["dep:jenny-persistence"]
+persistence  = ["dep:jenny-persistence", "jenny-server?/persistence"]
 security     = ["dep:jenny-security"]
 openapi      = ["jenny-macros/openapi", "jenny-rest?/openapi", "jenny-server?/openapi"]
 swagger-ui   = ["openapi", "jenny-server?/swagger-ui"]

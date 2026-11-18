@@ -11,7 +11,7 @@
 //! variables for what differs per environment, flags for what differs per run.
 //!
 //! The framework reads the sections it owns — `server`, `telemetry`, and `messaging`
-//! when that feature is on. Everything else passes through untyped, so it imposes no schema on your configuration:
+//! and `persistence` when those features are on. Everything else passes through untyped, so it imposes no schema on your configuration:
 //! an adapter deserialises its own `applications.<name>` section into whatever type
 //! it likes, via [`ServerContext::app_section`](crate::ServerContext::app_section).
 //!
@@ -209,6 +209,14 @@ impl Default for MessagingConfig {
     }
 }
 
+/// The `persistence` section. Applies with the `persistence` feature.
+#[cfg(feature = "persistence")]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PersistenceConfig {
+    pub postgres: jenny_persistence::PostgresConfig,
+}
+
 /// The part of the configuration tree the framework itself interprets.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
@@ -216,6 +224,8 @@ pub struct ServerConfig {
     pub server: HttpConfig,
     pub telemetry: TelemetryConfig,
     pub messaging: MessagingConfig,
+    #[cfg(feature = "persistence")]
+    pub persistence: PersistenceConfig,
 }
 
 /// The merged configuration tree, file and environment.

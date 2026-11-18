@@ -43,6 +43,23 @@ jobs:
   test:
     name: Tests and coverage
     runs-on: ubuntu-latest
+    # The database tests run against this; without it they would fail rather than skip.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: jenny
+          POSTGRES_PASSWORD: jenny
+          POSTGRES_DB: jenny
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jenny"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      JENNY_TEST_POSTGRES_URL: postgres://jenny:jenny@localhost:5432/jenny
     steps:
       - uses: actions/checkout@v7
         with:
@@ -59,6 +76,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         run: just test
+      - name: Run the example against Postgres
+        run: cargo test -p jenny --features server,persistence --example basic
+        env:
+          JENNY__PERSISTENCE__POSTGRES__URL: postgres://jenny:jenny@localhost:5432/jenny
       - name: Upload coverage report
         if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v7

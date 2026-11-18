@@ -12,9 +12,9 @@ changes are fine, and removing a low-value feature beats adapting it.
 | `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Events`, outbound ports, `Memory`, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `MessagingAdapter` (declaration only) |
-| `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
+| `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` store, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
-| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, hosting, graceful shutdown |
+| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), hosting, graceful shutdown |
 | `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
@@ -51,6 +51,7 @@ just test-all           # every test, all features
 just test               # what CI runs: doc tests + all tests under llvm-cov
 just test-cli           # scaffold a default project; it must build, test and lint clean
 just test-cli-features  # the same once per optional feature (slow; shared target dir)
+just test-postgres      # database tests + the example against a disposable Postgres 18 (docker)
 just msrv               # cargo +1.94 check, the declared rust-version
 just package            # package + verify every crate as crates.io will see it
 ```
@@ -91,6 +92,12 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   cloned request again appends to `MatchedPath` and duplicates the private `UrlParams`.
   `Routes` keeps layered copies of each GET and PUT for this; a new way of adding or
   layering routes must keep them in step (ADR-014).
+- **Database tests read `JENNY_TEST_POSTGRES_URL`**: unset, they print "skipping" and
+  pass; unset under `CI`, they fail. So `just test-all` passing says nothing about
+  Postgres — run `just test-postgres` for any change in `jenny-persistence` or in the
+  runtime's `persistence` wiring. Each test uses a table of its own and drops it.
+- **`/tmp` has a per-user quota** that a few scaffolded target dirs fill. Run the slow
+  gates with `TMPDIR=$PWD/target/tmp` when they fail with "Disk quota exceeded".
 - **JSON Patch needs two conventions from a resource**: its PUT accepts the GET
   representation (no `deny_unknown_fields`), and reads it through `jenny_rest::Json`,
   which refuses ignored fields a patch changed. `accept_json_patch()` must precede
@@ -117,5 +124,6 @@ check publishability. Details: `RELEASING.md`.
 
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
-the OpenAPI document (ADR-014), every database-backed store (ADR-013), `cargo jenny new --manifest`,
+the OpenAPI document (ADR-014), the Postgres table mode and outbox (ADR-015), the
+MongoDB, NATS KV, object-storage and AGE adapters (ADR-013), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

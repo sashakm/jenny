@@ -89,13 +89,14 @@ mod tests {
     use super::*;
     use crate::domain::model::NoteTitle;
     use jenny::DomainError;
+    use jenny::domain::ValueKind;
     use jenny::memory::Memory;
     use jenny::testing::RecordedEvents;
 
     fn notes() -> (Notes, Arc<RecordedEvents>) {
         let events = Arc::new(RecordedEvents::default());
         let notes = Notes::new(
-            Arc::new(Memory::<Note>::new().queryable(["title"])),
+            Arc::new(Memory::<Note>::new().queryable([("title", ValueKind::Text)])),
             Events::new(events.clone()),
         );
         (notes, events)

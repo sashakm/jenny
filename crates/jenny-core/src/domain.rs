@@ -45,6 +45,8 @@ pub use identity::{
 #[doc(inline)]
 pub use label::{Label, Urn};
 #[doc(inline)]
-pub use query::{Check, Criteria, DEFAULT_PAGE_SIZE, Filter, MAX_PAGE_SIZE, Ordering, Page, Sort};
+pub use query::{
+    Check, Criteria, DEFAULT_PAGE_SIZE, Filter, MAX_PAGE_SIZE, Ordering, Page, Sort, ValueKind,
+};
 #[doc(inline)]
 pub use validation::{Validate, ValidationErrors, ValidationIssue};

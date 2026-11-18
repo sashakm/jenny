@@ -117,13 +117,14 @@ impl {{resource_pascal}}s {
 mod tests {
     use super::*;
     use jenny::DomainError;
+    use jenny::domain::ValueKind;
     use jenny::memory::Memory;
     use jenny::testing::RecordedEvents;
 
     fn subject() -> ({{resource_pascal}}s, Arc<RecordedEvents>) {
         let events = Arc::new(RecordedEvents::default());
         let service = {{resource_pascal}}s::new(
-            Arc::new(Memory::<{{resource_pascal}}>::new().queryable(["name"])),
+            Arc::new(Memory::<{{resource_pascal}}>::new().queryable([("name", ValueKind::Text)])),
             Events::new(events.clone()),
         );
         (service, events)

@@ -33,6 +33,7 @@ Then add whatever the change touched:
 | any `Cargo.toml` (dependency, version, feature) | `just package`, `just msrv` | crates.io packaging and the declared `rust-version` |
 | a new cargo feature or `#[cfg(feature = …)]` | add it to the lists in the `features` recipe | `--all-features` hides combination bugs |
 | `examples/basic/**` | `cargo test --example basic --features server` | the example's end-to-end test boots the real composition root |
+| `crates/jenny-persistence/**`, the runtime's `persistence` wiring, or a store's contract in `jenny-core` | `just test-postgres` | database tests skip without `JENNY_TEST_POSTGRES_URL`, so `test-all` never ran them |
 | public API of any crate | `just package`; mark the commit breaking (`!`) if anything was removed or changed | release-plz versions from the commit header |
 
 `just test` is what CI runs (doc tests, then everything under llvm-cov); use it when
@@ -40,6 +41,10 @@ coverage matters or to reproduce a CI failure exactly.
 
 Known noise: `jenny-security`'s JWKS cache test fetches from googleapis.com and fails
 without network. Say so rather than retrying it.
+
+The slow gates (`test-cli`, `test-cli-features`, `package`) build whole projects under
+`/tmp`, which has a per-user quota. If one fails with "Disk quota exceeded", rerun it with
+`TMPDIR=$PWD/target/tmp`; that is the environment, not the change.
 
 ## 3. Fix, then rerun
 

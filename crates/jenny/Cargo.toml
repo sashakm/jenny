@@ -28,8 +28,9 @@ rest = ["dep:jenny-rest"]
 server = ["dep:jenny-server", "rest"]
 # Messaging driving adapter (NATS; interface only for now).
 messaging = ["dep:jenny-messaging", "jenny-server?/messaging"]
-# Postgres/sqlx persistence helpers (driven adapter).
-persistence = ["dep:jenny-persistence"]
+# Postgres stores and helpers (driven adapter); with `server`, a pool from
+# `persistence.postgres` that the runtime prepares before serving.
+persistence = ["dep:jenny-persistence", "jenny-server?/persistence"]
 # Authentication (JWT, API key) and Cedar policy authorization.
 security = ["dep:jenny-security"]
 # OpenAPI schema generation for the REST wire types.
