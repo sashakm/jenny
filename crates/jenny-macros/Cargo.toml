@@ -6,13 +6,14 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Derive macros (Dto, QueryFormat) for the jenny framework"
+description = "Macros (Dto, QueryFormat, Aggregate, DomainEvent, use_cases) for the jenny framework"
 
 [lib]
 proc-macro = true
 
 [dependencies]
-syn = { workspace = true }
+# `full` for parsing the impl blocks `#[use_cases]` is put on.
+syn = { workspace = true, features = ["full"] }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
 darling = { workspace = true }

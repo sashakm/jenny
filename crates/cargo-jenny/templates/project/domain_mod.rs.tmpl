@@ -1,8 +1,9 @@
 //! The hexagon. Depends on nothing but `jenny::domain` and `jenny::port`.
 //!
-//! Look at the imports below: no `serde`, no `sqlx`, no `axum`. That is the dependency
+//! Look at the imports below: no `sqlx`, no `axum`, no broker. That is the dependency
 //! rule made visible. If a `use` in here ever needs one of those, something has been
-//! put in the wrong ring.
+//! put in the wrong ring. `serde` is the deliberate exception: it lets a store persist
+//! the aggregates and a publisher send the events without a mapping layer for each.
 
 pub mod event;
 pub mod model;

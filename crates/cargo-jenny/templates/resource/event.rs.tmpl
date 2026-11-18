@@ -1,22 +1,21 @@
 //! What happened to a {{resource_pascal}}. Definitions only — nothing here knows about
 //! a bus.
+//!
+//! Events derive `Serialize`: what they carry *is* their published contract, so the
+//! encoding belongs with the definition.
 
 use jenny::DomainEvent;
+use serde::Serialize;
 
 use crate::domain::model::{{resource_snake}}::{{resource_pascal}}Id;
 use crate::domain::model::{{resource_snake}}::{{resource_pascal}}Name;
 
-/// A {{resource_pascal}} was created.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A {{resource_pascal}} was created. Published as `{{resource_snake}}.created`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, DomainEvent)]
+#[event(name = "{{resource_snake}}.created")]
 pub struct {{resource_pascal}}Created {
     pub id: {{resource_pascal}}Id,
     pub name: {{resource_pascal}}Name,
-}
-
-impl DomainEvent for {{resource_pascal}}Created {
-    fn name(&self) -> &str {
-        "{{resource_snake}}.created"
-    }
 }
 
 #[cfg(test)]

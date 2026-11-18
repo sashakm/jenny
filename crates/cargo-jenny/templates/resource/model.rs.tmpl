@@ -1,13 +1,20 @@
 //! The {{resource_pascal}} aggregate. Invariants live in the types.
+//!
+//! The aggregate and its value objects derive serde, which is what lets any store
+//! persist it without mapping code. The invariants survive that: the name deserialises
+//! through its constructor, so a stored blank name fails to load instead of becoming a
+//! {{resource_pascal}} the domain would never have built.
 
-use jenny::{DomainError, DomainResult};
+use jenny::{Aggregate, DomainError, DomainResult};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::event::{{resource_snake}}::{{resource_pascal}}Created;
 
 /// A {{resource_pascal}}'s identity. A newtype rather than a bare `Uuid`, so it can
 /// never be passed where some other id was meant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct {{resource_pascal}}Id(Uuid);
 
 impl {{resource_pascal}}Id {
@@ -35,8 +42,10 @@ impl std::fmt::Display for {{resource_pascal}}Id {
 /// "Make illegal states unrepresentable" at work: because the only way to obtain one is
 /// through [`new`]({{resource_pascal}}Name::new), no code downstream ever has to
 /// re-check whether a name is blank. The check happens once, and the type carries the
-/// proof afterwards.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// proof afterwards — including on the way back from storage, because serde goes
+/// through `TryFrom<String>` too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct {{resource_pascal}}Name(String);
 
 impl {{resource_pascal}}Name {
@@ -62,6 +71,20 @@ impl {{resource_pascal}}Name {
     }
 }
 
+impl TryFrom<String> for {{resource_pascal}}Name {
+    type Error = DomainError;
+
+    fn try_from(raw: String) -> DomainResult<Self> {
+        Self::new(raw)
+    }
+}
+
+impl From<{{resource_pascal}}Name> for String {
+    fn from(name: {{resource_pascal}}Name) -> Self {
+        name.0
+    }
+}
+
 impl std::fmt::Display for {{resource_pascal}}Name {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -73,7 +96,9 @@ impl std::fmt::Display for {{resource_pascal}}Name {
 /// State changes go through methods that enforce the rules and hand back the event they
 /// raised. The aggregate does not publish anything — raising and publishing are separate
 /// jobs, and publishing is the application layer's, after the state change is persisted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `#[derive(Aggregate)]` makes `id` its identity, which is all a store needs to know.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Aggregate)]
 pub struct {{resource_pascal}} {
     id: {{resource_pascal}}Id,
     name: {{resource_pascal}}Name,
@@ -93,12 +118,6 @@ impl {{resource_pascal}} {
             name: entity.name.clone(),
         };
         (entity, event)
-    }
-
-    /// Reconstitute from storage. Only a driven persistence adapter should call this:
-    /// it raises no event, which is correct when loading something that already happened.
-    pub fn rehydrate(id: {{resource_pascal}}Id, name: {{resource_pascal}}Name, archived: bool) -> Self {
-        Self { id, name, archived }
     }
 
     pub fn id(&self) -> {{resource_pascal}}Id {
@@ -171,6 +190,17 @@ mod tests {
             entity.archive().unwrap_err(),
             DomainError::Conflict { .. }
         ));
+    }
+
+    #[test]
+    fn a_stored_entity_with_a_blank_name_does_not_load() {
+        let stored = serde_json::json!({
+            "id": {{resource_pascal}}Id::generate(),
+            "name": "   ",
+            "archived": false,
+        });
+        let err = serde_json::from_value::<{{resource_pascal}}>(stored).unwrap_err();
+        assert!(err.to_string().contains("name must not be empty"), "{err}");
     }
 
     #[test]

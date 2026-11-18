@@ -2,214 +2,90 @@
 
 use std::sync::Arc;
 
-use jenny::domain::query::{Check, Criteria, Ordering};
-use jenny::{Context, DomainError, DomainEvent, DomainResult, EventEnvelope, EventPublisher};
+use jenny::{Context, Criteria, DomainResult, Events, Loaded, StoreExt, use_cases};
 
 use crate::domain::model::{Note, NoteId};
-use crate::domain::port::NoteRepository;
+use crate::domain::port::NoteStore;
 
-use super::command::{CreateNote, UpdateNote};
+use super::command::{CreateNote, EditNote};
 
 /// Everything you can do with a note.
 ///
-/// Generic over its two outbound ports, so the compiler sees straight through to the
-/// concrete adapters the composition root picked. Swapping the in-memory repository
-/// for Postgres is a change in `main.rs` and nowhere else.
-///
-/// `P: ?Sized` is what lets the composition root pass an `Arc<dyn EventPublisher>`
-/// here instead of a concrete type — one word, and both dispatch strategies are on
-/// the table without the application layer caring which one it got.
-pub struct Notes<R, P: ?Sized> {
-    repository: Arc<R>,
-    events: Arc<P>,
+/// Cheap to clone — both fields are shared handles — so a driving adapter can hold its
+/// own copy. Swapping the in-memory store for Postgres is a change in `main.rs` and
+/// nowhere else.
+#[derive(Clone)]
+pub struct Notes {
+    notes: Arc<NoteStore>,
+    events: Events,
 }
 
-impl<R, P> Notes<R, P>
-where
-    R: NoteRepository,
-    P: EventPublisher + ?Sized,
-{
-    pub fn new(repository: Arc<R>, events: Arc<P>) -> Self {
-        Self { repository, events }
+#[use_cases]
+impl Notes {
+    pub fn new(notes: Arc<NoteStore>, events: Events) -> Self {
+        Self { notes, events }
     }
 
     pub async fn create(&self, cmd: CreateNote, cx: &Context) -> DomainResult<NoteId> {
-        let (note, event) = Note::create(cmd.title, cmd.body);
-        let id = note.id();
-
-        self.repository.save(note).await?;
-        // Publish only after the state change has been committed. See the note on
-        // dual writes below.
-        self.publish(&event, cx).await;
-
-        Ok(id)
+        let (note, created) = Note::create(cmd.title, cmd.body);
+        let note = self.notes.insert(note).await?;
+        // Publish only once the state change has been committed.
+        self.events.publish(&created, cx).await;
+        Ok(note.id())
     }
 
-    /// The attribute paths this listing may be sorted and filtered on.
-    ///
-    /// The allowlist is the security boundary for client-supplied criteria: a path
-    /// outside it is refused rather than reaching storage. A repository backed by a
-    /// database would pass the equivalent `Columns` table to
-    /// `jenny_persistence::SqlCriteria` instead, which requires one for the same
-    /// reason.
-    pub const QUERYABLE: &'static [&'static str] = &["title", "body", "archived"];
-
+    /// Paging, sorting and filtering are the store's job; which attributes a client may
+    /// name is the allowlist it was built with in `main.rs`.
     pub async fn list(&self, criteria: &Criteria, _cx: &Context) -> DomainResult<Vec<Note>> {
-        criteria.ensure_allowed(Self::QUERYABLE)?;
-
-        let mut notes = self.repository.list().await?;
-        notes.retain(|note| criteria.filter.iter().all(|f| matches(note, f)));
-        sort_notes(&mut notes, criteria);
-
-        // Paging last, so it slices the result the client actually asked for. Every
-        // listing is paged; an unpaged request gets the default page size.
-        Ok(notes
-            .into_iter()
-            .skip(criteria.page.offset() as usize)
-            .take(criteria.page.limit() as usize)
-            .collect())
+        self.notes.list(criteria).await
     }
 
-    pub async fn fetch(&self, id: NoteId, _cx: &Context) -> DomainResult<Note> {
-        self.repository
-            .fetch(id)
-            .await?
-            .ok_or_else(DomainError::not_found)
+    /// The note and the version it was read at.
+    pub async fn fetch(&self, id: NoteId, _cx: &Context) -> DomainResult<Loaded<Note>> {
+        self.notes.load(&id).await
     }
 
-    pub async fn update(&self, cmd: UpdateNote, cx: &Context) -> DomainResult<()> {
-        let mut note = self.fetch(cmd.id, cx).await?;
+    /// Replace a note's contents.
+    ///
+    /// Listeners hear a `note.updated` carrying exactly what changed, as a JSON Patch.
+    /// An edit that changes nothing writes nothing and publishes nothing.
+    pub async fn edit(&self, id: NoteId, cmd: EditNote, cx: &Context) -> DomainResult<()> {
         // The rule about editing archived notes lives in the aggregate, not here.
-        note.edit(cmd.title, cmd.body)?;
-        self.repository.save(note).await
+        let edited = self
+            .notes
+            .change(&id, |note| note.edit(cmd.title, cmd.body))
+            .await?;
+        if let Some(updated) = edited.updated() {
+            self.events.publish(&updated, cx).await;
+        }
+        Ok(())
     }
 
     pub async fn archive(&self, id: NoteId, cx: &Context) -> DomainResult<()> {
-        let mut note = self.fetch(id, cx).await?;
-        let event = note.archive()?;
-
-        self.repository.save(note).await?;
-        self.publish(&event, cx).await;
-
+        let archived = self.notes.change(&id, Note::archive).await?;
+        self.events.publish(&archived.outcome, cx).await;
         Ok(())
     }
 
     pub async fn delete(&self, id: NoteId, _cx: &Context) -> DomainResult<Note> {
-        self.repository
-            .delete(id)
-            .await?
-            .ok_or_else(DomainError::not_found)
-    }
-
-    /// Encode a raised event and hand it to the outbound port.
-    ///
-    /// Serde appears *here*, one ring out from the domain, mirroring how a DTO is
-    /// converted into a command on the way in. The domain event stayed a plain struct.
-    ///
-    /// A failure to publish is logged rather than returned, because the state change
-    /// already succeeded and failing the caller's request would misreport what
-    /// happened. That is the dual-write problem in miniature: two writes, one
-    /// outcome. When your consistency requirements outgrow it, put a transactional
-    /// outbox behind [`EventPublisher`] — write the event to an outbox table inside
-    /// the same transaction as the state change, and let a relay drain it. This method
-    /// does not change.
-    async fn publish(&self, event: &(impl DomainEvent + EventPayload), cx: &Context) {
-        let envelope = match EventEnvelope::json(event.name(), &event.payload()) {
-            // Listeners can trace the event back to the request that raised it.
-            Ok(envelope) => envelope.correlated_with(cx),
-            Err(e) => {
-                tracing::error!(request_id = %cx.request_id(), "could not encode event: {e}");
-                return;
-            }
-        };
-        if let Err(e) = self.events.publish(envelope).await {
-            tracing::error!(request_id = %cx.request_id(), "could not publish event: {e}");
-        }
-    }
-}
-
-/// Read one filterable attribute off a note.
-fn attribute(note: &Note, path: &str) -> Option<String> {
-    match path {
-        "title" => Some(note.title().to_string()),
-        "body" => Some(note.body().to_string()),
-        "archived" => Some(note.is_archived().to_string()),
-        // Unreachable: `ensure_allowed` ran first.
-        _ => None,
-    }
-}
-
-fn matches(note: &Note, filter: &jenny::domain::query::Filter) -> bool {
-    let Some(value) = attribute(note, filter.path()) else {
-        return false;
-    };
-    let (value, wanted) = (value.to_lowercase(), filter.value().to_lowercase());
-    match filter.check() {
-        Check::Eq => value == wanted,
-        Check::Begins => value.starts_with(&wanted),
-        Check::Ends => value.ends_with(&wanted),
-        Check::Contains => value.contains(&wanted),
-        Check::Gt => value > wanted,
-        Check::St => value < wanted,
-    }
-}
-
-fn sort_notes(notes: &mut [Note], criteria: &Criteria) {
-    // Later keys are applied first so that earlier ones win, which is what a stable
-    // sort gives us and what a client listing `sort=a&sort=b` expects.
-    for sort in criteria.sort.iter().rev() {
-        notes.sort_by(|left, right| {
-            let ordering = attribute(left, sort.path()).cmp(&attribute(right, sort.path()));
-            match sort.ordering() {
-                Ordering::Asc => ordering,
-                Ordering::Desc => ordering.reverse(),
-            }
-        });
-    }
-}
-
-/// How a domain event is rendered for the wire.
-///
-/// Kept in the application layer so the domain's event structs need no serde derive —
-/// the same reason DTOs live in the inbound adapters rather than in `domain/`.
-pub trait EventPayload {
-    fn payload(&self) -> serde_json::Value;
-}
-
-impl EventPayload for crate::domain::event::NoteCreated {
-    fn payload(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id.as_uuid(), "title": self.title.as_str() })
-    }
-}
-
-impl EventPayload for crate::domain::event::NoteArchived {
-    fn payload(&self) -> serde_json::Value {
-        serde_json::json!({ "id": self.id.as_uuid() })
+        self.notes.remove(&id).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::outbound::memory::InMemoryNotes;
     use crate::domain::model::NoteTitle;
-    use std::sync::Mutex;
+    use jenny::DomainError;
+    use jenny::memory::Memory;
+    use jenny::testing::RecordedEvents;
 
-    /// A test double for the event port — the point of owning the port at all.
-    #[derive(Default)]
-    struct RecordedEvents(Mutex<Vec<String>>);
-
-    #[async_trait::async_trait]
-    impl EventPublisher for RecordedEvents {
-        async fn publish(&self, event: EventEnvelope) -> Result<(), jenny::PublishError> {
-            self.0.lock().unwrap().push(event.name().to_string());
-            Ok(())
-        }
-    }
-
-    fn notes() -> (Notes<InMemoryNotes, RecordedEvents>, Arc<RecordedEvents>) {
+    fn notes() -> (Notes, Arc<RecordedEvents>) {
         let events = Arc::new(RecordedEvents::default());
-        let notes = Notes::new(Arc::new(InMemoryNotes::default()), events.clone());
+        let notes = Notes::new(
+            Arc::new(Memory::<Note>::new().queryable(["title"])),
+            Events::new(events.clone()),
+        );
         (notes, events)
     }
 
@@ -217,6 +93,13 @@ mod tests {
         CreateNote {
             title: NoteTitle::new(title).unwrap(),
             body: "body".to_string(),
+        }
+    }
+
+    fn edit(title: &str, body: &str) -> EditNote {
+        EditNote {
+            title: NoteTitle::new(title).unwrap(),
+            body: body.to_string(),
         }
     }
 
@@ -229,7 +112,7 @@ mod tests {
 
         let stored = notes.fetch(id, &cx).await.unwrap();
         assert_eq!(stored.title().as_str(), "Shopping");
-        assert_eq!(events.0.lock().unwrap().as_slice(), ["note.created"]);
+        assert_eq!(events.names(), ["note.created"]);
     }
 
     #[tokio::test]
@@ -243,26 +126,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updating_replaces_the_contents() {
-        let (notes, _) = notes();
+    async fn editing_replaces_the_contents_and_says_what_changed() {
+        let (notes, events) = notes();
         let cx = Context::new();
         let id = notes.create(create("Shopping"), &cx).await.unwrap();
 
         notes
-            .update(
-                UpdateNote {
-                    id,
-                    title: NoteTitle::new("Groceries").unwrap(),
-                    body: "eggs".into(),
-                },
-                &cx,
-            )
+            .edit(id, edit("Groceries", "body"), &cx)
             .await
             .unwrap();
 
-        let updated = notes.fetch(id, &cx).await.unwrap();
-        assert_eq!(updated.title().as_str(), "Groceries");
-        assert_eq!(updated.body(), "eggs");
+        let edited = notes.fetch(id, &cx).await.unwrap();
+        assert_eq!(edited.title().as_str(), "Groceries");
+        assert_eq!(edited.version().get(), 2);
+        assert_eq!(
+            events.payloads("note.updated"),
+            [serde_json::json!({
+                "id": id.to_string(),
+                "version": 2,
+                "changes": [{ "op": "replace", "path": "/title", "value": "Groceries" }],
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_changes_nothing_publishes_nothing() {
+        let (notes, events) = notes();
+        let cx = Context::new();
+        let id = notes.create(create("Shopping"), &cx).await.unwrap();
+
+        notes.edit(id, edit("Shopping", "body"), &cx).await.unwrap();
+
+        assert_eq!(events.names(), ["note.created"]);
+        assert_eq!(notes.fetch(id, &cx).await.unwrap().version().get(), 1);
     }
 
     #[tokio::test]
@@ -272,38 +168,25 @@ mod tests {
         let id = notes.create(create("Shopping"), &cx).await.unwrap();
 
         notes.archive(id, &cx).await.unwrap();
-        assert_eq!(
-            events.0.lock().unwrap().as_slice(),
-            ["note.created", "note.archived"]
-        );
+        assert_eq!(events.names(), ["note.created", "note.archived"]);
 
         let err = notes.archive(id, &cx).await.unwrap_err();
         assert!(matches!(err, DomainError::Conflict { .. }));
         assert_eq!(
-            events.0.lock().unwrap().len(),
+            events.names().len(),
             2,
             "a rejected archive must not publish anything"
         );
     }
 
     #[tokio::test]
-    async fn an_archived_note_can_no_longer_be_updated() {
+    async fn an_archived_note_can_no_longer_be_edited() {
         let (notes, _) = notes();
         let cx = Context::new();
         let id = notes.create(create("Shopping"), &cx).await.unwrap();
         notes.archive(id, &cx).await.unwrap();
 
-        let err = notes
-            .update(
-                UpdateNote {
-                    id,
-                    title: NoteTitle::new("Nope").unwrap(),
-                    body: String::new(),
-                },
-                &cx,
-            )
-            .await
-            .unwrap_err();
+        let err = notes.edit(id, edit("Nope", ""), &cx).await.unwrap_err();
         assert!(matches!(err, DomainError::Conflict { .. }));
     }
 

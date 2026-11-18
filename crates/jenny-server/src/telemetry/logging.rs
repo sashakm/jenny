@@ -120,6 +120,13 @@ pub(super) fn init_logging(config: TelemetryConfig) -> anyhow::Result<TelemetryH
         }
     }
 
+    // --- Use-case metrics, once a meter provider is in place ---
+    // `#[jenny::use_cases]` reports through a process-wide observer, so jenny-core needs
+    // no metrics dependency of its own. Installing it before the provider would bind
+    // the histogram to the no-op meter for good.
+    #[cfg(any(feature = "telemetry-otlp", feature = "telemetry-prometheus"))]
+    jenny_core::port::observe_use_cases(super::use_cases::UseCaseMetrics::from_global());
+
     // --- Direct Loki layer (telemetry-loki feature) ---
     #[cfg(feature = "telemetry-loki")]
     let loki_task = if let Some(ref loki_url) = config.loki_url {

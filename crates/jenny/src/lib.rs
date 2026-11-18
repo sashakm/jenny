@@ -10,17 +10,38 @@
 //!
 //! | Path | Ring | Contents |
 //! |---|---|---|
-//! | [`jenny::domain`](domain) | the hexagon | [`DomainError`], [`Validate`], [`Principal`], [`Urn`], [`DomainEvent`] |
-//! | [`jenny::port`](port) | the boundary | [`UseCase`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
+//! | [`jenny::domain`](domain) | the hexagon | [`Aggregate`], [`DomainError`], [`DomainEvent`], [`Changes`], [`Validate`], [`Principal`], [`Urn`] |
+//! | [`jenny::port`](port) | the boundary | [`Store`], [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter`, `Routes`, `Problem` — axum/tower |
 //! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving) |
 //! | `jenny::persistence` | driven adapter | Postgres/sqlx: criteria to SQL, `QueryFormat`, `DatabaseCheck` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 //! | [`jenny::task`](task) | driving adapter | the clock: [`Task`](task::Task), [`ScheduledTask`](task::ScheduledTask) |
+//! | [`jenny::memory`](memory) | driven adapter | [`Memory`](memory::Memory), an in-memory [`Store`] |
+//! | [`jenny::testing`](testing) | tests | [`RecordedEvents`](testing::RecordedEvents) |
 //! | `jenny::server` | composition root | the `JennyServer` runtime, and `jenny::server::telemetry` (logs, traces, metrics) |
 //!
 //! The most-used items are also re-exported flat, so ordinary application code reads
-//! `use jenny::{Context, DomainError, UseCase};`.
+//! `use jenny::{Context, DomainResult, Events, Store, StoreExt};`.
+//!
+//! ### An application layer in one screen
+//!
+//! ```ignore
+//! #[derive(Clone)]
+//! pub struct Notes {
+//!     notes: Arc<dyn Store<Note>>,
+//!     events: Events,
+//! }
+//!
+//! #[jenny::use_cases]                     // a span and a measurement per method
+//! impl Notes {
+//!     pub async fn archive(&self, id: NoteId, cx: &Context) -> DomainResult<()> {
+//!         let archived = self.notes.change(&id, Note::archive).await?;  // load, change, save
+//!         self.events.publish(&archived.outcome, cx).await;
+//!         Ok(())
+//!     }
+//! }
+//! ```
 //!
 //! ### A service in one picture
 //!
@@ -57,24 +78,38 @@
 /// domain keeps smart constructors instead.
 pub use jenny_macros::Dto;
 
+/// `impl Aggregate` from the identity field. See the [`Aggregate`] trait.
+pub use jenny_macros::Aggregate;
+
+/// `impl DomainEvent` with a name derived from the type. See the [`DomainEvent`]
+/// trait.
+pub use jenny_macros::DomainEvent;
+
+/// A span and a `jenny.usecase.duration` measurement for every `pub async fn` in an
+/// `impl` block. See [`jenny::port::use_case`](port::use_case).
+pub use jenny_macros::use_cases;
+
 #[doc(inline)]
 pub use jenny_core::service_version;
 
 // The rings, as modules.
 pub use jenny_core::domain;
+pub use jenny_core::memory;
 pub use jenny_core::port;
 pub use jenny_core::task;
+pub use jenny_core::testing;
 
 // The everyday vocabulary, flattened.
 #[doc(no_inline)]
 pub use jenny_core::domain::{
-    AuthenticationError, AuthorizationError, Credentials, DomainError, DomainEvent, DomainResult,
-    Label, Principal, PrincipalBuilder, Urn, Validate, ValidationErrors, ValidationIssue,
+    Aggregate, AuthenticationError, AuthorizationError, Changes, Credentials, Criteria,
+    DomainError, DomainEvent, DomainResult, Label, Principal, PrincipalBuilder, Urn, Validate,
+    ValidationErrors, ValidationIssue,
 };
 #[doc(no_inline)]
 pub use jenny_core::port::{
-    AccessRequest, Authenticator, Authorizer, Context, EventEnvelope, EventPublisher, PublishError,
-    Resource, UseCase,
+    AccessRequest, Authenticator, Authorizer, Changed, Context, EventEnvelope, EventPublisher,
+    Events, Loaded, PublishError, Resource, Store, StoreExt, Version,
 };
 
 // Adapters and the runtime, behind their features.

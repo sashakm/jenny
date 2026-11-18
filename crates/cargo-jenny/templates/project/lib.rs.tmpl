@@ -16,19 +16,19 @@ pub mod domain;
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_trait::async_trait;
+use jenny::Events;
+use jenny::memory::Memory;
 use jenny::rest::RestAdapter;
-use jenny::server::{HealthCheck, JennyServer};
+use jenny::server::JennyServer;
 use serde::Deserialize;
 
-use adapter::outbound::{{resource_snake}}_repository::InMemory{{resource_pascal}}s;
 {{#if messaging}}
 use adapter::outbound::events::EventLogListener;
 {{else}}
 use adapter::outbound::events::EventLog;
-use jenny::EventPublisher;
 {{/if}}
 use application::{{resource_snake}}::{{resource_pascal}}s;
+use domain::model::{{resource_snake}}::{{resource_pascal}};
 
 /// This service's own configuration, from `applications.{{project_kebab}}`. The
 /// framework imposes no schema on it — the shape below is entirely ours.
@@ -41,32 +41,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             greeting: "hello from the built-in default".to_string(),
-        }
-    }
-}
-
-/// A readiness signal backed by the store.
-///
-/// `/health/ready` reports it, so a load balancer stops sending traffic when the store
-/// is unusable — while `/health/live` stays up, because restarting the process would
-/// not fix a broken dependency.
-struct StoreIsUsable(Arc<InMemory{{resource_pascal}}s>);
-
-#[async_trait]
-impl HealthCheck for StoreIsUsable {
-    fn name(&self) -> &str {
-        "{{resource_snake}}-store"
-    }
-
-    fn kind(&self) -> &str {
-        "store"
-    }
-
-    async fn check(&self) -> std::result::Result<(), String> {
-        if self.0.is_healthy() {
-            Ok(())
-        } else {
-            Err("store is unavailable".to_string())
         }
     }
 }
@@ -85,22 +59,26 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     tracing::info!("{{project_kebab}} says: {}", config.greeting);
 
     // --- driven adapters: the outside world, as the domain's ports see it ----------
-    let repository = Arc::new(InMemory{{resource_pascal}}s::default());
+    //
+    // The queryable paths are the security boundary for client-supplied criteria: a
+    // listing that sorts or filters on anything else is refused before it reaches the
+    // data, so `filter=…` cannot become a question about a field the API never shows.
+    let {{resource_plural}}_store = Arc::new(Memory::<{{resource_pascal}}>::new().queryable(["name", "archived"]));
+{{#if persistence}}
+    // `jenny::persistence` holds the Postgres building blocks for a store of your own
+    // when the data outgrows memory; the use cases below do not change.
+{{/if}}
 {{#if messaging}}
 
     // The runtime started an in-process bus; one publish fans out to every listener.
     server.subscribe(EventLogListener)?;
-    let events = server.events()?;
+    let events = Events::new(server.events()?);
 {{else}}
-
-    // Erased on purpose: the repository below is a generic parameter (static dispatch),
-    // while the publisher is chosen here and passed as a trait object. Both are ports;
-    // which dispatch you use is a wiring decision, not a design one.
-    let events: Arc<dyn EventPublisher> = Arc::new(EventLog);
+    let events = Events::new(Arc::new(EventLog));
 {{/if}}
 
     // --- application: use cases over those ports -----------------------------------
-    let {{resource_plural}} = Arc::new({{resource_pascal}}s::new(repository.clone(), events));
+    let {{resource_plural}} = {{resource_pascal}}s::new({{resource_plural}}_store.clone(), events);
 
     // --- driving adapter: HTTP in --------------------------------------------------
     // No path given, so it takes `server.api_path` from configuration.
@@ -117,5 +95,8 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     Ok(server
         .with_version(jenny::service_version!())
         .register(rest)?
-        .register_health_check(StoreIsUsable(repository)))
+        // `/health/ready` reports the store, so a load balancer stops sending traffic
+        // when it is unusable — while `/health/live` stays up, because restarting the
+        // process would not fix a broken dependency.
+        .register_health_check({{resource_plural}}_store))
 }

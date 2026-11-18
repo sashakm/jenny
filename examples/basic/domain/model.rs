@@ -1,13 +1,20 @@
 //! Entities and value objects. Invariants live in the types.
+//!
+//! The aggregate and its value objects derive serde, which is what lets any store
+//! persist a note without mapping code of its own (ADR-012). The invariants survive
+//! that: [`NoteTitle`] deserialises through its constructor, so a stored blank title
+//! fails to load instead of becoming a note the domain would never have built.
 
-use jenny::{DomainError, DomainResult};
+use jenny::{Aggregate, DomainError, DomainResult};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::event::{NoteArchived, NoteCreated};
 
 /// A note's identity. A newtype rather than a bare `Uuid`, so a note id can never be
 /// passed where an author id was meant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct NoteId(Uuid);
 
 impl NoteId {
@@ -35,8 +42,10 @@ impl std::fmt::Display for NoteId {
 /// This is the "make illegal states unrepresentable" rule at work. Because the only
 /// way to obtain a `NoteTitle` is through [`new`](NoteTitle::new), no code downstream
 /// — no use case, no repository, no handler — ever has to re-check whether a title is
-/// blank. The check happens once, and the type carries the proof afterwards.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// blank. The check happens once, and the type carries the proof afterwards — including
+/// on the way back from storage, because serde goes through `TryFrom<String>` too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct NoteTitle(String);
 
 impl NoteTitle {
@@ -62,6 +71,20 @@ impl NoteTitle {
     }
 }
 
+impl TryFrom<String> for NoteTitle {
+    type Error = DomainError;
+
+    fn try_from(raw: String) -> DomainResult<Self> {
+        Self::new(raw)
+    }
+}
+
+impl From<NoteTitle> for String {
+    fn from(title: NoteTitle) -> Self {
+        title.0
+    }
+}
+
 impl std::fmt::Display for NoteTitle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -74,7 +97,10 @@ impl std::fmt::Display for NoteTitle {
 /// they raised. The aggregate does not publish anything — raising and publishing are
 /// separate jobs, and publishing is the application layer's, after the state change
 /// has been persisted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `#[derive(Aggregate)]` makes `id` its identity and `"note"` its kind, which is all a
+/// store needs to know about it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Aggregate)]
 pub struct Note {
     id: NoteId,
     title: NoteTitle,
@@ -96,18 +122,6 @@ impl Note {
             title: note.title.clone(),
         };
         (note, event)
-    }
-
-    /// Reconstitute a note from storage. Only a driven persistence adapter should call
-    /// this: it bypasses [`create`](Self::create) and so raises no event, which is
-    /// correct when loading something that already happened.
-    pub fn rehydrate(id: NoteId, title: NoteTitle, body: String, archived: bool) -> Self {
-        Self {
-            id,
-            title,
-            body,
-            archived,
-        }
     }
 
     pub fn id(&self) -> NoteId {
@@ -209,10 +223,14 @@ mod tests {
     }
 
     #[test]
-    fn rehydration_restores_state_without_raising_anything() {
-        let id = NoteId::generate();
-        let note = Note::rehydrate(id, title("Old"), "body".into(), true);
-        assert_eq!(note.id(), id);
-        assert!(note.is_archived());
+    fn a_stored_note_with_a_blank_title_does_not_load() {
+        let stored = serde_json::json!({
+            "id": NoteId::generate(),
+            "title": "   ",
+            "body": "",
+            "archived": false,
+        });
+        let err = serde_json::from_value::<Note>(stored).unwrap_err();
+        assert!(err.to_string().contains("title must not be empty"), "{err}");
     }
 }

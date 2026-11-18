@@ -1,11 +1,15 @@
 //! The hexagon: types a domain module may depend on.
 //!
-//! Everything here is free of infrastructure. There is no serde derive on an entity,
-//! no database driver, no HTTP or broker type. A `domain/` module in a jenny service
-//! should need imports from this module and from [`crate::port`] only.
+//! Everything here is free of infrastructure: no database driver, no HTTP or broker
+//! type. Serde is the one exception, and a deliberate one — aggregates and events
+//! derive it so stores and publishers need no per-type mapping (ADR-012). A `domain/`
+//! module in a jenny service should need imports from this module and from
+//! [`crate::port`] only, plus `serde`.
 //!
 //! | Module | Holds |
 //! |---|---|
+//! | [`aggregate`] | [`Aggregate`] — the unit a store loads and saves |
+//! | [`changes`] | [`Changes`] — what changed between two states, as a JSON Patch |
 //! | [`error`] | [`DomainError`] — the failure vocabulary every adapter maps to a protocol status |
 //! | [`event`] | [`DomainEvent`] — the marker for event types defined in `domain/event/` |
 //! | [`identity`] | [`Principal`], [`Credentials`] and the two authentication/authorization failures |
@@ -17,6 +21,8 @@
 //! per-protocol DTO to a domain command). [`Validate`] is for the rules the domain
 //! owns, so they hold no matter which protocol the call arrived on.
 
+pub mod aggregate;
+pub mod changes;
 pub mod error;
 pub mod event;
 pub mod identity;
@@ -24,6 +30,10 @@ pub mod label;
 pub mod query;
 pub mod validation;
 
+#[doc(inline)]
+pub use aggregate::Aggregate;
+#[doc(inline)]
+pub use changes::Changes;
 #[doc(inline)]
 pub use error::{DomainError, DomainResult, ErrorSource};
 #[doc(inline)]

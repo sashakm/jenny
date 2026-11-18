@@ -1,10 +1,10 @@
 //! Driven ports — what the application needs from the outside world.
 //!
-//! Only the genuinely application-independent ports live here. Repositories do not:
-//! a `NoteRepository` phrased in your domain's own language, returning your own types
-//! and errors, is worth more than any `Repository<T, Id>` the framework could invent,
-//! and it belongs in your `domain/port/` module. What the framework can usefully own
-//! is the handful of ports whose shape does not vary between applications:
+//! Only the genuinely application-independent ports live here, beside the storage
+//! port in [`store`](super::store). Queries phrased in your domain's own language
+//! belong on a port of yours that extends [`Store`](super::Store), in your
+//! `domain/port/` module. What the framework can usefully own is the handful of ports
+//! whose shape does not vary between applications:
 //!
 //! | Port | Driven adapter that implements it |
 //! |---|---|
@@ -250,6 +250,23 @@ pub trait HealthCheck: Send + Sync + 'static {
 
     /// `Ok(())` when healthy, `Err(reason)` otherwise.
     async fn check(&self) -> Result<(), String>;
+}
+
+/// A shared adapter reports for itself: the store a use case holds is the same value
+/// the runtime asks whether it is usable.
+#[async_trait]
+impl<T: HealthCheck + ?Sized> HealthCheck for std::sync::Arc<T> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn kind(&self) -> &str {
+        (**self).kind()
+    }
+
+    async fn check(&self) -> Result<(), String> {
+        (**self).check().await
+    }
 }
 
 /// Decides whether a known identity may perform an action on a resource.

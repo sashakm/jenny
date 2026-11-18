@@ -4,11 +4,9 @@
 //! into domain commands, and the status codes. Each handler is a few lines — extract,
 //! convert, call — because anything longer would be business logic in the wrong ring.
 
-use std::sync::Arc;
-
 use axum::extract::{Path, State};
 use jenny::rest::{ApiResult, Ctx, Json, Listing, Routes, StatusCode};
-use jenny::{DomainError, Dto, EventPublisher, Validate};
+use jenny::{DomainError, Dto, Validate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,7 +16,6 @@ use crate::application::{{resource_snake}}::{
 use crate::domain::model::{{resource_snake}}::{
     {{resource_pascal}}, {{resource_pascal}}Id, {{resource_pascal}}Name,
 };
-use crate::domain::port::{{resource_snake}}_repository::{{resource_pascal}}Repository;
 
 /// A {{resource_snake}} to create or replace.
 ///
@@ -50,8 +47,8 @@ pub struct {{resource_pascal}}Response {
     archived: bool,
 }
 
-impl From<{{resource_pascal}}> for {{resource_pascal}}Response {
-    fn from(entity: {{resource_pascal}}) -> Self {
+impl From<&{{resource_pascal}}> for {{resource_pascal}}Response {
+    fn from(entity: &{{resource_pascal}}) -> Self {
         Self {
             id: entity.id().as_uuid(),
             name: entity.name().to_string(),
@@ -78,33 +75,26 @@ impl TryFrom<{{resource_pascal}}Request> for Create{{resource_pascal}} {
     }
 }
 
-impl TryFrom<(Uuid, {{resource_pascal}}Request)> for Rename{{resource_pascal}} {
+impl TryFrom<{{resource_pascal}}Request> for Rename{{resource_pascal}} {
     type Error = DomainError;
 
-    fn try_from((id, dto): (Uuid, {{resource_pascal}}Request)) -> Result<Self, Self::Error> {
-        dto.validate()?;
-        Ok(Rename{{resource_pascal}} {
-            id: {{resource_pascal}}Id::from_uuid(id),
-            name: {{resource_pascal}}Name::new(dto.name)?,
-        })
+    fn try_from(dto: {{resource_pascal}}Request) -> Result<Self, Self::Error> {
+        let Create{{resource_pascal}} { name } = dto.try_into()?;
+        Ok(Rename{{resource_pascal}} { name })
     }
 }
 
-type App<R, P> = State<Arc<{{resource_pascal}}s<R, P>>>;
-
-async fn list<R: {{resource_pascal}}Repository, P: EventPublisher + ?Sized>(
-    State(service): App<R, P>,
+async fn list(
+    State(service): State<{{resource_pascal}}s>,
     listing: Listing,
     cx: Ctx,
 ) -> ApiResult<Json<Vec<{{resource_pascal}}Response>>> {
     let found = service.list(&listing, &cx).await?;
-    Ok(Json(
-        found.into_iter().map({{resource_pascal}}Response::from).collect(),
-    ))
+    Ok(Json(found.iter().map({{resource_pascal}}Response::from).collect()))
 }
 
-async fn create<R: {{resource_pascal}}Repository, P: EventPublisher + ?Sized>(
-    State(service): App<R, P>,
+async fn create(
+    State(service): State<{{resource_pascal}}s>,
     cx: Ctx,
     Json(dto): Json<{{resource_pascal}}Request>,
 ) -> ApiResult<(StatusCode, Json<Uuid>)> {
@@ -112,67 +102,55 @@ async fn create<R: {{resource_pascal}}Repository, P: EventPublisher + ?Sized>(
     Ok((StatusCode::CREATED, Json(id.as_uuid())))
 }
 
-async fn fetch<R: {{resource_pascal}}Repository, P: EventPublisher + ?Sized>(
-    State(service): App<R, P>,
+async fn fetch(
+    State(service): State<{{resource_pascal}}s>,
     Path(id): Path<Uuid>,
     cx: Ctx,
 ) -> ApiResult<Json<{{resource_pascal}}Response>> {
-    Ok(Json(
-        service
-            .fetch({{resource_pascal}}Id::from_uuid(id), &cx)
-            .await?
-            .into(),
-    ))
+    let entity = service.fetch({{resource_pascal}}Id::from_uuid(id), &cx).await?;
+    Ok(Json({{resource_pascal}}Response::from(&*entity)))
 }
 
-async fn rename<R: {{resource_pascal}}Repository, P: EventPublisher + ?Sized>(
-    State(service): App<R, P>,
+async fn rename(
+    State(service): State<{{resource_pascal}}s>,
     Path(id): Path<Uuid>,
     cx: Ctx,
     Json(dto): Json<{{resource_pascal}}Request>,
 ) -> ApiResult<StatusCode> {
-    service.rename((id, dto).try_into()?, &cx).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn archive<R: {{resource_pascal}}Repository, P: EventPublisher + ?Sized>(
-    State(service): App<R, P>,
-    Path(id): Path<Uuid>,
-    cx: Ctx,
-) -> ApiResult<StatusCode> {
     service
-        .archive({{resource_pascal}}Id::from_uuid(id), &cx)
+        .rename({{resource_pascal}}Id::from_uuid(id), dto.try_into()?, &cx)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete<R: {{resource_pascal}}Repository, P: EventPublisher + ?Sized>(
-    State(service): App<R, P>,
+async fn archive(
+    State(service): State<{{resource_pascal}}s>,
+    Path(id): Path<Uuid>,
+    cx: Ctx,
+) -> ApiResult<StatusCode> {
+    service.archive({{resource_pascal}}Id::from_uuid(id), &cx).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete(
+    State(service): State<{{resource_pascal}}s>,
     Path(id): Path<Uuid>,
     cx: Ctx,
 ) -> ApiResult<Json<{{resource_pascal}}Response>> {
-    Ok(Json(
-        service
-            .delete({{resource_pascal}}Id::from_uuid(id), &cx)
-            .await?
-            .into(),
-    ))
+    let removed = service.delete({{resource_pascal}}Id::from_uuid(id), &cx).await?;
+    Ok(Json({{resource_pascal}}Response::from(&removed)))
 }
 
 /// The whole adapter, as one value. No trait to implement, nothing to erase.
-pub fn routes<R, P>(service: Arc<{{resource_pascal}}s<R, P>>) -> Routes
-where
-    R: {{resource_pascal}}Repository,
-    P: EventPublisher + ?Sized,
-{
+pub fn routes(service: {{resource_pascal}}s) -> Routes {
     Routes::new("{{resource_plural}}")
         .describe("Create, read, rename, archive and delete {{resource_plural}}")
         .label("kind", "crud")
-        .get("/{{resource_plural}}", list::<R, P>)
-        .post("/{{resource_plural}}", create::<R, P>)
-        .get("/{{resource_plural}}/{id}", fetch::<R, P>)
-        .put("/{{resource_plural}}/{id}", rename::<R, P>)
-        .delete("/{{resource_plural}}/{id}", delete::<R, P>)
-        .post("/{{resource_plural}}/{id}/archive", archive::<R, P>)
+        .get("/{{resource_plural}}", list)
+        .post("/{{resource_plural}}", create)
+        .get("/{{resource_plural}}/{id}", fetch)
+        .put("/{{resource_plural}}/{id}", rename)
+        .delete("/{{resource_plural}}/{id}", delete)
+        .post("/{{resource_plural}}/{id}/archive", archive)
         .with_state(service)
 }
