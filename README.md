@@ -194,16 +194,19 @@ And `main` is the dependency graph, readable top to bottom:
 async fn main() -> anyhow::Result<()> {
     let mut server = JennyServer::from_args()?;          // config + telemetry up
 
-    let store = Arc::new(Memory::<Note>::new().queryable(QUERYABLE)); // driven adapter
+    let store: Arc<NoteStore> = match server.postgres()? {        // driven adapter
+        Some(postgres) => Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)),
+        None => Arc::new(Memory::<Note>::new().queryable(QUERYABLE)),
+    };
     let events = Events::new(server.events()?);       // the in-process bus (`messaging`)
-    let notes = Notes::new(store.clone(), events);                    // application
+    let notes = Notes::new(store, events);                            // application
 
     let rest = RestAdapter::new("my-notes")?                     // driving adapter
+        .accept_json_patch()?
         .mount(adapter::inbound::rest::routes(notes))?;           // mounts at /api
 
     server.with_version(jenny::service_version!())
         .register(rest)?
-        .register_health_check(store)
         .run()
         .await
 }
@@ -221,8 +224,8 @@ curl 'localhost:8000/api/notes?sort=-title&filter=title:contains:shop&page_size=
 ```
 
 [`examples/basic`](examples/basic) is the complete version — domain, use cases, both
-adapter directions, a health check, and an end-to-end test that boots the actual
-composition root.
+adapter directions, memory or Postgres from configuration, and an end-to-end test that
+boots the actual composition root (`just test-postgres` runs it against a database too).
 
 ### Two REST modes
 
@@ -319,11 +322,11 @@ Its own endpoints live under `server.framework_path` (`/j`), namespaced away fro
 
 `/j/health/status` reports the framework version, your service's version (pass
 `jenny::service_version!()`), and a check per dependency. The runtime registers checks
-for what it owns — the OTLP endpoint, the in-process bus; your database pool is one
-line, because reaching it otherwise would need a DI container:
+for what it owns — the OTLP endpoint, the in-process bus, the Postgres pool it built from
+`persistence.postgres`. A pool you build yourself is one line:
 
 ```rust,ignore
-server.register_health_check(DatabaseCheck::new("notes-db", pool.clone()))
+server.register_health_check(DatabaseCheck::new("reporting-db", pool.clone()))
 ```
 
 A REST adapter mounts at `server.api_path` unless it called `.at("/v2")`, which wins —
@@ -331,8 +334,8 @@ an operator moving the convention should not silently relocate a path a develope
 specifically.
 
 Configuration is layered file → env (`JENNY__SERVER__ADDRESS`) → flags. The framework
-reads only `server`, `telemetry` and `messaging`; your `applications.<name>` section
-passes through untyped, so no schema is imposed on it.
+reads only `server`, `telemetry`, `messaging` and `persistence`; your
+`applications.<name>` section passes through untyped, so no schema is imposed on it.
 
 Failures are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem documents —
 including 404s and 405s, so every error a client can provoke has one shape:
@@ -392,7 +395,7 @@ growing table never turns one request into a full scan.
 | `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Events`, the outbound ports, `Memory`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
-| `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` store, criteria to SQL |
+| `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, config, health, hosting |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
@@ -404,8 +407,9 @@ Features: `rest`, `server` (implies `rest`), `messaging`, `persistence`, `securi
 
 ## Events
 
-Aggregates raise events; the application layer publishes them after the state change,
-through the [`EventPublisher`] port. Behind that port the in-process bus fans one event
+Aggregates raise events, and a use case hands them to the write that persists the
+change — `change(…).raising(&events, cx)` — which publishes them through the
+[`EventPublisher`] port. Behind that port the in-process bus fans one event
 out to many independent listeners — an audit writer, a NATS forwarder, a mailer — each
 its own small outbound effect. Nothing depends on listeners, so adding one is additive.
 
@@ -417,10 +421,12 @@ server.subscribe(AuditLogWriter::new(pool.clone()))?;   // one listener
 let events = server.events()?;                          // the port, for use cases
 ```
 
-Publishing after saving is two writes and can diverge on a partial failure. Start
-direct; when consistency demands it, put a transactional outbox behind the same port —
-write the event inside the state change's transaction and let a relay drain it. The
-application layer does not change.
+Saving and then publishing is two writes, and a crash between them loses the event.
+With a Postgres store and `persistence.postgres.outbox: true` they are one: the events
+are committed in the same transaction as the change, into `jenny_outbox`, and a relay the
+runtime runs forwards them to the bus — in order, at least once, with
+`FOR UPDATE SKIP LOCKED` so replicas never forward the same row (ADR-016). The use cases
+do not change; any other store publishes right after the write.
 
 Every envelope has its own id and can be correlated with the request that raised it
 (`EventEnvelope::json(…)?.correlated_with(&cx)`). The bus carries both as message

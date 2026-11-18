@@ -1,9 +1,9 @@
 //! Domain event definitions — no dispatch.
 //!
 //! Event *types* live in the domain and are raised by aggregates. Getting them onto
-//! a bus is somebody else's job: the application layer publishes what an aggregate
-//! raised through [`Events`](crate::port::Events), after the state change has been
-//! saved, and a driven adapter behind the
+//! a bus is somebody else's job: the use case hands what an aggregate raised to the
+//! write that persists the change — `change(…).raising(&events, cx)` — which commits it
+//! with the change where the store keeps an outbox, and a driven adapter behind the
 //! [`EventPublisher`](crate::port::outbound::EventPublisher) port does the delivery.
 //!
 //! An event derives `Serialize`, because what it carries *is* its published contract

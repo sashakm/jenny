@@ -167,17 +167,16 @@ impl EventEnvelope {
 
 /// Where domain events go.
 ///
-/// The application layer collects the events an aggregate raised, then hands them
-/// here after the state change has been committed. Whether that lands on an in-process
-/// bus, a broker, or an outbox table is the driven adapter's business — which is the
-/// point, because it means moving from a direct publish to a transactional outbox
-/// later is a change in the composition root and nowhere else.
+/// A use case hands the events an aggregate raised to the write that persists the
+/// change — `change(…).raising(&events, cx)` — and they reach this port from there.
+/// Whether that lands on an in-process bus or a broker is the driven adapter's
+/// business.
 ///
-/// **On atomicity:** `repository.save()` followed by `publisher.publish()` is two
-/// writes and can diverge if the process dies between them. Start direct; when your
-/// consistency requirements actually demand it, put a transactional outbox behind this
-/// port — write the event to an outbox table inside the same database transaction and
-/// let a relay drain it. The application layer does not change.
+/// **On atomicity:** a save and a publish are two writes, and a crash between them
+/// loses the event. A store with an outbox makes them one: it commits the events in
+/// the same transaction as the change, and a relay forwards them to this port
+/// afterwards, at least once (`Postgres::with_outbox`, ADR-016). Other stores publish
+/// right after the write.
 #[async_trait]
 pub trait EventPublisher: Send + Sync + 'static {
     async fn publish(&self, event: EventEnvelope) -> Result<(), PublishError>;

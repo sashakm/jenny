@@ -32,6 +32,10 @@
 //!   log_format: pretty
 //! messaging:
 //!   buffer_size: 64
+//! persistence:
+//!   postgres:
+//!     url: postgres://notes:secret@db/notes   # better: JENNY__PERSISTENCE__POSTGRES__URL
+//!     outbox: true
 //! applications:
 //!   my-notes:            # your shape, your business
 //!     greeting: "hello"

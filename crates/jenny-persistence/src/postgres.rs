@@ -28,6 +28,7 @@ use crate::table::{PgTable, TableShape};
 ///     min_connections: 0
 ///     acquire_timeout_seconds: 5
 ///     create_tables: true
+///     outbox: false        # true: events committed with their write (needs `messaging`)
 /// ```
 ///
 /// Without a `url` there is no database, and a service built with the fallback the
@@ -44,9 +45,10 @@ pub struct PostgresConfig {
     pub min_connections: u32,
     /// How long a query waits for a free connection before failing. Defaults to 5.
     pub acquire_timeout_seconds: u64,
-    /// Create the tables document stores need, if they are missing, before serving.
-    /// Defaults to `true`; turn it off where the schema is owned by migrations alone,
-    /// and create them from [`PgDocuments::schema`].
+    /// Create the tables document stores need, and the outbox's, if they are missing,
+    /// before serving. Defaults to `true`; turn it off where the schema is owned by
+    /// migrations alone, and create them from [`PgDocuments::schema`] and
+    /// [`Postgres::outbox_schema`].
     pub create_tables: bool,
     /// Commit the events a change raises in the same transaction as the change, and
     /// have the runtime forward them to the event bus (ADR-016). Defaults to `false`;

@@ -32,7 +32,7 @@ but the generic case needs nothing beyond `Store<A>`.
 
 ### Postgres, through sqlx — first
 
-A `PgStore<A>` in two modes:
+Two stores, built as `PgDocuments<A>` and `PgTable<A>` (ADR-015):
 
 - **Document** — one table per kind with `id`, `version` and a `jsonb` body. No mapping
   code at all. This is the default document store too, because it adds no
@@ -52,8 +52,8 @@ matched is a stale write. The same driver reaches FerretDB 2 (the Mongo wire pro
 over Postgres with Microsoft's MIT-licensed DocumentDB extension) and the managed
 Mongo-compatible services, so one adapter covers several deployments.
 
-The driver's MSRV (1.94.1 at 3.10) sits one patch above jenny's declared 1.94, which is
-resolved when the adapter is built.
+The driver declares `rust-version = 1.88` (3.10), below jenny's 1.94. An earlier draft
+of this ADR said 1.94.1, read off a summary rather than the manifest; it was wrong.
 
 ### NATS JetStream KV
 
@@ -118,5 +118,5 @@ identifiers in filter paths (ADR-010) and gets the same answer.
 
 ## Not built yet
 
-All of it, in this order: Postgres (document and table modes, pool and migrations, then
-the outbox), MongoDB, NATS KV, object storage, AGE.
+In this order: MongoDB, NATS KV, object storage, AGE. Postgres is built — the document
+and table stores, the pool and migrations (ADR-015) and the outbox (ADR-016).

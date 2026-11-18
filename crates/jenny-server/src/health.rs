@@ -14,13 +14,12 @@
 //! ### What checks itself, and what you register
 //!
 //! The runtime auto-registers checks for the things it *owns* — the OTLP endpoint it
-//! was configured with, the in-process event bus it started. It cannot auto-register
-//! your database pool: reaching it would need either a dependency-injection container
-//! or a `sqlx` dependency in the runtime, and the composition-root ADR rules out the
-//! first. So that one is a line in `main`:
+//! was configured with, the in-process event bus it started, and with the
+//! `persistence` feature the Postgres pool it built from `persistence.postgres`. A pool
+//! a service builds itself is a line in the composition root:
 //!
 //! ```ignore
-//! server.register_health_check(DatabaseCheck::new("notes-db", pool.clone()))
+//! server.register_health_check(DatabaseCheck::new("reporting-db", pool.clone()))
 //! ```
 
 use std::{
