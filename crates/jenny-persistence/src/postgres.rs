@@ -14,6 +14,7 @@ use sqlx::{AssertSqlSafe, PgPool};
 
 use crate::documents::PgDocuments;
 use crate::health::DatabaseCheck;
+use crate::table::{PgTable, TableShape};
 
 /// The `persistence.postgres` configuration section.
 ///
@@ -98,6 +99,8 @@ struct Inner {
     create_tables: bool,
     /// `CREATE TABLE IF NOT EXISTS` for every document store handed out.
     tables: Mutex<Vec<String>>,
+    /// Every table store handed out, checked against the catalogue before serving.
+    shapes: Mutex<Vec<Arc<TableShape>>>,
     migrator: Mutex<Option<Arc<Migrator>>>,
 }
 
@@ -130,6 +133,7 @@ impl Postgres {
                 pool,
                 create_tables,
                 tables: Mutex::new(Vec::new()),
+                shapes: Mutex::new(Vec::new()),
                 migrator: Mutex::new(None),
             }),
         }
@@ -158,6 +162,22 @@ impl Postgres {
         store
     }
 
+    /// A store over `table`, a table of your own with a column per field of `A` and a
+    /// `version` column — for data other systems query relationally. See [`PgTable`].
+    ///
+    /// [`prepare`](Self::prepare) checks the table after running the migrations, so a
+    /// missing table or column stops the service at startup. Panics when `table` is not
+    /// a plain lower-case SQL identifier.
+    pub fn table<A: Aggregate>(&self, table: &str) -> PgTable<A> {
+        let shape = TableShape::new(table);
+        self.inner
+            .shapes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(shape.clone());
+        PgTable::with_shape(self.inner.pool.clone(), shape)
+    }
+
     /// Run these migrations in [`prepare`](Self::prepare), before any table is created.
     ///
     /// Pass `sqlx::migrate!()`, which embeds the `migrations/` directory of the crate
@@ -175,7 +195,8 @@ impl Postgres {
         self
     }
 
-    /// Run the migrations, then create the document tables, once per process start.
+    /// Run the migrations, create the document tables, then check the table stores'
+    /// tables against the catalogue, once per process start.
     ///
     /// Safe to run from several replicas at once: sqlx's migrator takes its own lock,
     /// and table creation runs in one transaction under an advisory lock, because two
@@ -194,9 +215,27 @@ impl Postgres {
                 .context("running database migrations")?;
         }
 
-        if !self.inner.create_tables {
-            return Ok(());
+        if self.inner.create_tables {
+            self.create_document_tables().await?;
         }
+
+        // After the migrations, which are what create these.
+        let shapes = self
+            .inner
+            .shapes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for shape in shapes {
+            shape
+                .columns(&self.inner.pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("checking table `{}`: {e}", shape.name()))?;
+        }
+        Ok(())
+    }
+
+    async fn create_document_tables(&self) -> anyhow::Result<()> {
         let tables = self
             .inner
             .tables

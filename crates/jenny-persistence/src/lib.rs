@@ -6,7 +6,8 @@
 //! [`Postgres`] is a lazily connecting pool built from the `persistence.postgres`
 //! section ([`PostgresConfig`]). [`Postgres::documents`] hands out a [`PgDocuments`], a
 //! [`Store<A>`](jenny_core::port::Store) that keeps each aggregate as one `jsonb` row
-//! and needs nothing but the aggregate's serde derives. The runtime builds the pool,
+//! and needs nothing but the aggregate's serde derives; [`Postgres::table`] hands out a
+//! [`PgTable`] over a table of your own with a column per field. The runtime builds the pool,
 //! creates the tables, runs your migrations and registers a readiness check:
 //!
 //! ```ignore
@@ -38,6 +39,7 @@ mod error;
 pub mod health;
 mod postgres;
 mod query_format;
+mod table;
 
 #[doc(inline)]
 pub use criteria::{Columns, SqlCriteria};
@@ -55,3 +57,5 @@ pub use postgres::{Postgres, PostgresConfig};
 pub use query_format::{QueryFormat, QueryFormatExt};
 /// The driver underneath, for a port implemented by hand against [`Postgres::pool`].
 pub use sqlx;
+#[doc(inline)]
+pub use table::PgTable;
