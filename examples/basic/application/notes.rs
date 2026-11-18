@@ -28,9 +28,13 @@ impl Notes {
 
     pub async fn create(&self, cmd: CreateNote, cx: &Context) -> DomainResult<NoteId> {
         let (note, created) = Note::create(cmd.title, cmd.body);
-        let note = self.notes.insert(note).await?;
-        // Publish only once the state change has been committed.
-        self.events.publish(&created, cx).await;
+        // The note and the event that says so, together: in one transaction when the
+        // store keeps an outbox, published right after the insert otherwise.
+        let note = self
+            .notes
+            .add(note, created)
+            .raising(&self.events, cx)
+            .await?;
         Ok(note.id())
     }
 
@@ -58,19 +62,20 @@ impl Notes {
         cx: &Context,
     ) -> DomainResult<()> {
         // The rule about editing archived notes lives in the aggregate, not here.
-        let edited = self
-            .notes
-            .change_at(&id, expected, |note| note.edit(cmd.title, cmd.body))
+        self.notes
+            .change(&id, |note| note.edit(cmd.title, cmd.body))
+            .expecting(expected)
+            .raising(&self.events, cx)
+            .announcing_changes()
             .await?;
-        if let Some(updated) = edited.updated() {
-            self.events.publish(&updated, cx).await;
-        }
         Ok(())
     }
 
     pub async fn archive(&self, id: NoteId, cx: &Context) -> DomainResult<()> {
-        let archived = self.notes.change(&id, Note::archive).await?;
-        self.events.publish(&archived.outcome, cx).await;
+        self.notes
+            .change(&id, Note::archive)
+            .raising(&self.events, cx)
+            .await?;
         Ok(())
     }
 

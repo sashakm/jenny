@@ -1,6 +1,6 @@
 # ADR-004: Outbound Ports
 
-**Status:** Accepted — "no generic repository", serde and static dispatch superseded by ADR-012; "storage has no port" by ADR-013; the runtime registers the readiness check of a pool it built (ADR-015)
+**Status:** Accepted — "no generic repository", serde and static dispatch superseded by ADR-012; "storage has no port" by ADR-013; the runtime registers the readiness check of a pool it built (ADR-015); the dual-write gap is closed by the outbox (ADR-016)
 **Date:** 2026-08-24
 
 ## Context

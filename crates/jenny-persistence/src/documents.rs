@@ -2,15 +2,18 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use jenny_core::domain::{Aggregate, Criteria, DomainError, DomainResult, ValueKind};
+use jenny_core::port::outbound::EventEnvelope;
 use jenny_core::port::store::{Loaded, Store, Version, encode, expect_version};
 use serde_json::Value;
-use sqlx::{AssertSqlSafe, PgPool};
+use sqlx::{AssertSqlSafe, PgConnection, PgPool};
 
 use crate::criteria::{Columns, SqlCriteria};
 use crate::error::RepositoryError;
+use crate::outbox::{self, OutboxState};
 
 /// Aggregates of one kind, one row each: `id`, `version`, and the aggregate as `jsonb`.
 ///
@@ -49,6 +52,9 @@ pub struct PgDocuments<A> {
     /// Already quoted.
     table: String,
     columns: Columns,
+    /// Set when handed out by a [`Postgres`](crate::Postgres) handle, which may enable
+    /// the outbox later; a store built with [`new`](Self::new) has none.
+    outbox: Option<Arc<OutboxState>>,
     kind: PhantomData<fn() -> A>,
 }
 
@@ -67,8 +73,14 @@ impl<A: Aggregate> PgDocuments<A> {
             pool,
             table: format!("\"{table}\""),
             columns: Columns::new("id", []),
+            outbox: None,
             kind: PhantomData,
         }
+    }
+
+    pub(crate) fn with_outbox(mut self, outbox: Arc<OutboxState>) -> Self {
+        self.outbox = Some(outbox);
+        self
     }
 
     /// The attribute paths a listing may sort and filter on, and what each holds.
@@ -110,13 +122,86 @@ impl<A: Aggregate> PgDocuments<A> {
 
     /// The version currently stored under `key`, if anything is.
     async fn current_version(&self, key: &str) -> DomainResult<Option<Version>> {
+        let mut connection = self.pool.acquire().await.map_err(database)?;
+        self.current_version_on(&mut connection, key).await
+    }
+
+    async fn current_version_on(
+        &self,
+        connection: &mut PgConnection,
+        key: &str,
+    ) -> DomainResult<Option<Version>> {
         let statement = format!("SELECT version FROM {} WHERE id = $1", self.table);
         let version: Option<i64> = sqlx::query_scalar(AssertSqlSafe(statement))
             .bind(key)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *connection)
             .await
             .map_err(database)?;
         Ok(version.map(stored_version))
+    }
+
+    /// The outbox, when there is one and `events` are worth a transaction for.
+    fn recording(&self, events: &[EventEnvelope]) -> Option<&Arc<OutboxState>> {
+        self.outbox
+            .as_ref()
+            .filter(|outbox| outbox.is_enabled() && !events.is_empty())
+    }
+
+    async fn insert_on(&self, connection: &mut PgConnection, aggregate: &A) -> DomainResult<()> {
+        let key = aggregate.id().to_string();
+        let statement = format!(
+            "INSERT INTO {} (id, version, document) VALUES ($1, 1, $2) \
+             ON CONFLICT (id) DO NOTHING",
+            self.table
+        );
+        let inserted = sqlx::query(AssertSqlSafe(statement))
+            .bind(&key)
+            .bind(encode(aggregate)?)
+            .execute(&mut *connection)
+            .await
+            .map_err(database)?;
+        if inserted.rows_affected() == 0 {
+            return Err(DomainError::conflict(format!(
+                "{} {key} already exists",
+                A::KIND
+            )));
+        }
+        Ok(())
+    }
+
+    /// Write back `aggregate` if it is still at the version it was read at, and return
+    /// the version it is at now.
+    async fn save_on(
+        &self,
+        connection: &mut PgConnection,
+        aggregate: &Loaded<A>,
+    ) -> DomainResult<Version> {
+        let key = aggregate.id().to_string();
+        let read_at = aggregate.version();
+        let statement = format!(
+            "UPDATE {} SET version = version + 1, document = $3, updated_at = now() \
+             WHERE id = $1 AND version = $2 RETURNING version",
+            self.table
+        );
+        let saved: Option<i64> = sqlx::query_scalar(AssertSqlSafe(statement))
+            .bind(&key)
+            .bind(database_version(read_at))
+            .bind(aggregate.document()?)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(database)?;
+        match saved {
+            Some(version) => Ok(stored_version(version)),
+            // Nothing matched: either it is gone, or someone saved since it was read.
+            None => match self.current_version_on(connection, &key).await? {
+                None => Err(DomainError::not_found()),
+                Some(current) => Err(DomainError::conflict(format!(
+                    "{} {key} was changed by someone else since it was read \
+                     (read at version {read_at}, now at {current})",
+                    A::KIND
+                ))),
+            },
+        }
     }
 }
 
@@ -134,54 +219,50 @@ impl<A: Aggregate> Store<A> for PgDocuments<A> {
     }
 
     async fn insert(&self, aggregate: A) -> DomainResult<Loaded<A>> {
-        let key = aggregate.id().to_string();
-        let statement = format!(
-            "INSERT INTO {} (id, version, document) VALUES ($1, 1, $2) \
-             ON CONFLICT (id) DO NOTHING",
-            self.table
-        );
-        let inserted = sqlx::query(AssertSqlSafe(statement))
-            .bind(&key)
-            .bind(encode(&aggregate)?)
-            .execute(&self.pool)
-            .await
-            .map_err(database)?;
-        if inserted.rows_affected() == 0 {
-            return Err(DomainError::conflict(format!(
-                "{} {key} already exists",
-                A::KIND
-            )));
-        }
+        let mut connection = self.pool.acquire().await.map_err(database)?;
+        self.insert_on(&mut connection, &aggregate).await?;
         Loaded::written(aggregate, Version::FIRST)
     }
 
     async fn save(&self, aggregate: Loaded<A>) -> DomainResult<Loaded<A>> {
-        let key = aggregate.id().to_string();
-        let read_at = aggregate.version();
-        let statement = format!(
-            "UPDATE {} SET version = version + 1, document = $3, updated_at = now() \
-             WHERE id = $1 AND version = $2 RETURNING version",
-            self.table
-        );
-        let saved: Option<i64> = sqlx::query_scalar(AssertSqlSafe(statement))
-            .bind(&key)
-            .bind(database_version(read_at))
-            .bind(aggregate.document()?)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(database)?;
-        match saved {
-            Some(version) => Loaded::written(aggregate.into_inner(), stored_version(version)),
-            // Nothing matched: either it is gone, or someone saved since it was read.
-            None => match self.current_version(&key).await? {
-                None => Err(DomainError::not_found()),
-                Some(current) => Err(DomainError::conflict(format!(
-                    "{} {key} was changed by someone else since it was read \
-                     (read at version {read_at}, now at {current})",
-                    A::KIND
-                ))),
-            },
-        }
+        let mut connection = self.pool.acquire().await.map_err(database)?;
+        let version = self.save_on(&mut connection, &aggregate).await?;
+        Loaded::written(aggregate.into_inner(), version)
+    }
+
+    async fn insert_raising(
+        &self,
+        aggregate: A,
+        events: Vec<EventEnvelope>,
+    ) -> DomainResult<(Loaded<A>, Vec<EventEnvelope>)> {
+        let Some(outbox) = self.recording(&events) else {
+            return Ok((self.insert(aggregate).await?, events));
+        };
+        let mut transaction = self.pool.begin().await.map_err(database)?;
+        self.insert_on(&mut transaction, &aggregate).await?;
+        outbox::record(&mut transaction, &events).await?;
+        transaction.commit().await.map_err(database)?;
+        outbox.wake();
+        Ok((Loaded::written(aggregate, Version::FIRST)?, Vec::new()))
+    }
+
+    async fn save_raising(
+        &self,
+        aggregate: Loaded<A>,
+        events: Vec<EventEnvelope>,
+    ) -> DomainResult<(Loaded<A>, Vec<EventEnvelope>)> {
+        let Some(outbox) = self.recording(&events) else {
+            return Ok((self.save(aggregate).await?, events));
+        };
+        let mut transaction = self.pool.begin().await.map_err(database)?;
+        let version = self.save_on(&mut transaction, &aggregate).await?;
+        outbox::record(&mut transaction, &events).await?;
+        transaction.commit().await.map_err(database)?;
+        outbox.wake();
+        Ok((
+            Loaded::written(aggregate.into_inner(), version)?,
+            Vec::new(),
+        ))
     }
 
     async fn remove(&self, id: &A::Id, expected: Option<Version>) -> DomainResult<A> {

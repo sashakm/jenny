@@ -516,16 +516,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_change_at_a_version_that_has_moved_on_is_stale() {
+    async fn a_change_expecting_a_version_that_has_moved_on_is_stale() {
         let notes = store();
         notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
         notes.change(&1, Note::archive).await.unwrap();
 
         let err = notes
-            .change_at(&1, Some(Version::FIRST), |note| {
+            .change(&1, |note| {
                 note.priority = 9;
                 Ok(())
             })
+            .expecting(Some(Version::FIRST))
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Stale { .. }), "{err}");
@@ -534,13 +535,161 @@ mod tests {
 
         let current = notes.load(&1).await.unwrap().version();
         notes
-            .change_at(&1, Some(current), |note| {
+            .change(&1, |note| {
                 note.priority = 9;
                 Ok(())
             })
+            .expecting(Some(current))
             .await
             .unwrap();
         assert_eq!(notes.load(&1).await.unwrap().priority, 9);
+    }
+
+    #[derive(Debug, Serialize)]
+    struct Archived {
+        id: u32,
+    }
+
+    impl crate::domain::DomainEvent for Archived {
+        fn name(&self) -> &str {
+            "note.archived"
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Created {
+        id: u32,
+    }
+
+    impl crate::domain::DomainEvent for Created {
+        fn name(&self) -> &str {
+            "note.created"
+        }
+    }
+
+    fn archive_raising(note: &mut Note) -> DomainResult<Archived> {
+        note.archive()?;
+        Ok(Archived { id: note.id })
+    }
+
+    fn recorder() -> (
+        std::sync::Arc<crate::testing::RecordedEvents>,
+        crate::port::Events,
+    ) {
+        let recorded = std::sync::Arc::new(crate::testing::RecordedEvents::default());
+        let events = crate::port::Events::new(recorded.clone());
+        (recorded, events)
+    }
+
+    #[tokio::test]
+    async fn a_raised_event_is_published_after_the_save_and_not_without_it() {
+        let notes = store();
+        let (recorded, events) = recorder();
+        let cx = crate::port::Context::new();
+        notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
+
+        let archived = notes
+            .change(&1, archive_raising)
+            .raising(&events, &cx)
+            .await
+            .unwrap();
+        assert_eq!(archived.outcome.id, 1);
+        assert_eq!(recorded.names(), ["note.archived"]);
+        assert_eq!(
+            recorded.envelopes()[0].correlation_id(),
+            Some(cx.request_id())
+        );
+
+        // The second archive fails in the domain: nothing saved, nothing published.
+        assert!(
+            notes
+                .change(&1, archive_raising)
+                .raising(&events, &cx)
+                .await
+                .is_err()
+        );
+        assert_eq!(recorded.names().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stale_expectation_publishes_nothing() {
+        let notes = store();
+        let (recorded, events) = recorder();
+        let cx = crate::port::Context::new();
+        notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
+        notes.change(&1, Note::archive).await.unwrap();
+
+        let err = notes
+            .change(&1, |note| {
+                note.priority = 1;
+                Ok(Archived { id: note.id })
+            })
+            .expecting(Some(Version::FIRST))
+            .raising(&events, &cx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Stale { .. }), "{err}");
+        assert!(recorded.names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn announcing_changes_publishes_the_patch_when_there_is_one() {
+        let notes = store();
+        let (recorded, events) = recorder();
+        let cx = crate::port::Context::new();
+        notes.insert(Note::new(1, "Shopping", 2)).await.unwrap();
+
+        notes
+            .change(&1, |note| {
+                note.priority = 7;
+                Ok(())
+            })
+            .raising(&events, &cx)
+            .announcing_changes()
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded.payloads("note.updated"),
+            [json!({
+                "id": "1",
+                "version": 2,
+                "changes": [{ "op": "replace", "path": "/priority", "value": 7 }],
+            })]
+        );
+
+        // Nothing changed, so there is no patch to announce.
+        notes
+            .change(&1, |_| Ok(()))
+            .raising(&events, &cx)
+            .announcing_changes()
+            .await
+            .unwrap();
+        assert_eq!(recorded.names().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_added_aggregate_is_published_with_what_created_it() {
+        let notes = store();
+        let (recorded, events) = recorder();
+        let cx = crate::port::Context::new();
+
+        let added = notes
+            .add(Note::new(1, "Shopping", 2), Created { id: 1 })
+            .raising(&events, &cx)
+            .await
+            .unwrap();
+        assert_eq!(added.version(), Version::FIRST);
+        assert_eq!(recorded.names(), ["note.created"]);
+
+        assert!(matches!(
+            notes
+                .add(Note::new(1, "Again", 1), Created { id: 1 })
+                .raising(&events, &cx)
+                .await
+                .unwrap_err(),
+            DomainError::Conflict { .. }
+        ));
+        assert_eq!(recorded.names().len(), 1, "a failed insert raises nothing");
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use jenny_core::domain::Aggregate;
+use jenny_core::port::outbound::EventPublisher;
 use serde::Deserialize;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
@@ -14,6 +15,7 @@ use sqlx::{AssertSqlSafe, PgPool};
 
 use crate::documents::PgDocuments;
 use crate::health::DatabaseCheck;
+use crate::outbox::{self, OutboxRelay, OutboxState};
 use crate::table::{PgTable, TableShape};
 
 /// The `persistence.postgres` configuration section.
@@ -46,6 +48,11 @@ pub struct PostgresConfig {
     /// Defaults to `true`; turn it off where the schema is owned by migrations alone,
     /// and create them from [`PgDocuments::schema`].
     pub create_tables: bool,
+    /// Commit the events a change raises in the same transaction as the change, and
+    /// have the runtime forward them to the event bus (ADR-016). Defaults to `false`;
+    /// needs the `messaging` feature, or [`Postgres::with_outbox`] called with a
+    /// publisher of your own.
+    pub outbox: bool,
 }
 
 impl Default for PostgresConfig {
@@ -56,6 +63,7 @@ impl Default for PostgresConfig {
             min_connections: 0,
             acquire_timeout_seconds: 5,
             create_tables: true,
+            outbox: false,
         }
     }
 }
@@ -68,6 +76,7 @@ impl fmt::Debug for PostgresConfig {
             .field("min_connections", &self.min_connections)
             .field("acquire_timeout_seconds", &self.acquire_timeout_seconds)
             .field("create_tables", &self.create_tables)
+            .field("outbox", &self.outbox)
             .finish()
     }
 }
@@ -102,6 +111,7 @@ struct Inner {
     /// Every table store handed out, checked against the catalogue before serving.
     shapes: Mutex<Vec<Arc<TableShape>>>,
     migrator: Mutex<Option<Arc<Migrator>>>,
+    outbox: Arc<OutboxState>,
 }
 
 impl Postgres {
@@ -135,6 +145,7 @@ impl Postgres {
                 tables: Mutex::new(Vec::new()),
                 shapes: Mutex::new(Vec::new()),
                 migrator: Mutex::new(None),
+                outbox: Arc::default(),
             }),
         }
     }
@@ -153,7 +164,8 @@ impl Postgres {
 
     /// [`documents`](Self::documents) in a table of your choosing.
     pub fn documents_in<A: Aggregate>(&self, table: &str) -> PgDocuments<A> {
-        let store = PgDocuments::new(self.inner.pool.clone(), table);
+        let store =
+            PgDocuments::new(self.inner.pool.clone(), table).with_outbox(self.inner.outbox.clone());
         self.inner
             .tables
             .lock()
@@ -175,7 +187,38 @@ impl Postgres {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(shape.clone());
-        PgTable::with_shape(self.inner.pool.clone(), shape)
+        PgTable::with_shape(self.inner.pool.clone(), shape).with_outbox(self.inner.outbox.clone())
+    }
+
+    /// Commit the events raised with a change in the same transaction as the change,
+    /// in a `jenny_outbox` table, and forward them to `publisher` from there.
+    ///
+    /// Applies to every store this handle hands out, whenever they were handed out.
+    /// The runtime calls this with the event bus when `persistence.postgres.outbox` is
+    /// on, creates the table in [`prepare`](Self::prepare), and runs the
+    /// [`relay`](Self::relay) until shutdown. Only the first call takes effect.
+    pub fn with_outbox(&self, publisher: Arc<dyn EventPublisher>) -> &Self {
+        if !self.inner.outbox.enable(publisher) {
+            tracing::warn!("the outbox was already enabled; keeping its first publisher");
+        }
+        self
+    }
+
+    /// Whether [`with_outbox`](Self::with_outbox) was called.
+    pub fn has_outbox(&self) -> bool {
+        self.inner.outbox.is_enabled()
+    }
+
+    /// The relay forwarding recorded events, when the outbox is enabled.
+    pub fn relay(&self) -> Option<OutboxRelay> {
+        self.has_outbox()
+            .then(|| OutboxRelay::new(self.inner.pool.clone(), self.inner.outbox.clone()))
+    }
+
+    /// The `CREATE TABLE IF NOT EXISTS` for the outbox, for a migration of your own
+    /// when `create_tables` is off.
+    pub fn outbox_schema() -> &'static str {
+        outbox::SCHEMA
     }
 
     /// Run these migrations in [`prepare`](Self::prepare), before any table is created.
@@ -236,12 +279,15 @@ impl Postgres {
     }
 
     async fn create_document_tables(&self) -> anyhow::Result<()> {
-        let tables = self
+        let mut tables = self
             .inner
             .tables
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        if self.has_outbox() {
+            tables.push(outbox::SCHEMA.to_string());
+        }
         if tables.is_empty() {
             return Ok(());
         }

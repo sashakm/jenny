@@ -113,11 +113,16 @@ test-postgres:
     sleep 1
   done
   export JENNY_TEST_POSTGRES_URL="postgres://jenny:jenny@127.0.0.1:${port}/jenny"
-  cargo test -p jenny-persistence --test postgres_test
-  cargo test -p jenny-server --features persistence --lib -- postgres configured_pool
-  # The example's end-to-end suite, with its notes in Postgres instead of memory.
+  cargo test -p jenny-persistence --tests
+  cargo test -p jenny-server --features persistence --lib -- postgres configured_pool outbox
+  cargo test -p jenny-server --features persistence,messaging --lib -- outbox
+  # The example's end-to-end suite, with its notes in Postgres instead of memory, then
+  # with their events going through the outbox to the bus.
   JENNY__PERSISTENCE__POSTGRES__URL="$JENNY_TEST_POSTGRES_URL" \
       cargo test -p jenny --features server,persistence --example basic
+  JENNY__PERSISTENCE__POSTGRES__URL="$JENNY_TEST_POSTGRES_URL" \
+  JENNY__PERSISTENCE__POSTGRES__OUTBOX=true \
+      cargo test -p jenny --features server,persistence,messaging --example basic
 
 [doc('doc tests, then all tests under coverage (writes coverage.xml)')]
 ci-test: doc-tests

@@ -1,6 +1,6 @@
 # ADR-014: JSON Patch and Conditional Requests
 
-**Status:** Accepted — implemented
+**Status:** Accepted — implemented; `change_at(id, expected, f)` is now `change(id, f).expecting(expected)` (ADR-016)
 **Date:** 2026-11-18
 
 ## Context

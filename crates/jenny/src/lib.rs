@@ -36,8 +36,10 @@
 //! #[jenny::use_cases]                     // a span and a measurement per method
 //! impl Notes {
 //!     pub async fn archive(&self, id: NoteId, cx: &Context) -> DomainResult<()> {
-//!         let archived = self.notes.change(&id, Note::archive).await?;  // load, change, save
-//!         self.events.publish(&archived.outcome, cx).await;
+//!         self.notes
+//!             .change(&id, Note::archive)       // load, change, save with a version check
+//!             .raising(&self.events, cx)        // and publish what it raised, with the write
+//!             .await?;
 //!         Ok(())
 //!     }
 //! }

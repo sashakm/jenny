@@ -37,13 +37,15 @@ pub mod use_case;
 #[doc(inline)]
 pub use context::{Context, Extensions};
 #[doc(inline)]
-pub use events::Events;
+pub use events::{Events, Raised};
 #[doc(inline)]
 pub use outbound::{
     AccessRequest, Authenticator, Authorizer, EventEnvelope, EventPublisher, HealthCheck,
     PublishError, Resource,
 };
 #[doc(inline)]
-pub use store::{Changed, Loaded, Store, StoreExt, Updated, Version};
+pub use store::{
+    Add, Change, Changed, Loaded, RaisingAdd, RaisingChange, Store, StoreExt, Updated, Version,
+};
 #[doc(inline)]
 pub use use_case::{UseCaseError, UseCaseObserver, observe_use_cases};

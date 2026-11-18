@@ -18,7 +18,7 @@
 //! }
 //!
 //! /// …and `If-Match: "3"` on the way back in, handed to the use case as the version
-//! /// its `change_at` must find.
+//! /// its `change(…).expecting(…)` must find.
 //! async fn update(
 //!     State(notes): State<Notes>,
 //!     Path(id): Path<u32>,

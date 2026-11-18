@@ -164,6 +164,9 @@ pub struct ServerParts {
     /// The Postgres pool, closed once requests and listeners are done with it.
     #[cfg(feature = "persistence")]
     postgres: Option<jenny_persistence::Postgres>,
+    /// The outbox relay and the switch that stops it after one last pass.
+    #[cfg(feature = "persistence")]
+    relay: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)>,
 }
 
 impl ServerParts {
@@ -192,6 +195,8 @@ impl ServerParts {
             broker,
             #[cfg(feature = "persistence")]
             postgres,
+            #[cfg(feature = "persistence")]
+            relay,
         } = self;
 
         let mut requested = shutdown.subscribe();
@@ -236,6 +241,13 @@ impl ServerParts {
                 Ok(())
             }
         };
+        // The relay forwards what the last requests committed, into the bus, so it stops
+        // after them and before the broker.
+        #[cfg(feature = "persistence")]
+        if let Some((stop, handle)) = relay {
+            let _ = stop.send(true);
+            let _ = handle.await;
+        }
         // Stopping the broker waits for listeners that are still handling an event, so
         // a graceful shutdown does not drop side effects that were already in flight.
         #[cfg(feature = "messaging")]
@@ -420,6 +432,10 @@ impl JennyServer {
     /// `None` is what makes "it only needs configuration" work: the same build keeps its
     /// data in memory until a URL is configured.
     ///
+    /// With `persistence.postgres.outbox`, the events a change raises are committed with
+    /// it and forwarded to the event bus by a relay the runtime runs until shutdown
+    /// (ADR-016).
+    ///
     /// ```no_run
     /// # use std::sync::Arc;
     /// # use jenny_core::domain::{Aggregate, ValueKind};
@@ -443,8 +459,19 @@ impl JennyServer {
         if self.postgres.is_none() && self.config.persistence.postgres.url.is_some() {
             let postgres =
                 jenny_persistence::Postgres::connect_lazy(&self.config.persistence.postgres)?;
+            if self.config.persistence.postgres.outbox {
+                #[cfg(feature = "messaging")]
+                postgres.with_outbox(self.events()?);
+                #[cfg(not(feature = "messaging"))]
+                anyhow::bail!(
+                    "persistence.postgres.outbox forwards to the event bus, which needs the \
+                     `messaging` feature; without it, call `Postgres::with_outbox` with a \
+                     publisher of your own"
+                );
+            }
             info!(
                 max_connections = self.config.persistence.postgres.max_connections,
+                outbox = postgres.has_outbox(),
                 "postgres pool configured"
             );
             self.postgres = Some(postgres);
@@ -533,6 +560,16 @@ impl JennyServer {
             info!("postgres schema prepared");
             checks.push(Arc::new(postgres.health_check()));
         }
+        // Started now, so events committed by the first request go out at once; stopped
+        // in `serve` only once the last request is done.
+        #[cfg(feature = "persistence")]
+        let relay = postgres.as_ref().and_then(|p| p.relay()).map(|relay| {
+            let (stop, mut stopping) = watch::channel(false);
+            let handle = tokio::spawn(relay.run(async move {
+                let _ = stopping.wait_for(|stop| *stop).await;
+            }));
+            (stop, handle)
+        });
 
         #[cfg(feature = "messaging")]
         for adapter in &messaging_adapters {
@@ -700,6 +737,8 @@ impl JennyServer {
             broker,
             #[cfg(feature = "persistence")]
             postgres,
+            #[cfg(feature = "persistence")]
+            relay,
         })
     }
 
@@ -1210,6 +1249,118 @@ mod tests {
             seen.lock().unwrap().as_slice(),
             ["test-service.note.created"]
         );
+    }
+
+    #[cfg(all(feature = "persistence", not(feature = "messaging")))]
+    #[tokio::test]
+    async fn an_outbox_without_a_bus_to_forward_to_is_a_wiring_error() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.persistence.postgres.url = Some("postgres://nobody@127.0.0.1:1/x".into());
+        server.config.persistence.postgres.outbox = true;
+        let err = server.postgres().unwrap_err();
+        assert!(err.to_string().contains("messaging"), "{err}");
+    }
+
+    /// Needs `JENNY_TEST_POSTGRES_URL`.
+    #[cfg(all(feature = "persistence", feature = "messaging"))]
+    #[tokio::test]
+    async fn with_the_outbox_a_committed_event_reaches_the_bus_through_the_relay() {
+        use jenny_core::port::{Context, Events, StoreExt};
+        use std::sync::Mutex;
+        use topmesys::{Delivery, EventConsumer, HandlerError, Subscriptions};
+
+        let url = match std::env::var("JENNY_TEST_POSTGRES_URL") {
+            Ok(url) => url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("JENNY_TEST_POSTGRES_URL must be set in CI")
+            }
+            Err(_) => return eprintln!("skipping: JENNY_TEST_POSTGRES_URL is not set"),
+        };
+
+        #[derive(Debug)]
+        struct Recorder(Arc<Mutex<Vec<String>>>);
+
+        #[async_trait::async_trait]
+        impl EventConsumer for Recorder {
+            type Topic = ();
+
+            fn subscriptions(&self) -> Subscriptions<()> {
+                "outbox-test.note.*".into()
+            }
+
+            async fn handle_event(&self, _: &(), delivery: &Delivery) -> Result<(), HandlerError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(delivery.message().topic().text().to_string());
+                Ok(())
+            }
+        }
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Note {
+            id: u32,
+        }
+        impl jenny_core::domain::Aggregate for Note {
+            type Id = u32;
+            const KIND: &'static str = "note";
+            fn id(&self) -> u32 {
+                self.id
+            }
+        }
+        #[derive(serde::Serialize)]
+        struct NoteCreated {
+            id: u32,
+        }
+        impl jenny_core::domain::DomainEvent for NoteCreated {
+            fn name(&self) -> &str {
+                "note.created"
+            }
+        }
+
+        let mut server = server_with("127.0.0.1:0");
+        server.config.telemetry.service_name = "outbox-test".to_string();
+        server.config.persistence.postgres.url = Some(url);
+        server.config.persistence.postgres.outbox = true;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        server.subscribe(Recorder(seen.clone())).unwrap();
+
+        let postgres = server.postgres().unwrap().expect("a URL is configured");
+        assert!(postgres.has_outbox());
+        let table = format!("server_outbox_{}", uuid::Uuid::new_v4().simple());
+        let store = postgres.documents_in::<Note>(&table);
+        let events = Events::new(server.events().unwrap());
+
+        let parts = server.register(notes()).unwrap().bind().await.unwrap();
+        let handle = parts.handle();
+        let serving = tokio::spawn(parts.serve());
+
+        store
+            .add(Note { id: 1 }, NoteCreated { id: 1 })
+            .raising(&events, &Context::new())
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            seen.lock()
+                .unwrap()
+                .contains(&"outbox-test.note.created".to_string()),
+            "the relay forwarded the committed event to the bus"
+        );
+
+        jenny_persistence::sqlx::query(jenny_persistence::sqlx::AssertSqlSafe(format!(
+            "DROP TABLE \"{table}\""
+        )))
+        .execute(postgres.pool())
+        .await
+        .unwrap();
+        handle.shutdown();
+        serving.await.unwrap().unwrap();
     }
 
     #[cfg(feature = "telemetry-prometheus")]

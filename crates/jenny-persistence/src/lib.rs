@@ -7,8 +7,10 @@
 //! section ([`PostgresConfig`]). [`Postgres::documents`] hands out a [`PgDocuments`], a
 //! [`Store<A>`](jenny_core::port::Store) that keeps each aggregate as one `jsonb` row
 //! and needs nothing but the aggregate's serde derives; [`Postgres::table`] hands out a
-//! [`PgTable`] over a table of your own with a column per field. The runtime builds the pool,
-//! creates the tables, runs your migrations and registers a readiness check:
+//! [`PgTable`] over a table of your own with a column per field. The runtime builds the
+//! pool, creates the tables, runs your migrations and registers a readiness check. With
+//! [`Postgres::with_outbox`] — `persistence.postgres.outbox: true` — events raised with a
+//! change are committed in the same transaction, and an [`OutboxRelay`] forwards them:
 //!
 //! ```ignore
 //! // in `build`, the composition root
@@ -37,6 +39,7 @@ pub mod criteria;
 mod documents;
 mod error;
 pub mod health;
+mod outbox;
 mod postgres;
 mod query_format;
 mod table;
@@ -51,6 +54,8 @@ pub use error::*;
 /// one an in-memory store's allowlist uses.
 pub use jenny_core::domain::ValueKind;
 pub use jenny_macros::QueryFormat;
+#[doc(inline)]
+pub use outbox::OutboxRelay;
 #[doc(inline)]
 pub use postgres::{Postgres, PostgresConfig};
 #[doc(inline)]

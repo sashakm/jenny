@@ -1,6 +1,6 @@
 # ADR-015: The Postgres Document Store and the Runtime's Pool
 
-**Status:** Accepted — document and table modes implemented; the outbox not implemented
+**Status:** Accepted — implemented; the outbox is ADR-016
 **Date:** 2026-11-18
 
 ## Context
@@ -144,7 +144,5 @@ runs a Postgres service for its test job, plus a step running the example agains
 
 ## Not built yet
 
-- The transactional outbox, which needs a store write and its events in one
-  transaction.
 - Migrations in the scaffold: a generated project can call `Postgres::migrate`, but
   ships no `migrations/` directory yet.

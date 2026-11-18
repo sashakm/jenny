@@ -19,7 +19,8 @@
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the background.
 //! - **Postgres** — with the `persistence` feature, a pool from `persistence.postgres`
 //!   ([`JennyServer::postgres`]), migrated, its document tables created and its
-//!   readiness checked before the socket is bound.
+//!   readiness checked before the socket is bound; with `outbox: true`, the relay that
+//!   forwards committed events to the bus, until shutdown.
 //! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
 //!
 //! ### No injection container
