@@ -246,9 +246,13 @@ impl<A> fmt::Debug for PgDocuments<A> {
 /// `author.name` as `text` → `(document #>> '{author,name}')`, cast for other kinds.
 fn expression(path: &str, kind: ValueKind) -> String {
     let pointer = path.split('.').collect::<Vec<_>>().join(",");
-    let text = format!("(document #>> '{{{pointer}}}')");
+    cast_text(&format!("(document #>> '{{{pointer}}}')"), kind)
+}
+
+/// A `text` expression — a value pulled out of `jsonb` — cast to what `kind` holds.
+pub(crate) fn cast_text(text: &str, kind: ValueKind) -> String {
     match kind {
-        ValueKind::Text => text,
+        ValueKind::Text => text.to_string(),
         ValueKind::Integer => format!("({text}::bigint)"),
         ValueKind::Float => format!("({text}::double precision)"),
         ValueKind::Bool => format!("({text}::boolean)"),
@@ -259,7 +263,7 @@ fn expression(path: &str, kind: ValueKind) -> String {
 
 /// Lower-case letters, digits and underscores, starting with a letter: safe to quote
 /// and use as a table name without surprises about case folding.
-fn is_identifier(name: &str) -> bool {
+pub(crate) fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
@@ -267,7 +271,7 @@ fn is_identifier(name: &str) -> bool {
 }
 
 /// A JSON field name safe to write into a `#>>` path literal.
-fn is_field(segment: &str) -> bool {
+pub(crate) fn is_field(segment: &str) -> bool {
     !segment.is_empty()
         && segment
             .chars()

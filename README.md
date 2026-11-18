@@ -260,7 +260,8 @@ The runtime does the rest before it binds its socket. It runs your migrations
 (`postgres.migrate(sqlx::migrate!())`), creates the document tables under an advisory
 lock so replicas can start together, and adds `postgres` to `/j/health/ready`. Every
 save is a compare-and-swap on the version; listings filter, sort and page inside the
-database. MongoDB, NATS KV, S3-compatible object storage and Apache AGE follow
+database. For data other systems query relationally, `postgres.table::<Note>("notes")`
+is the same store over a table of your own with a column per field. MongoDB, NATS KV, S3-compatible object storage and Apache AGE follow
 (ADR-013).
 
 ## Scaffolding

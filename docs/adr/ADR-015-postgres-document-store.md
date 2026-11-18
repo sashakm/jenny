@@ -1,6 +1,6 @@
 # ADR-015: The Postgres Document Store and the Runtime's Pool
 
-**Status:** Accepted — document mode implemented; table mode and the outbox not implemented
+**Status:** Accepted — document and table modes implemented; the outbox not implemented
 **Date:** 2026-11-18
 
 ## Context
@@ -100,6 +100,23 @@ Semantics still differ slightly between stores, as ADR-010 anticipated: text equ
 case-sensitive in Postgres and not in memory, and ordering follows the database's
 collation.
 
+### The table mode reads and writes through Postgres's own record conversion
+
+`Postgres::table::<A>("notes")` is a `PgTable<A>` over a table the service creates in a
+migration: a column per top-level field of the aggregate, same names, plus
+`version bigint`. Rows are read with `to_jsonb(t)` and written with
+`jsonb_populate_record(NULL::notes, $1)`, so Postgres converts between the aggregate's
+serde form and the column types, and there is still no mapping code. The id is matched
+through the same record conversion, so a `uuid` or `integer` key works without the store
+knowing its type.
+
+The column list comes from `information_schema.columns`, read in `prepare` after the
+migrations, so a missing table or `version` column stops the service at startup. An
+aggregate field with no column is refused on the first write: storing the rest and
+dropping it would be silent data loss. Columns the aggregate does not have
+(`created_at DEFAULT now()`) are left to the database and do not count as changes.
+Identifiers come from the catalogue or from code, and are always quoted.
+
 ### Database tests run where a database is
 
 Tests that need Postgres read `JENNY_TEST_POSTGRES_URL`:
@@ -127,8 +144,6 @@ runs a Postgres service for its test job, plus a step running the example agains
 
 ## Not built yet
 
-- The table mode of ADR-013, for aggregates whose fields other systems query
-  relationally.
 - The transactional outbox, which needs a store write and its events in one
   transaction.
 - Migrations in the scaffold: a generated project can call `Postgres::migrate`, but

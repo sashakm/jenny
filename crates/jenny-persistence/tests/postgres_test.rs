@@ -374,3 +374,238 @@ async fn preparing_twice_and_from_several_replicas_is_harmless() {
     assert!(db.postgres.health_check().check().await.is_ok());
     db.drop_table().await;
 }
+
+// --- PgTable: a table of your own, a column per field -------------------------------
+
+/// A table store over a freshly created table with a column per field of `Note`, plus
+/// one the aggregate does not have, as a real schema would.
+struct TableFixture {
+    postgres: Postgres,
+    notes: jenny_persistence::PgTable<Note>,
+    table: String,
+}
+
+impl TableFixture {
+    async fn new() -> Option<Self> {
+        let url = database_url()?;
+        let postgres = Postgres::connect_lazy(&PostgresConfig {
+            url: Some(url),
+            ..Default::default()
+        })
+        .unwrap();
+        let table = format!("note_table_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE TABLE \"{table}\" (
+                id         integer     PRIMARY KEY,
+                version    bigint      NOT NULL,
+                title      text        NOT NULL,
+                priority   bigint      NOT NULL,
+                archived   boolean     NOT NULL,
+                author     jsonb       NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now()
+            )"
+        )))
+        .execute(postgres.pool())
+        .await
+        .unwrap();
+        let notes = postgres.table::<Note>(&table).queryable([
+            ("title", ValueKind::Text),
+            ("priority", ValueKind::Integer),
+            ("archived", ValueKind::Bool),
+            ("author.name", ValueKind::Text),
+        ]);
+        postgres.prepare().await.unwrap();
+        Some(Self {
+            postgres,
+            notes,
+            table,
+        })
+    }
+
+    async fn drop_table(self) {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP TABLE \"{}\"",
+            self.table
+        )))
+        .execute(self.postgres.pool())
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_table_store_round_trips_through_real_columns() {
+    let Some(db) = TableFixture::new().await else {
+        return;
+    };
+    db.notes
+        .insert(Note::new(1, "Shopping", 2, "Ada"))
+        .await
+        .unwrap();
+
+    let found = db.notes.load(&1).await.unwrap();
+    assert_eq!(*found, Note::new(1, "Shopping", 2, "Ada"));
+    assert_eq!(found.version(), Version::FIRST);
+
+    // The columns are the fields: other systems can query them relationally.
+    let (title, author): (String, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT title, author ->> 'name' FROM \"{}\" WHERE id = 1",
+        db.table
+    )))
+    .fetch_one(db.postgres.pool())
+    .await
+    .unwrap();
+    assert_eq!((title.as_str(), author.as_str()), ("Shopping", "Ada"));
+
+    // A column the aggregate does not have is not a change.
+    let unchanged = db.notes.change(&1, |_| Ok(())).await.unwrap();
+    assert!(unchanged.changes.is_empty(), "{:?}", unchanged.changes);
+    assert_eq!(db.notes.load(&1).await.unwrap().version(), Version::FIRST);
+    db.drop_table().await;
+}
+
+#[tokio::test]
+async fn a_table_store_refuses_stale_writes_and_conditional_removals() {
+    let Some(db) = TableFixture::new().await else {
+        return;
+    };
+    db.notes
+        .insert(Note::new(1, "Shopping", 2, "Ada"))
+        .await
+        .unwrap();
+    let stale = db.notes.load(&1).await.unwrap();
+
+    let archived = db.notes.change(&1, Note::archive).await.unwrap();
+    assert_eq!(archived.aggregate.version().get(), 2);
+    assert!(db.notes.load(&1).await.unwrap().archived);
+
+    assert!(matches!(
+        db.notes.save(stale).await.unwrap_err(),
+        DomainError::Conflict { .. }
+    ));
+    assert!(matches!(
+        db.notes.remove(&1, Some(Version::FIRST)).await.unwrap_err(),
+        DomainError::Stale { .. }
+    ));
+    assert!(matches!(
+        db.notes
+            .insert(Note::new(1, "again", 1, "Ada"))
+            .await
+            .unwrap_err(),
+        DomainError::Conflict { .. }
+    ));
+    assert_eq!(
+        db.notes
+            .remove(&1, Some(Version::new(2)))
+            .await
+            .unwrap()
+            .title
+            .0,
+        "Shopping"
+    );
+    assert!(matches!(
+        db.notes.load(&1).await.unwrap_err(),
+        DomainError::NotFound
+    ));
+    db.drop_table().await;
+}
+
+#[tokio::test]
+async fn a_table_store_lists_over_columns_and_into_jsonb() {
+    let Some(db) = TableFixture::new().await else {
+        return;
+    };
+    for (id, title, priority, author) in [
+        (1, "gamma", 10, "Ada"),
+        (2, "Alpha", 9, "Grace"),
+        (3, "beta", 10, "Ada"),
+    ] {
+        db.notes
+            .insert(Note::new(id, title, priority, author))
+            .await
+            .unwrap();
+    }
+    let titles = |criteria: Criteria| {
+        let notes = &db.notes;
+        async move {
+            notes
+                .list(&criteria)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|note| note.title.0)
+                .collect::<Vec<_>>()
+        }
+    };
+    let sorted = |sort: &str| Criteria::new().with_sort(sort.parse().unwrap());
+    let filtered = |filter: &str| Criteria::new().with_filter(filter.parse().unwrap());
+
+    assert_eq!(
+        titles(sorted("-priority")).await,
+        ["gamma", "beta", "Alpha"]
+    );
+    assert_eq!(titles(filtered("priority:gt:9")).await, ["gamma", "beta"]);
+    assert_eq!(titles(filtered("title:begins:a")).await, ["Alpha"]);
+    assert_eq!(titles(filtered("author.name:eq:Grace")).await, ["Alpha"]);
+    let page = sorted("priority").with_page(Page::new(Some(2), Some(2)));
+    assert_eq!(titles(page).await, ["beta"]);
+    assert!(matches!(
+        db.notes
+            .list(&filtered("created_at:gt:2020-01-01"))
+            .await
+            .unwrap_err(),
+        DomainError::Invalid { .. }
+    ));
+    db.drop_table().await;
+}
+
+#[tokio::test]
+async fn a_table_without_what_the_store_needs_stops_the_service_at_startup() {
+    let Some(url) = database_url() else { return };
+    let postgres = Postgres::connect_lazy(&PostgresConfig {
+        url: Some(url),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let missing = format!("note_missing_{}", uuid::Uuid::new_v4().simple());
+    let _ = postgres.table::<Note>(&missing);
+    let err = postgres.prepare().await.unwrap_err();
+    assert!(err.to_string().contains("does not exist"), "{err}");
+
+    let unversioned = format!("note_unversioned_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE \"{unversioned}\" (id integer PRIMARY KEY, title text)"
+    )))
+    .execute(postgres.pool())
+    .await
+    .unwrap();
+    let only_unversioned = Postgres::from_pool(postgres.pool().clone());
+    let _ = only_unversioned.table::<Note>(&unversioned);
+    let err = only_unversioned.prepare().await.unwrap_err();
+    assert!(err.to_string().contains("no `version` column"), "{err}");
+
+    // A table with a version but without a column for every field: refused on the
+    // first write, and nothing is written.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE \"{unversioned}\" ADD COLUMN version bigint NOT NULL DEFAULT 1"
+    )))
+    .execute(postgres.pool())
+    .await
+    .unwrap();
+    let partial = Postgres::from_pool(postgres.pool().clone()).table::<Note>(&unversioned);
+    let err = partial
+        .insert(Note::new(1, "Shopping", 2, "Ada"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::Internal { .. }) && err.to_string().contains("no column"),
+        "{err}"
+    );
+    assert!(partial.find(&1).await.unwrap().is_none());
+
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE \"{unversioned}\"")))
+        .execute(postgres.pool())
+        .await
+        .unwrap();
+}
