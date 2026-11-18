@@ -52,9 +52,10 @@ impl Fixture {
     }
 }
 
-/// Conditional writes are an option for S3; the rest comes from `AWS_*`.
+/// Nothing but what `AWS_*` supplies, as for a deployed service: conditional writes
+/// are on by default.
 fn options() -> BTreeMap<String, String> {
-    [("conditional_put".to_string(), "etag".to_string())].into()
+    BTreeMap::new()
 }
 
 #[tokio::test]
@@ -134,6 +135,13 @@ async fn conditional_writes_refuse_rather_than_overwrite() {
         .await
         .unwrap_err();
     assert!(matches!(err, DomainError::Stale { .. }), "{err:?}");
+    // S3 answers an `If-Match` write to a missing key with 404; that is stale too.
+    let err = blobs
+        .put_if_match("missing.csv", Blob::new(b"i,j".to_vec()), &etag)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Stale { .. }), "{err:?}");
+    assert!(blobs.head("missing.csv").await.unwrap().is_none());
 
     let (blob, _) = blobs.get("report.csv").await.unwrap().unwrap();
     assert_eq!(blob.bytes().as_ref(), b"e,f");

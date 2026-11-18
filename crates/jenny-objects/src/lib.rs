@@ -10,12 +10,11 @@
 //! objects:
 //!   url: s3://attachments/notes        # bucket `attachments`, keys under `notes/`
 //!   options:                           # better: JENNY__OBJECTS__OPTIONS__...
-//!     endpoint: http://localhost:8333  # for anything that is not AWS itself
+//!     endpoint: http://localhost:9000  # for anything that is not AWS itself
 //!     region: us-east-1
 //!     access_key_id: …
 //!     secret_access_key: …
 //!     allow_http: "true"
-//!     conditional_put: etag            # put_if_absent / put_if_match on S3
 //! ```
 //!
 //! The standard `AWS_*` environment variables apply too, beneath the options: on AWS a
@@ -59,7 +58,8 @@ pub struct ObjectsConfig {
     pub url: Option<String>,
     /// `object_store`'s options for the URL's backend, by their documented names —
     /// `endpoint`, `region`, `access_key_id`, `secret_access_key`, `allow_http`,
-    /// `conditional_put` for S3. Carries secrets, so it is never logged.
+    /// `conditional_put` (`disabled`, for a server without conditional writes) for S3.
+    /// Carries secrets, so it is never logged.
     pub options: BTreeMap<String, String>,
 }
 
@@ -75,10 +75,12 @@ impl fmt::Debug for ObjectsConfig {
 /// [`Blobs`] over any [`object_store`] backend.
 ///
 /// The conditional writes map onto `object_store`'s put modes: `put_if_absent` is
-/// `PutMode::Create`, `put_if_match` is `PutMode::Update` with the entity tag. S3 does
-/// them only with the `conditional_put: etag` option and a server that supports
-/// conditional writes; a store that cannot is an internal error naming the option,
-/// never a silent unconditional write. Local files support `put_if_absent` only.
+/// `PutMode::Create`, `put_if_match` is `PutMode::Update` with the entity tag. On S3
+/// they are `If-None-Match: *` and `If-Match` headers, sent by default. AWS S3 and the
+/// compatible servers jenny is tested against honour them. A server that ignores them
+/// would write unconditionally, and nothing on this side can tell. For one of those,
+/// set `conditional_put: disabled`, and conditional writes are refused with an internal
+/// error instead. Local files support `put_if_absent` only.
 pub struct ObjectBlobs {
     store: Arc<dyn ObjectStore>,
     signer: Option<Arc<dyn Signer>>,
@@ -221,14 +223,16 @@ impl ObjectBlobs {
             Error::AlreadyExists { .. } => {
                 DomainError::conflict(format!("a blob `{key}` already exists"))
             }
+            // Also what an `If-Match` write to a missing key gets: gone is as stale as
+            // changed, as in HTTP.
             Error::Precondition { .. } => DomainError::stale(format!(
-                "blob `{key}` changed since the entity tag it was read with"
+                "blob `{key}` changed, or is gone, since the entity tag it was read with"
             )),
             Error::NotImplemented { .. } | Error::NotSupported { .. } => {
                 DomainError::internal(format!(
-                    "{} cannot write `{key}` conditionally; for S3, set \
-                     `objects.options.conditional_put: etag` on a server that supports \
-                     conditional writes ({error})",
+                    "{} does not write `{key}` conditionally: the backend has no \
+                     conditional writes, or `objects.options.conditional_put` disables \
+                     them ({error})",
                     self.describe
                 ))
             }
@@ -429,6 +433,43 @@ mod tests {
                 .unwrap_err(),
             DomainError::Stale { .. }
         ));
+        // A missing key is stale too, the same answer `MemoryBlobs` gives.
+        assert!(matches!(
+            blobs
+                .put_if_match("gone", Blob::new(b"3".to_vec()), &etag)
+                .await
+                .unwrap_err(),
+            DomainError::Stale { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn disabled_conditional_writes_are_refused_not_made_unconditional() {
+        let options = [
+            ("conditional_put".to_string(), "disabled".to_string()),
+            ("endpoint".to_string(), "http://127.0.0.1:1".to_string()),
+            ("allow_http".to_string(), "true".to_string()),
+            ("region".to_string(), "us-east-1".to_string()),
+            ("access_key_id".to_string(), "k".to_string()),
+            ("secret_access_key".to_string(), "s".to_string()),
+        ]
+        .into();
+        let blobs = ObjectBlobs::from_url("s3://bucket", &options).unwrap();
+        // Refused before any request: the endpoint is unreachable, so a write would fail
+        // differently.
+        let err = blobs
+            .put_if_absent("k", Blob::new(b"1".to_vec()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DomainError::Internal { detail, .. } if detail.contains("conditional_put")),
+            "{err:?}"
+        );
+        let err = blobs
+            .put_if_match("k", Blob::new(b"1".to_vec()), "\"1\"")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Internal { .. }), "{err:?}");
     }
 
     #[test]

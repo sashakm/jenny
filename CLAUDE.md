@@ -112,11 +112,13 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   with `set_config(…, true)`, so `fetch_all_in` takes a `Transaction`: outside one the
   setting silently does nothing. Result columns report the type as bare `agtype`, so
   `Agtype::compatible` accepts both names.
-- **S3 conditional writes need `conditional_put: etag`.** Without it `object_store`
-  refuses `put_if_absent`/`put_if_match`, and `ObjectBlobs` reports which option is
-  missing; it never falls back to an unconditional write. Readiness lists the bucket
-  rather than `HEAD`ing a key, because S3 answers both a missing key and a missing bucket
-  with 404.
+- **S3 conditional writes are on by default** in `object_store` 0.14
+  (`conditional_put: etag`): `put_if_absent`/`put_if_match` send
+  `If-None-Match`/`If-Match`, and a server that ignores them overwrites silently.
+  `conditional_put: disabled` makes them refuse instead. `put_if_match` on a missing key
+  is `Stale` in every implementation, as S3's 404 arrives as a failed precondition.
+  Readiness lists the bucket rather than `HEAD`ing a key, because S3 answers both a
+  missing key and a missing bucket with 404.
 - **Listing rules live in two places.** `Memory` and `NatsKv` evaluate criteria through
   `jenny_core::memory::Queryable`; the Postgres stores translate them in
   `jenny-persistence/src/criteria.rs`. A listing change needs both, and the known

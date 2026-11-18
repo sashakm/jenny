@@ -367,10 +367,10 @@ impl Blobs for MemoryBlobs {
     async fn put_if_match(&self, key: &str, blob: Blob, etag: &str) -> DomainResult<BlobInfo> {
         check_key(key)?;
         let mut blobs = self.lock()?;
-        let current = blobs.get(key).ok_or_else(DomainError::not_found)?;
-        if current.1.etag.as_deref() != Some(etag) {
+        let current = blobs.get(key).and_then(|(_, info)| info.etag.as_deref());
+        if current != Some(etag) {
             return Err(DomainError::stale(format!(
-                "blob `{key}` changed since entity tag {etag}"
+                "blob `{key}` changed, or is gone, since entity tag {etag}"
             )));
         }
         Ok(self.store(&mut blobs, key, blob))
@@ -1019,6 +1019,15 @@ mod tests {
                 .unwrap_err(),
             DomainError::Stale { .. }
         ));
+        // Gone is as stale as changed, and nothing is written.
+        assert!(matches!(
+            blobs
+                .put_if_match("avatars/9.png", Blob::new(b"v1".to_vec()), &etag)
+                .await
+                .unwrap_err(),
+            DomainError::Stale { .. }
+        ));
+        assert!(blobs.head("avatars/9.png").await.unwrap().is_none());
 
         blobs
             .put("avatarsx/2.png", Blob::new(b"x".to_vec()))

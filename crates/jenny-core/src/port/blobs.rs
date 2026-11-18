@@ -86,8 +86,9 @@ pub enum Access {
 ///
 /// The conditional writes are what make blobs safe to share: `put_if_absent` for "create,
 /// but never clobber", `put_if_match` for "replace what I read, unless someone replaced
-/// it first". Not every store can do them — see the adapter — and one that cannot says
-/// so rather than writing unconditionally.
+/// it first". Not every store can do them: one that knows it cannot says so rather than
+/// writing unconditionally. The S3 adapter's documentation covers the case it cannot
+/// know about, a server that ignores the conditions.
 #[async_trait]
 pub trait Blobs: Send + Sync + 'static {
     /// Write `blob` under `key`, replacing whatever is there.
@@ -98,8 +99,8 @@ pub trait Blobs: Send + Sync + 'static {
     async fn put_if_absent(&self, key: &str, blob: Blob) -> DomainResult<BlobInfo>;
 
     /// Write only if what is stored under `key` still has `etag`;
-    /// [`Stale`](DomainError::Stale) when it changed, [`NotFound`](DomainError::NotFound)
-    /// when it is gone.
+    /// [`Stale`](DomainError::Stale) when it changed or is gone, as HTTP's `If-Match`
+    /// fails on a missing resource too (RFC 9110 §13.1.1).
     async fn put_if_match(&self, key: &str, blob: Blob, etag: &str) -> DomainResult<BlobInfo>;
 
     /// The blob under `key`, or `None`.

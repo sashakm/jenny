@@ -13,8 +13,8 @@ integration. What that left open:
   multipart uploads, ranged reads, copies, tags, and per-backend extensions. A port that
   mirrors it would make the in-memory implementation a second object store.
 - **Conditional writes.** S3 has had `If-None-Match` and `If-Match` on `PutObject` since
-  2024, and most S3-compatible servers have followed. They are off by default in
-  `object_store`, because a server without them silently ignores the headers.
+  2024, and most S3-compatible servers have followed. `object_store` sends them by
+  default, so a server without them silently ignores the headers and overwrites.
 - **Configuration and credentials.** "It only needs config" has to hold on AWS, where
   credentials come from a role and not from a file, as much as against a local server.
 - **What a test runs against.** The MinIO image this would once have meant is gone
@@ -47,7 +47,9 @@ never pass through the service.
 
 The failures are domain failures, so the HTTP layer already knows them:
 `put_if_absent` on an existing key is `Conflict` (409), and `put_if_match` against a
-changed blob is `Stale` (412), just as a versioned `Store` save is. `delete` of a
+changed blob is `Stale` (412), just as a versioned `Store` save is. So is
+`put_if_match` on a key that is gone: HTTP's `If-Match` fails on a missing resource
+too, and `object_store` reports S3's 404 for it as a failed precondition. `delete` of a
 missing key succeeds, so a retried delete is not an error.
 
 Keys are paths, checked the same way by every implementation (`check_key`): `/`
@@ -71,7 +73,6 @@ objects:
   url: s3://attachments/notes      # bucket, then an optional key prefix
   options:
     endpoint: http://localhost:9000
-    conditional_put: etag
 ```
 
 `s3://` builds an S3 client from `AmazonS3Builder::from_env()` with the options laid
@@ -86,13 +87,23 @@ can carry a secret, so its `Debug` prints the keys only.
 The prefix in the URL lets several services, or several environments, share a bucket
 without seeing each other's keys. `list` returns keys without it.
 
-### Conditional writes are asked for, never assumed
+### Conditional writes trust the server, unless told not to
 
-`put_if_absent` is `PutMode::Create`, and `put_if_match` is `PutMode::Update`. For S3
-they need `conditional_put: etag`. Without it `object_store` refuses them, and the
-adapter turns the refusal into an internal error naming the option. Writing
-unconditionally instead would be the one failure a caller who asked for a condition
-could not detect. Plain `put` needs no option. Local files do `put_if_absent` only.
+`put_if_absent` is `PutMode::Create`, and `put_if_match` is `PutMode::Update`. On S3
+they are `If-None-Match: *` and `If-Match` headers, which `object_store` sends by
+default (`conditional_put: etag`). AWS S3 honours them, and so do the servers this
+is tested against. A server that ignores them overwrites anyway, and the client
+cannot tell. Writing unconditionally is the one failure a caller who asked for a
+condition cannot detect, so for such a server `conditional_put: disabled` makes the
+adapter refuse conditional writes with an internal error instead. Plain `put` is
+unaffected. Local files do `put_if_absent` only.
+
+An earlier draft of this ADR had it the other way round: conditional writes off by
+default and switched on by the option. That was read off `object_store`'s
+documentation of older releases. In 0.14 the default is `etag`, and the only refusal is
+the one `disabled` asks for. Requiring the option anyway was considered. It would add
+a setting every AWS deployment must remember, to guard against servers that are
+increasingly rare.
 
 ### Readiness lists the bucket
 
@@ -133,7 +144,9 @@ resource that is not JSON takes no patch format (RFC 5789 §2.2).
   without touching a use case.
 - Large files are handled by URL, not by the port. A service that must stream through
   itself uses `object_store` directly, in an adapter of its own.
-- `conditional_put: etag` is one more setting to know about. The error names it.
+- Conditional writes are only as good as the server's support for them. On a server
+  that ignores the headers, `conditional_put: disabled` turns a silent overwrite into
+  an error.
 - Blobs and aggregates are not written atomically. A use case that writes both orders
   the writes so that a failure leaves garbage rather than a dangling reference, as the
   example does.
