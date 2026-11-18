@@ -92,7 +92,7 @@ async fn health_endpoints_describe_the_service(svc: &Service) {
     let (status, ready) = svc.get("/j/health/ready").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ready["status"], "up");
-    // Notes are in memory here; with a database configured, `postgres` would be listed.
+    // Notes are in memory here; with a backend configured, `postgres` or `nats` is listed.
     assert!(
         ready["checks"]
             .as_array()

@@ -9,12 +9,12 @@ changes are fine, and removing a low-value feature beats adapting it.
 | Crate | Ring | Holds |
 |---|---|---|
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
-| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Events`, outbound ports, `Memory`, tasks |
+| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Events`, outbound ports, `Memory` + `Queryable`, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `Nats` + `NatsKv` key-value store, `MessagingAdapter` (declaration only) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
-| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), hosting, graceful shutdown |
+| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection (`messaging`), hosting, graceful shutdown |
 | `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
@@ -100,8 +100,10 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   print "skipping" and pass; unset under `CI`, they fail. So `just test-all` passing says
   nothing about them — run `just test-postgres` / `just test-nats` for any change in a
   store or its runtime wiring. Each test uses a table or bucket of its own and drops it.
-- **Every store lists with the same rules.** `Memory` and `NatsKv` both evaluate
-  criteria through `jenny_core::memory::Queryable`; a listing change goes there, once.
+- **Listing rules live in two places.** `Memory` and `NatsKv` evaluate criteria through
+  `jenny_core::memory::Queryable`; the Postgres stores translate them in
+  `jenny-persistence/src/criteria.rs`. A listing change needs both, and the known
+  differences (text equality, ADR-015) are documented, not accidental.
 - **`/tmp` has a per-user quota** that a few scaffolded target dirs fill. Run the slow
   gates with `TMPDIR=$PWD/target/tmp` when they fail with "Disk quota exceeded".
 - **The outbox delivers at least once**, in order per relay, a moment after the request.
@@ -135,5 +137,5 @@ check publishability. Details: `RELEASING.md`.
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
 the OpenAPI document (ADR-014), events raised with a `remove` and `LISTEN/NOTIFY` for relays (ADR-016), a `migrations/`
-directory in the scaffold (ADR-015), the MongoDB, NATS KV, object-storage and AGE adapters (ADR-013), `cargo jenny new --manifest`,
+directory in the scaffold (ADR-015), the object-storage and AGE adapters (ADR-013; MongoDB is deferred), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

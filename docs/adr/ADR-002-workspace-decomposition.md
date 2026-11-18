@@ -19,9 +19,9 @@ rather than along topics.
 
 | Crate | Ring | Contains |
 |---|---|---|
-| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; `Memory`; tasks |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events`, `Context`, `EventPublisher`, `Authenticator`, `Authorizer`; `Memory`, `Queryable`; tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Versioned`/`IfMatch`, auth and CORS layers |
-| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway |
+| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: the pool, `PgDocuments` and `PgTable` stores, the outbox and its relay, criteria to SQL |
 | `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, Cedar authorization |
 | `jenny-server` | composition root | runtime, configuration, telemetry, health, hosting |

@@ -214,7 +214,8 @@ measured is the backend's business, not something each use case is handed.
 
 ## Not built yet
 
-- Document and key-value stores other than Postgres (ADR-013).
+- A dedicated document database; MongoDB is deferred, since the Postgres document store
+  covers the need (ADR-013).
 
 Listed here originally and built since: mapping `Version` onto `ETag`/`If-Match`
-(ADR-014), and the Postgres stores (ADR-015).
+(ADR-014), the Postgres stores (ADR-015), and a NATS key-value store (ADR-017).
