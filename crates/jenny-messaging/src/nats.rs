@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::fmt::Debug;
 
 use async_nats::{
     Client, ServerAddr,
@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use topmesys::{EventConsumer, EventMessage};
+use topmesys::{Delivery, EventConsumer, EventMessage, HandlerError, Subscription, Subscriptions};
 
 /// Holds NATS client configuration. Url string can hold multiple server urls, separated by comma.
 /// #### Example:
@@ -77,20 +77,26 @@ impl NatsConfig {
 /// published through the [`EventPublisher`](jenny_core::port::outbound::EventPublisher)
 /// port ends up on the configured stream. Nothing in the application layer knows it
 /// exists.
+///
+/// `subscription` is a topic pattern, or a [`Subscription`] when failed publishes should
+/// be retried — a broker that is briefly unreachable is exactly the case retries are for.
 #[derive(Debug)]
 pub struct NatsGateway {
     stream: String,
     ctx: Context,
-    broker_topic: String,
+    subscription: Subscription,
 }
 
 impl NatsGateway {
-    #[instrument]
-    pub fn new<S: Into<String> + Debug>(client: Client, stream: S, broker_topic: S) -> Self {
+    pub fn new(
+        client: Client,
+        stream: impl Into<String>,
+        subscription: impl Into<Subscription>,
+    ) -> Self {
         Self {
             stream: stream.into(),
-            ctx: jetstream::new(client.clone()),
-            broker_topic: broker_topic.into(),
+            ctx: jetstream::new(client),
+            subscription: subscription.into(),
         }
     }
 
@@ -118,11 +124,13 @@ impl NatsGateway {
 
 #[async_trait]
 impl EventConsumer for NatsGateway {
-    fn consumes(&self) -> &str {
-        &self.broker_topic
+    type Topic = ();
+
+    fn subscriptions(&self) -> Subscriptions<()> {
+        self.subscription.clone().into()
     }
 
-    async fn handle_event(&self, event: Arc<EventMessage>) -> anyhow::Result<()> {
-        self.publish_to_stream(event.as_ref()).await
+    async fn handle_event(&self, _: &(), delivery: &Delivery) -> Result<(), HandlerError> {
+        Ok(self.publish_to_stream(delivery.message()).await?)
     }
 }

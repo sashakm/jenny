@@ -1,11 +1,12 @@
 [package]
 name = "jenny-rest"
-version = "0.1.0"
+version.workspace = true
+rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-publish = false
+description = "The REST driving adapter of the jenny framework, on axum and tower"
 
 [lib]
 path = "src/lib.rs"
@@ -37,6 +38,9 @@ openapi = ["dep:utoipa"]
 
 [dev-dependencies]
 jenny-security = { workspace = true }
-serde_test = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true, features = ["util"] }
+
+# Everything is feature-gated, so docs.rs would otherwise show next to nothing.
+[package.metadata.docs.rs]
+all-features = true

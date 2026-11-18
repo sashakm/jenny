@@ -1,0 +1,112 @@
+# Release configuration — https://release-plz.dev/docs/config
+#
+# Flow: every push to main updates one release PR (version bump + CHANGELOG.md, computed
+# from conventional commits). Merging that PR publishes every crate to crates.io, tags
+# `v<version>` and creates the GitHub release. See .github/workflows/release-plz.yml.
+#
+# All crates share one version (`[workspace.package] version`, ADR-002), so they form a
+# single version group. The framework has one changelog, one tag and one GitHub release,
+# carried by the `jenny` facade; the other crates only publish.
+
+[workspace]
+# Release when a release PR is merged, never on an ordinary push to main.
+release_always = false
+# The release PR touches workspace versions only; dependency updates come from Dependabot.
+dependencies_update = false
+semver_check = true
+pr_labels = ["release"]
+publish_timeout = "10m"
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "jenny"
+version_group = "jenny"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = [
+    "jenny-core",
+    "jenny-macros",
+    "jenny-rest",
+    "jenny-server",
+    "jenny-messaging",
+    "jenny-persistence",
+    "jenny-security",
+    "cargo-jenny",
+]
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+
+[[package]]
+name = "jenny-core"
+version_group = "jenny"
+
+[[package]]
+name = "jenny-macros"
+version_group = "jenny"
+
+[[package]]
+name = "jenny-rest"
+version_group = "jenny"
+
+[[package]]
+name = "jenny-server"
+version_group = "jenny"
+
+[[package]]
+name = "jenny-messaging"
+version_group = "jenny"
+
+[[package]]
+name = "jenny-persistence"
+version_group = "jenny"
+
+[[package]]
+name = "jenny-security"
+version_group = "jenny"
+
+[[package]]
+name = "cargo-jenny"
+version_group = "jenny"
+
+# Grouping carried over from the former cliff.toml. Only a commit's first line is parsed,
+# so a breaking change needs `!` in that header or a `BREAKING CHANGE:` footer.
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+"""
+body = """
+## [{{ version }}]{%- if release_link -%}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | upper_first }}
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+sort_commits = "oldest"
+# Keep a breaking change even when a parser below would skip its commit.
+protect_breaking_commits = true
+commit_parsers = [
+    { message = "^feat", group = "<!-- 0 -->🚀 Features" },
+    { message = "^fix", group = "<!-- 1 -->🐛 Bug Fixes" },
+    { message = "^refactor", group = "<!-- 2 -->🚜 Refactor" },
+    { message = "^doc", group = "<!-- 3 -->📚 Documentation" },
+    { message = "^perf", group = "<!-- 4 -->⚡ Performance" },
+    { message = "^style", group = "<!-- 5 -->🎨 Styling" },
+    { message = "^test", group = "<!-- 6 -->🧪 Testing" },
+    { message = "^chore: release", skip = true },
+    { message = "^chore\\(deps.*\\)", skip = true },
+    { message = "^chore\\(pr\\)", skip = true },
+    { message = "^chore\\(pull\\)", skip = true },
+    { message = "^chore|^ci", group = "<!-- 7 -->⚙️ Miscellaneous Tasks" },
+    { body = ".*security", group = "<!-- 8 -->🛡️ Security" },
+    { message = "^revert", group = "<!-- 9 -->◀️ Revert" },
+]

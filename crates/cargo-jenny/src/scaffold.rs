@@ -494,6 +494,48 @@ mod tests {
         );
     }
 
+    /// `name = "1.2"` and `name = { version = "1.2", … }` lines, by name.
+    fn requirements(manifest: &str) -> std::collections::BTreeMap<&str, &str> {
+        manifest
+            .lines()
+            .filter_map(|line| {
+                let (name, rest) = line.split_once(" = ")?;
+                let rest = rest.strip_prefix("{ version = ").unwrap_or(rest);
+                let version = rest.strip_prefix('"')?.split('"').next()?;
+                Some((name.trim(), version))
+            })
+            .collect()
+    }
+
+    /// The semver-compatible part of a requirement: the major, or `0.minor` before 1.0.
+    fn compatibility(requirement: &str) -> String {
+        let mut parts = requirement.trim_start_matches(['^', '=']).split('.');
+        let major = parts.next().unwrap_or_default();
+        if major == "0" {
+            format!("0.{}", parts.next().unwrap_or_default())
+        } else {
+            major.to_string()
+        }
+    }
+
+    #[test]
+    fn template_dependencies_track_the_workspace_majors() {
+        // A generated project resolves its own versions. One major behind jenny links two
+        // copies of the crate, and the traits jenny's types implement stop matching the
+        // ones the project's code names.
+        let workspace = requirements(include_str!("../../../Cargo.toml"));
+        let template = requirements(include_str!("../templates/project/Cargo.toml.tmpl"));
+        for (name, version) in template {
+            if let Some(expected) = workspace.get(name) {
+                assert_eq!(
+                    compatibility(version),
+                    compatibility(expected),
+                    "`{name}` in the project template is not on the workspace's major"
+                );
+            }
+        }
+    }
+
     #[test]
     fn generation_refuses_to_overwrite() {
         let dir = tempfile::tempdir().unwrap();

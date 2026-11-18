@@ -1,6 +1,7 @@
 [package]
 name = "jenny"
-version = "0.1.0"
+version.workspace = true
+rust-version.workspace = true
 homepage = "https://crates.io/crates/jenny"
 edition.workspace = true
 license.workspace = true
@@ -49,7 +50,6 @@ full = ["rest", "server", "messaging", "persistence", "security", "openapi"]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
-fake = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -68,3 +68,7 @@ test = true
 [[example]]
 name = "tasks"
 path = "../../examples/tasks/main.rs"
+
+# Everything is feature-gated, so docs.rs would otherwise show next to nothing.
+[package.metadata.docs.rs]
+all-features = true

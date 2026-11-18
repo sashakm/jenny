@@ -17,15 +17,19 @@ pub struct EventLogListener;
 
 #[async_trait]
 impl topmesys::EventConsumer for EventLogListener {
+    type Topic = ();
+
     /// Every event in this service's namespace.
-    fn consumes(&self) -> &str {
-        "{{project_kebab}}.*"
+    fn subscriptions(&self) -> topmesys::Subscriptions<()> {
+        "{{project_kebab}}.*".into()
     }
 
     async fn handle_event(
         &self,
-        event: std::sync::Arc<topmesys::EventMessage>,
-    ) -> anyhow::Result<()> {
+        _: &(),
+        delivery: &topmesys::Delivery,
+    ) -> Result<(), topmesys::HandlerError> {
+        let event = delivery.message();
         tracing::info!(
             topic = event.topic().text(),
             payload = %String::from_utf8_lossy(event.content()),

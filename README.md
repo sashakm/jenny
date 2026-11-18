@@ -194,6 +194,7 @@ composition root.
 ## Scaffolding
 
 ```sh
+cargo install cargo-jenny
 cargo jenny new my-notes --features persistence,messaging
 cargo jenny add resource order
 ```
@@ -297,7 +298,7 @@ let statement = format!("SELECT … FROM notes{}", sql.tail());  // values bound
 | `jenny-security` | driven adapter | JWT/API-key authentication, RBAC |
 | `jenny-server` | composition root | runtime, config, health, hosting |
 | `jenny-macros` | — | derive macros (`Dto`, `QueryFormat`) |
-| `jenny-cli` | — | `cargo jenny` scaffolding |
+| `cargo-jenny` | — | `cargo jenny` scaffolding |
 
 Features: `rest`, `server` (implies `rest`), `messaging`, `persistence`, `security`,
 `openapi`, `swagger-ui`, `telemetry-otlp` / `telemetry-prometheus` / `telemetry-loki`,

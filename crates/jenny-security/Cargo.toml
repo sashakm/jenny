@@ -1,11 +1,12 @@
 [package]
 name = "jenny-security"
-version = "0.1.0"
+version.workspace = true
+rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-publish = false
+description = "JWT/API-key authentication and RBAC for the jenny framework"
 
 [lib]
 path = "src/lib.rs"
@@ -30,5 +31,4 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-fake = { workspace = true }
 tempfile = { workspace = true }

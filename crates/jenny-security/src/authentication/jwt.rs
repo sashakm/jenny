@@ -133,6 +133,16 @@ impl JwtAuthContextConfig {
         self.lookup_jwk(&header.kid.unwrap_or_default())
             .await
             .and_then(|jwk| {
+                // The header is the token's own claim about how it was signed. A key that
+                // declares its algorithm is held to that one instead.
+                if let Some(declared) = jwk.common.key_algorithm
+                    && jsonwebtoken::Algorithm::try_from(declared)? != header.alg
+                {
+                    anyhow::bail!(
+                        "token algorithm {:?} does not match the signing key's {declared:?}",
+                        header.alg
+                    );
+                }
                 self.create_token_decoder(&jwk).map(|decoder| {
                     let mut validation = jsonwebtoken::Validation::new(header.alg);
                     validation.validate_aud = false;
@@ -167,19 +177,8 @@ impl JwtAuthContextConfig {
 
     /// Create [jsonwebtoken::DecodingKey] from signing [Jwk]
     pub fn create_token_decoder(&self, signer: &Jwk) -> anyhow::Result<jsonwebtoken::DecodingKey> {
-        match signer.algorithm {
-            jsonwebtoken::jwk::AlgorithmParameters::RSA(ref rsa) => Ok(
-                jsonwebtoken::DecodingKey::from_rsa_components(&rsa.n, &rsa.e)?,
-            ),
-            jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(ref eck) => Ok(
-                jsonwebtoken::DecodingKey::from_ec_components(&eck.x, &eck.y)?,
-            ),
-            jsonwebtoken::jwk::AlgorithmParameters::OctetKey(ref oct) => {
-                Ok(jsonwebtoken::DecodingKey::from_secret(oct.value.as_bytes()))
-            }
-            _ => Err(anyhow::anyhow!(
-                "Unsupported signature key algorithm.".to_owned(),
-            )),
-        }
+        // `from_jwk` base64url-decodes symmetric keys, which the JWK format requires and
+        // using the encoded text as the secret got wrong.
+        Ok(jsonwebtoken::DecodingKey::from_jwk(signer)?)
     }
 }

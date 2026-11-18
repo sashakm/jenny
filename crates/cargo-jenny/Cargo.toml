@@ -1,12 +1,13 @@
 [package]
-name = "jenny-cli"
-version = "0.1.0"
+name = "cargo-jenny"
+version.workspace = true
+rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Scaffolding for jenny services"
-publish = false
+description = "Scaffolding for jenny services: `cargo jenny new` and `cargo jenny add resource`"
+categories = ["development-tools::cargo-plugins", "web-programming"]
 
 # Named `cargo-jenny` so cargo finds it as the `cargo jenny` subcommand.
 [[bin]]

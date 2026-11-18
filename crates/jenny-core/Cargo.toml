@@ -1,11 +1,12 @@
 [package]
 name = "jenny-core"
-version = "0.1.0"
+version.workspace = true
+rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-publish = false
+description = "Domain vocabulary, ports, tasks and telemetry for the jenny framework"
 
 [lib]
 path = "src/lib.rs"
@@ -47,3 +48,7 @@ telemetry-loki = ["dep:tracing-loki"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+# Everything is feature-gated, so docs.rs would otherwise show next to nothing.
+[package.metadata.docs.rs]
+all-features = true

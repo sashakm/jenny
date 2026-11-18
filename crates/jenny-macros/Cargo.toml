@@ -1,10 +1,12 @@
 [package]
 name = "jenny-macros"
-version = "0.1.0"
+version.workspace = true
+rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+description = "Derive macros (Dto, QueryFormat) for the jenny framework"
 
 [lib]
 proc-macro = true
@@ -20,3 +22,7 @@ stringcase = { workspace = true }
 default = []
 # Also emit `utoipa::ToSchema` from `#[derive(Dto)]`.
 openapi = []
+
+# Everything is feature-gated, so docs.rs would otherwise show next to nothing.
+[package.metadata.docs.rs]
+all-features = true

@@ -18,7 +18,7 @@ shape by default is a cheaper enforcement mechanism than catching it later.
 
 ## Decision
 
-A cargo plugin, `cargo jenny`, in `crates/jenny-cli`.
+A cargo plugin, `cargo jenny`, in `crates/cargo-jenny`.
 
 ### `cargo jenny new <name>`
 
@@ -70,18 +70,25 @@ It emits text. Coupling the generator to the thing it generates would mean a bre
 change in the framework breaks the tool meant to help you adopt it — and would make the
 CLI's build time proportional to the framework's.
 
-### Until jenny is published
+### The CLI is released with the framework
 
-Generated projects need a resolvable dependency, and a version that is not on crates.io
-is not one. `--jenny-path <checkout>` emits a path dependency; without it the generator
-emits `version = "0.1"` and says so on the way out.
+`cargo-jenny` ships in lockstep with the library crates (ADR-002), so a generated project
+depends on `version = "<the CLI's own version>"`, the release its templates were written
+against. `--jenny-path <checkout>` emits a path dependency instead, for working on jenny
+itself.
 
 ### The scaffolding is tested by using it
 
 `just test-cli` generates a project, runs its tests, adds a second resource, runs them
-again, and runs clippy with `-D warnings` over the result. Templates are exactly the kind
-of thing that rots silently, and the only honest check is whether what comes out actually
-builds.
+again, and runs clippy with `-D warnings` over the result. `just test-cli-features` does
+the same once per optional feature. Templates are exactly the kind of thing that rots
+silently, and the only honest check is whether what comes out actually builds: a
+scaffolded `openapi` project once lacked the `utoipa` dependency its own DTOs needed,
+because only the default features were being generated.
+
+The template's third-party dependencies must stay on the workspace's majors, or a
+generated project links a second copy of the crate and jenny's trait impls stop matching
+its types. A unit test compares the two manifests.
 
 ## Consequences
 

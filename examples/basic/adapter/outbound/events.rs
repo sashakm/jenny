@@ -47,15 +47,19 @@ pub struct EventLogListener;
 #[cfg(feature = "messaging")]
 #[async_trait]
 impl topmesys::EventConsumer for EventLogListener {
+    type Topic = ();
+
     /// Every note event in this service's namespace.
-    fn consumes(&self) -> &str {
-        "basic-example.note.*"
+    fn subscriptions(&self) -> topmesys::Subscriptions<()> {
+        "basic-example.note.*".into()
     }
 
     async fn handle_event(
         &self,
-        event: std::sync::Arc<topmesys::EventMessage>,
-    ) -> anyhow::Result<()> {
+        _: &(),
+        delivery: &topmesys::Delivery,
+    ) -> Result<(), topmesys::HandlerError> {
+        let event = delivery.message();
         tracing::info!(
             topic = event.topic().text(),
             payload = %String::from_utf8_lossy(event.content()),

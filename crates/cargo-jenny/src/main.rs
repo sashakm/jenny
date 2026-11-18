@@ -64,10 +64,10 @@ struct NewArgs {
     #[arg(long)]
     path: Option<PathBuf>,
 
-    /// Depend on a local checkout of jenny instead of a published version.
+    /// Depend on a local checkout of jenny instead of the release this CLI belongs to.
     ///
-    /// Required until jenny is published: a generated project has to be able to resolve
-    /// the dependency, and a version that is not on crates.io yet cannot.
+    /// For working on jenny itself: a project generated this way builds against your
+    /// working tree.
     #[arg(long)]
     jenny_path: Option<PathBuf>,
 
@@ -126,7 +126,9 @@ fn new_project(args: NewArgs) -> Result<()> {
             let target = if facade.exists() { facade } else { absolute };
             format!("path = \"{}\"", target.display())
         }
-        None => "version = \"0.1\"".to_string(),
+        // jenny's crates are released in lockstep, so the CLI's own version is the
+        // jenny version its templates were written against.
+        None => format!("version = \"{}\"", env!("CARGO_PKG_VERSION")),
     };
 
     let mut plan = plan_project(&root, &project, &resource, &features, &dependency)?;
@@ -148,13 +150,6 @@ fn new_project(args: NewArgs) -> Result<()> {
     }
     println!("  just test");
     println!("  just run");
-    if args.jenny_path.is_none() {
-        println!();
-        println!(
-            "note: jenny is not published yet. Regenerate with \
-             --jenny-path <path-to-jenny-checkout> if the build cannot resolve it."
-        );
-    }
     Ok(())
 }
 

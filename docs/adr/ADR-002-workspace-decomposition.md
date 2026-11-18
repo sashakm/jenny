@@ -25,8 +25,8 @@ rather than along topics.
 | `jenny-persistence` | driven adapter | Postgres/sqlx statement building and row mapping |
 | `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, RBAC |
 | `jenny-server` | composition root | runtime, configuration, health, hosting |
-| `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`; internal, not published separately |
-| `jenny-cli` | — | `cargo jenny` — scaffolding (ADR-009) |
+| `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]` |
+| `cargo-jenny` | — | `cargo jenny` — scaffolding (ADR-009) |
 | `jenny` | — | facade of feature-gated re-exports |
 
 ### The dependency graph
@@ -42,7 +42,7 @@ jenny (facade)
 └── jenny-server      → jenny-core, jenny-rest
                        → jenny-messaging   (feature `messaging`)
 
-jenny-cli                           (standalone binary; depends on none of the above)
+cargo-jenny                         (standalone binary; depends on none of the above)
 ```
 
 Every arrow points at `jenny-core` or at `jenny-server`. Two properties fall out of
@@ -103,6 +103,16 @@ reader, `jenny::DomainError` when it does not.
 `axum::extract::Path` or a `tower_http` layer does not have to add and version-match
 those crates itself.
 
+### Every crate is published, on one version
+
+crates.io only accepts dependencies it can resolve, so the facade can ship only if the
+crates behind it do. All of them are published, and all on the same version:
+`[workspace.package] version` is the one number, and release-plz bumps it as a single
+`version_group`. Services depend on `jenny` alone; the other crates are on crates.io
+because the facade needs them there, not as separate entry points, and their API is
+whatever the facade re-exports. One version also means `cargo-jenny` can scaffold
+against its own version number and be right.
+
 ### Not created yet
 
 - **`jenny-grpc`.** The design is settled — ADR-005 chose axum precisely so a tonic
@@ -117,7 +127,7 @@ those crates itself.
   manifests, not just of the source.
 - `jenny-macros` stays internal; `#[derive(Dto)]` reaches users through the facade and
   `#[derive(QueryFormat)]` through `jenny-persistence`.
-- `jenny-cli` depends on none of the framework crates. It emits text, and coupling the
+- `cargo-jenny` depends on none of the framework crates. It emits text, and coupling the
   generator to the thing it generates would mean a breaking change in the framework
   breaks the tool that is supposed to help you adopt it.
 - Adding a transport means adding a crate that depends on `jenny-core` and a feature on

@@ -269,8 +269,9 @@ impl JennyServer {
     /// # #[derive(Debug)] struct AuditLog;
     /// # #[async_trait::async_trait]
     /// # impl topmesys::EventConsumer for AuditLog {
-    /// #     fn consumes(&self) -> &str { "my-notes.note.*" }
-    /// #     async fn handle_event(&self, _: std::sync::Arc<topmesys::EventMessage>) -> anyhow::Result<()> { Ok(()) }
+    /// #     type Topic = ();
+    /// #     fn subscriptions(&self) -> topmesys::Subscriptions<()> { "my-notes.note.*".into() }
+    /// #     async fn handle_event(&self, _: &(), _: &topmesys::Delivery) -> Result<(), topmesys::HandlerError> { Ok(()) }
     /// # }
     /// server.subscribe(AuditLog)?;
     /// # Ok(())
@@ -279,15 +280,15 @@ impl JennyServer {
     #[cfg(feature = "messaging")]
     pub fn subscribe(
         &mut self,
-        listener: impl topmesys::EventConsumer + 'static,
+        listener: impl topmesys::EventConsumer,
     ) -> anyhow::Result<&mut Self> {
         self.ensure_broker()?;
-        let topic = listener.consumes().to_string();
+        let consumer = std::any::type_name_of_val(&listener);
         self.broker
             .as_ref()
             .expect("broker was just started")
             .add_topic_consumer(listener)?;
-        info!(topic, "subscribed event listener");
+        info!(consumer, "subscribed event listener");
         Ok(self)
     }
 
@@ -925,21 +926,24 @@ mod tests {
     async fn a_subscribed_listener_receives_what_the_port_publishes() {
         use jenny_core::port::outbound::EventEnvelope;
         use std::sync::Mutex;
-        use topmesys::{EventConsumer, EventMessage};
+        use topmesys::{Delivery, EventConsumer, HandlerError, Subscriptions};
 
         #[derive(Debug)]
         struct Recorder(Arc<Mutex<Vec<String>>>);
 
         #[async_trait::async_trait]
         impl EventConsumer for Recorder {
-            fn consumes(&self) -> &str {
-                "test-service.note.*"
+            type Topic = ();
+
+            fn subscriptions(&self) -> Subscriptions<()> {
+                "test-service.note.*".into()
             }
-            async fn handle_event(&self, event: Arc<EventMessage>) -> anyhow::Result<()> {
+
+            async fn handle_event(&self, _: &(), delivery: &Delivery) -> Result<(), HandlerError> {
                 self.0
                     .lock()
                     .unwrap()
-                    .push(event.topic().text().to_string());
+                    .push(delivery.message().topic().text().to_string());
                 Ok(())
             }
         }

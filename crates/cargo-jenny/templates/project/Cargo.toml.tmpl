@@ -19,6 +19,10 @@ uuid = { version = "1", features = ["serde", "v4"] }
 {{#if persistence}}
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
 {{/if}}
+{{#if openapi}}
+# `#[derive(Dto)]` emits `utoipa::ToSchema`; the major must match jenny's.
+utoipa = "6"
+{{/if}}
 
 [dev-dependencies]
 reqwest = { version = "0.13", features = ["json"] }
