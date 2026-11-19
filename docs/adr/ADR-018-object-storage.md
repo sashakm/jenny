@@ -1,7 +1,7 @@
 # ADR-018: Object Storage
 
-**Status:** Accepted — implemented
-**Date:** 2026-11-18
+**Status:** Accepted — implemented; conditional writes jenny provides itself, independent of the backend, not implemented
+**Date:** 2026-11-18, revised 2026-11-19
 
 ## Context
 
@@ -14,7 +14,8 @@ integration. What that left open:
   mirrors it would make the in-memory implementation a second object store.
 - **Conditional writes.** S3 has had `If-None-Match` and `If-Match` on `PutObject` since
   2024, and most S3-compatible servers have followed. `object_store` sends them by
-  default, so a server without them silently ignores the headers and overwrites.
+  default, so a server without them ignores the headers and overwrites without anyone
+  noticing.
 - **Configuration and credentials.** "It only needs config" has to hold on AWS, where
   credentials come from a role and not from a file, as much as against a local server.
 - **What a test runs against.** The MinIO image this would once have meant is gone
@@ -88,23 +89,34 @@ can carry a secret, so its `Debug` prints the keys only.
 The prefix in the URL lets several services, or several environments, share a bucket
 without seeing each other's keys. `list` returns keys without it.
 
-### Conditional writes trust the server, unless told not to
+### Conditional writes are off over S3 until a service turns them on
 
 `put_if_absent` is `PutMode::Create`, and `put_if_match` is `PutMode::Update`. On S3
-they are `If-None-Match: *` and `If-Match` headers, which `object_store` sends by
-default (`conditional_put: etag`). AWS S3 honours them, and so do the servers this
-is tested against. A server that ignores them overwrites anyway, and the client
-cannot tell. Writing unconditionally is the one failure a caller who asked for a
-condition cannot detect, so for such a server `conditional_put: disabled` makes the
-adapter refuse conditional writes with an internal error instead. Plain `put` is
-unaffected. Local files do `put_if_absent` only.
+they are `If-None-Match: *` and `If-Match` headers. AWS S3 honours them, and so do the
+servers this is tested against. A server that ignores them overwrites anyway, and the
+client cannot tell. Writing unconditionally is the one failure a caller who asked for
+a condition cannot detect.
 
-An earlier draft of this ADR had it the other way round: conditional writes off by
-default and switched on by the option. That was read off `object_store`'s
-documentation of older releases. In 0.14 the default is `etag`, and the only refusal is
-the one `disabled` asks for. Requiring the option anyway was considered. It would add
-a setting every AWS deployment must remember, to guard against servers that are
-increasingly rare.
+`object_store` 0.14 sends the headers by default (`conditional_put: etag`). jenny does
+not: `ObjectBlobs::from_url` sets `conditional_put: disabled` unless
+`objects.options.conditional_put` or `AWS_CONDITIONAL_PUT` names a value, so the
+service decides, not the library. Until then the conditional writes are refused with
+an internal error that names the setting, before any request is sent. Plain `put` is
+unaffected. A service whose server honours the headers sets `conditional_put: etag`.
+Local files do `put_if_absent` only, and memory does both.
+
+The first version of this decision kept `object_store`'s default, on the grounds that
+an opt-in adds a setting every AWS deployment must remember. It was reversed. On a
+server that ignores the headers that default guards against nothing, and the opt-in
+costs one setting, paid only by the services that use conditional writes. The example
+and the scaffold use none. An earlier draft also had `object_store`'s own default
+backwards, read off the documentation of older releases.
+
+`MemoryBlobs` does conditional writes without being asked, as a server that honours
+them would. A service that relies on them in its tests needs `conditional_put: etag`
+wherever it runs against S3, or its first conditional write there is a 500. Making the
+in-memory store refuse by default as well, for the same answer everywhere, belongs with
+conditional writes jenny provides itself (below).
 
 ### Readiness lists the bucket
 
@@ -145,9 +157,9 @@ resource that is not JSON takes no patch format (RFC 5789 §2.2).
   without touching a use case.
 - Large files are handled by URL, not by the port. A service that must stream through
   itself uses `object_store` directly, in an adapter of its own.
-- Conditional writes are only as good as the server's support for them. On a server
-  that ignores the headers, `conditional_put: disabled` turns a silent overwrite into
-  an error.
+- Conditional writes over S3 are only as good as the server's support for them, so a
+  service turns them on with `conditional_put: etag` once it trusts its server. Until
+  then they are an error, never a silent overwrite.
 - Blobs and aggregates are not written atomically. A use case that writes both orders
   the writes so that a failure leaves garbage rather than a dangling reference, as the
   example does.
@@ -159,3 +171,12 @@ resource that is not JSON takes no patch format (RFC 5789 §2.2).
 - Streaming reads and writes, and multipart uploads, for blobs that do not fit in
   memory.
 - Signed URLs with conditions (content type, maximum size) for browser uploads.
+- Conditional writes jenny provides itself, so that `put_if_absent` and `put_if_match`
+  mean the same on every backend, and a service opts into them instead of inheriting
+  whatever its server supports. Like `ETag` and `If-Match` for aggregates (ADR-014), it
+  is an opt-in mechanism that is the same whatever the storage. One design that holds
+  across replicas keeps each blob's current version in a versioned `Store`, whose save
+  is a compare-and-swap on every backend (ADR-012). The bytes are written under a fresh
+  key, and the record is swapped to point at them. The entity tag is then a `Version`,
+  so `Versioned` and `IfMatch` serve blobs as they serve aggregates. The open question is
+  signed write URLs, whose uploads would bypass the record.

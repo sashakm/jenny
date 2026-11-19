@@ -300,9 +300,12 @@ objects:
   url: s3://attachments/notes        # AWS S3, or anything S3-compatible
   options:                           # object_store's option names, over AWS_*
     endpoint: http://localhost:9000
+    conditional_put: etag            # only if the service writes conditionally
 ```
 
-On AWS the URL is enough; credentials come from the role, as for any AWS SDK.
+On AWS the URL is enough; credentials come from the role, as for any AWS SDK. Over S3
+the conditional writes are refused until `conditional_put: etag` turns them on: a
+server that ignored their headers would overwrite instead, and nothing could tell.
 `file:///var/lib/blobs` and `memory://` need no infrastructure, and
 `jenny::memory::MemoryBlobs` keeps the same contract in tests. A blob that passes
 through the service is bounded by `server.body_limit` (256 KiB by default); a signed URL

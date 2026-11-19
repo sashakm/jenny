@@ -38,9 +38,13 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Option<Self> {
+        Self::with(options())
+    }
+
+    fn with(options: BTreeMap<String, String>) -> Option<Self> {
         let url = bucket_url()?;
         let prefix = format!("jenny-test-{}", uuid::Uuid::new_v4().simple());
-        let blobs = ObjectBlobs::from_url(&format!("{url}/{prefix}"), &options()).unwrap();
+        let blobs = ObjectBlobs::from_url(&format!("{url}/{prefix}"), &options).unwrap();
         Some(Self { blobs })
     }
 
@@ -53,7 +57,7 @@ impl Fixture {
 }
 
 /// Nothing but what `AWS_*` supplies, as for a deployed service: conditional writes
-/// are on by default.
+/// are off.
 fn options() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
@@ -108,8 +112,40 @@ async fn blobs_round_trip_with_their_type_and_list_by_path() {
 }
 
 #[tokio::test]
-async fn conditional_writes_refuse_rather_than_overwrite() {
+async fn conditional_writes_are_refused_until_turned_on() {
     let Some(fixture) = Fixture::new() else {
+        return;
+    };
+    let blobs = &fixture.blobs;
+
+    let err = blobs
+        .put_if_absent("report.csv", Blob::new(b"a,b".to_vec()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Internal { .. }), "{err:?}");
+    let written = blobs
+        .put("report.csv", Blob::new(b"a,b".to_vec()))
+        .await
+        .unwrap();
+    let err = blobs
+        .put_if_match(
+            "report.csv",
+            Blob::new(b"c,d".to_vec()),
+            &written.etag.unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Internal { .. }), "{err:?}");
+    let (blob, _) = blobs.get("report.csv").await.unwrap().unwrap();
+    assert_eq!(blob.bytes().as_ref(), b"a,b");
+
+    fixture.clean().await;
+}
+
+/// RustFS honours `If-None-Match` and `If-Match`, so they may be turned on.
+#[tokio::test]
+async fn conditional_writes_refuse_rather_than_overwrite() {
+    let Some(fixture) = Fixture::with([("conditional_put".into(), "etag".into())].into()) else {
         return;
     };
     let blobs = &fixture.blobs;

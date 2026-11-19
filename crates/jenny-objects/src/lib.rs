@@ -15,11 +15,16 @@
 //!     access_key_id: …
 //!     secret_access_key: …
 //!     allow_http: "true"
+//!     conditional_put: etag            # only for a server that honours If-Match
 //! ```
 //!
 //! The standard `AWS_*` environment variables apply too, beneath the options: on AWS a
 //! service needs only the URL, and finds its role's credentials the way the AWS SDKs
 //! do.
+//!
+//! Over S3, the conditional writes (`put_if_absent`, `put_if_match`) are off until
+//! `conditional_put: etag` turns them on, and are refused until then. A server that
+//! ignored their headers would overwrite instead, and nothing on this side could tell.
 //!
 //! `file:///var/lib/notes/blobs` keeps blobs in a directory and `memory://` in the
 //! process, for development and tests; neither hands out signed URLs.
@@ -38,7 +43,7 @@ use futures::TryStreamExt;
 use jenny_core::domain::{DomainError, DomainResult};
 use jenny_core::port::blobs::{Access, Blob, BlobInfo, Blobs, check_key};
 use jenny_core::port::outbound::HealthCheck;
-use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, S3ConditionalPut};
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -58,8 +63,8 @@ pub struct ObjectsConfig {
     pub url: Option<String>,
     /// `object_store`'s options for the URL's backend, by their documented names —
     /// `endpoint`, `region`, `access_key_id`, `secret_access_key`, `allow_http`,
-    /// `conditional_put` (`disabled`, for a server without conditional writes) for S3.
-    /// Carries secrets, so it is never logged.
+    /// `conditional_put` (`etag` turns the conditional writes on; jenny's default is
+    /// `disabled`) for S3. Carries secrets, so it is never logged.
     pub options: BTreeMap<String, String>,
 }
 
@@ -76,11 +81,12 @@ impl fmt::Debug for ObjectsConfig {
 ///
 /// The conditional writes map onto `object_store`'s put modes: `put_if_absent` is
 /// `PutMode::Create`, `put_if_match` is `PutMode::Update` with the entity tag. On S3
-/// they are `If-None-Match: *` and `If-Match` headers, sent by default. AWS S3 and the
-/// compatible servers jenny is tested against honour them. A server that ignores them
-/// would write unconditionally, and nothing on this side can tell. For one of those,
-/// set `conditional_put: disabled`, and conditional writes are refused with an internal
-/// error instead. Local files support `put_if_absent` only.
+/// they are `If-None-Match: *` and `If-Match` headers. A server that ignores them would
+/// write unconditionally, and nothing on this side can tell, so they are off unless
+/// `conditional_put: etag` (in the options, or `AWS_CONDITIONAL_PUT`) turns them on.
+/// Until then they are refused with an internal error. AWS S3 and the compatible
+/// servers jenny is tested against honour them. Local files support `put_if_absent`
+/// only, and memory both.
 pub struct ObjectBlobs {
     store: Arc<dyn ObjectStore>,
     signer: Option<Arc<dyn Signer>>,
@@ -108,6 +114,12 @@ impl ObjectBlobs {
             // in its configuration: its role (IRSA, ECS, instance profile) is found the
             // way every AWS SDK finds it. `objects.options` override them.
             let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
+            // Conditional writes are off until a service asks for them (ADR-018):
+            // `object_store` would send the headers by default, and a server that ignores
+            // them overwrites without anyone noticing.
+            if std::env::var_os("AWS_CONDITIONAL_PUT").is_none() {
+                builder = builder.with_conditional_put(S3ConditionalPut::Disabled);
+            }
             for (key, value) in options {
                 let key: AmazonS3ConfigKey = key
                     .parse()
@@ -230,9 +242,10 @@ impl ObjectBlobs {
             )),
             Error::NotImplemented { .. } | Error::NotSupported { .. } => {
                 DomainError::internal(format!(
-                    "{} does not write `{key}` conditionally: the backend has no \
-                     conditional writes, or `objects.options.conditional_put` disables \
-                     them ({error})",
+                    "{} does not write `{key}` conditionally ({error}): over S3 that \
+                     takes `objects.options.conditional_put: etag`, for a server that \
+                     honours If-None-Match and If-Match; a directory has \
+                     `put_if_absent` only",
                     self.describe
                 ))
             }
@@ -444,9 +457,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_conditional_writes_are_refused_not_made_unconditional() {
-        let options = [
-            ("conditional_put".to_string(), "disabled".to_string()),
+    async fn conditional_writes_over_s3_are_refused_until_turned_on() {
+        let mut options: BTreeMap<String, String> = [
             ("endpoint".to_string(), "http://127.0.0.1:1".to_string()),
             ("allow_http".to_string(), "true".to_string()),
             ("region".to_string(), "us-east-1".to_string()),
@@ -454,22 +466,34 @@ mod tests {
             ("secret_access_key".to_string(), "s".to_string()),
         ]
         .into();
-        let blobs = ObjectBlobs::from_url("s3://bucket", &options).unwrap();
-        // Refused before any request: the endpoint is unreachable, so a write would fail
-        // differently.
-        let err = blobs
-            .put_if_absent("k", Blob::new(b"1".to_vec()))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(&err, DomainError::Internal { detail, .. } if detail.contains("conditional_put")),
-            "{err:?}"
-        );
-        let err = blobs
-            .put_if_match("k", Blob::new(b"1".to_vec()), "\"1\"")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, DomainError::Internal { .. }), "{err:?}");
+        // Off by jenny's default, and off when said so.
+        for conditional_put in [None, Some("disabled")] {
+            if let Some(value) = conditional_put {
+                options.insert("conditional_put".to_string(), value.to_string());
+            }
+            let blobs = ObjectBlobs::from_url("s3://bucket", &options).unwrap();
+            // Refused before any request: the endpoint is unreachable, so a write would
+            // fail differently.
+            let err = blobs
+                .put_if_absent("k", Blob::new(b"1".to_vec()))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, DomainError::Internal { detail, .. } if detail.contains("conditional_put: etag")),
+                "{conditional_put:?}: {err:?}"
+            );
+            let err = blobs
+                .put_if_match("k", Blob::new(b"1".to_vec()), "\"1\"")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DomainError::Internal { .. }),
+                "{conditional_put:?}: {err:?}"
+            );
+        }
+        // `etag` is what turns them on; the S3 tests show it against a server.
+        options.insert("conditional_put".to_string(), "etag".to_string());
+        assert!(ObjectBlobs::from_url("s3://bucket", &options).is_ok());
     }
 
     #[test]
