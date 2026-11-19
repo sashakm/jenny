@@ -86,9 +86,10 @@ pub enum Access {
 ///
 /// The conditional writes are what make blobs safe to share: `put_if_absent` for "create,
 /// but never clobber", `put_if_match` for "replace what I read, unless someone replaced
-/// it first". Not every store can do them: one that knows it cannot says so rather than
-/// writing unconditionally. The S3 adapter's documentation covers the case it cannot
-/// know about, a server that ignores the conditions.
+/// it first". Not every store does them: one that cannot, or has not been told to,
+/// refuses with an internal error rather than writing unconditionally. The S3 adapter
+/// does them only once configured to, because a server that ignores the conditions
+/// would overwrite and nothing on this side could tell (ADR-018).
 #[async_trait]
 pub trait Blobs: Send + Sync + 'static {
     /// Write `blob` under `key`, replacing whatever is there.

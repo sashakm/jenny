@@ -114,11 +114,13 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   with `set_config(…, true)`, so `fetch_all_in` takes a `Transaction`: outside one the
   setting silently does nothing. Result columns report the type as bare `agtype`, so
   `Agtype::compatible` accepts both names.
-- **S3 conditional writes are on by default** in `object_store` 0.14
-  (`conditional_put: etag`): `put_if_absent`/`put_if_match` send
-  `If-None-Match`/`If-Match`, and a server that ignores them overwrites silently.
-  `conditional_put: disabled` makes them refuse instead. `put_if_match` on a missing key
-  is `Stale` in every implementation, as S3's 404 arrives as a failed precondition.
+- **S3 conditional writes are off until a service turns them on.** `object_store` 0.14
+  sends `If-None-Match`/`If-Match` by default, and a server that ignores them overwrites
+  silently, so `ObjectBlobs::from_url` sets `conditional_put: disabled` unless
+  `objects.options.conditional_put` or `AWS_CONDITIONAL_PUT` names a value;
+  `put_if_absent`/`put_if_match` are then refused. `etag` turns them on. `MemoryBlobs`
+  does them unasked. `put_if_match` on a missing key is `Stale` in every implementation,
+  as S3's 404 arrives as a failed precondition.
   Readiness lists the bucket rather than `HEAD`ing a key, because S3 answers both a
   missing key and a missing bucket with 404.
 - **Listing rules live in two places.** `Memory` and `NatsKv` evaluate criteria through
@@ -158,5 +160,5 @@ check publishability. Details: `RELEASING.md`.
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
 the OpenAPI document (ADR-014), events raised with a `remove` and `LISTEN/NOTIFY` for relays (ADR-016), a `migrations/`
-directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs, signed URLs with conditions (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
+directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs, signed URLs with conditions, conditional blob writes jenny provides itself whatever the backend (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

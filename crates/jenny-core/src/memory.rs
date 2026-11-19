@@ -305,8 +305,9 @@ impl Queryable {
 ///
 /// Keeps the [`Blobs`] contract the S3 adapter keeps: the same key rules, conditional
 /// writes that refuse rather than overwrite, `list` by path. Each write gets a fresh
-/// entity tag. There are no [signed URLs](Blobs::signed_url): nothing outside the
-/// process could follow one.
+/// entity tag. The conditional writes need no setting here; over S3 they wait for
+/// `conditional_put: etag` (ADR-018). There are no [signed URLs](Blobs::signed_url):
+/// nothing outside the process could follow one.
 #[derive(Debug, Default)]
 pub struct MemoryBlobs {
     blobs: Mutex<BTreeMap<String, (Blob, BlobInfo)>>,
