@@ -48,7 +48,11 @@ Optional. Parts of the decision that are agreed but unimplemented.
 ```
 
 Status values in use: `Accepted`, `Accepted — implemented`, and
-`Accepted — <part> not implemented` when part of it is still open.
+`Accepted — <part> not implemented` when part of it is still open. `Proposed` marks a
+roadmap stub: the need is agreed, the design is not. A stub has `## Context`,
+`## Proposal` (in place of `## Decision`), `## Open questions` and `## Consequences`.
+When it is agreed, `Proposal` becomes `Decision`, its open questions are answered or
+moved, and the status changes. Add a new stub to the README's Roadmap table.
 
 ## Style
 
