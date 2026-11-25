@@ -521,6 +521,8 @@ design is open for discussion, and each one lists its open questions.
 | ADR | What | Builds on |
 |---|---|---|
 | **Day 2** | | |
+| [ADR-031](docs/adr/ADR-031-authenticating-to-nats.md) | authenticating to NATS: mTLS first, then `.creds`, NKeys, passwords and tokens | ADR-006, ADR-017 |
+| [ADR-032](docs/adr/ADR-032-enriching-event-envelopes.md) | event headers filled from the request's `Context`, such as the caller's subject and actor (RFC 8693) | ADR-006, ADR-016 |
 | [ADR-020](docs/adr/ADR-020-management-interface.md) | `/j` on a management listener of its own; each endpoint group configurable | ADR-007 |
 | [ADR-021](docs/adr/ADR-021-protobuf-contracts.md) | Rust-first protobuf contracts from `#[derive(Dto)]`, over gRPC, binary HTTP and JSON | ADR-005, ADR-011 |
 | [ADR-022](docs/adr/ADR-022-streaming-sse-and-websocket.md) | server-sent events and WebSocket | ADR-006 inbound dispatch |
@@ -536,7 +538,7 @@ design is open for discussion, and each one lists its open questions.
 | **Milestone 3.0** | | |
 | [ADR-029](docs/adr/ADR-029-clustered-deployments.md) | clustered deployments: Raft-replicated state, then several services | everything |
 
-The day-2 work goes in this order: ADR-020, then ADR-026 with ADR-029's leases, then
+The day-2 work goes in this order: ADR-031 and ADR-032, then ADR-020, then ADR-026 with ADR-029's leases, then
 ADR-023 (its key-algorithm policy first), then ADR-027, ADR-024 and ADR-025, and finally
 ADR-021 and ADR-022.
 
