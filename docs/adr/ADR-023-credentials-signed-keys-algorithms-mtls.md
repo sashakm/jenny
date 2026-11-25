@@ -126,6 +126,9 @@ else.
 TLS also gives gRPC its ALPN (ADR-021) and the management listener a way to require
 client certificates (ADR-020).
 
+This section is about callers presenting certificates to the service. The service
+presenting its own certificate to NATS is the other direction, and is covered by ADR-031.
+
 ## Open questions
 
 - With an external proxy, trust the forwarded certificate header, or require TLS

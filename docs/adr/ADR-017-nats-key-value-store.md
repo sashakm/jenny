@@ -100,3 +100,5 @@ same container in a step, because a service container cannot be given the `-js` 
 
 - Watching a bucket (`watch`) as a source of change events for other services.
 - Time-to-live per key, which JetStream supports and sessions would want.
+- Credentials for the connection: TLS, client certificates, `.creds`, NKeys (ADR-031,
+  proposed).

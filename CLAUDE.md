@@ -157,7 +157,7 @@ check publishability. Details: `RELEASING.md`.
 
 ## Known gaps (not yet built, recorded in ADRs)
 
-Planned features are ADR stubs with status `Proposed` (ADR-020 to ADR-030), indexed in
+Planned features are ADR stubs with status `Proposed` (ADR-020 to ADR-032), indexed in
 the README's Roadmap with the order agreed. Gaps in what is built:
 
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C

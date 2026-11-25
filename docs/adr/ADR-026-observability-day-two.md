@@ -67,7 +67,7 @@ a trace.
 ### Trace context everywhere
 
 W3C `traceparent` and `tracestate` are extracted on REST, gRPC and streams, written into
-event headers (ADR-006 left room for them), stored with outbox rows, and restored by the
+event headers by an enricher (ADR-032), stored with outbox rows, and restored by the
 relay. A trace then spans request → commit → relay → consumer.
 
 ### Log modes per sink
