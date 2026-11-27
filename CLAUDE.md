@@ -151,7 +151,8 @@ happen before jenny can depend on it.
 
 Conventional commits, one change per commit, and a breaking change needs `!` in the
 header or a `BREAKING CHANGE:` footer: release-plz reads only the first line. Pushing to
-`main` updates the release PR; merging it publishes. Never run `cargo publish`,
+`main` updates the release PR; merging it publishes, once a reviewer approves the
+`release` environment. Never run `cargo publish`,
 `cargo yank` or `cargo owner` (the project settings deny them); use `just package` to
 check publishability. Details: `RELEASING.md`.
 
