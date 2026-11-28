@@ -1,15 +1,23 @@
-//! Liveness, readiness and status endpoints.
+//! Liveness, readiness and status endpoints: three endpoint groups
+//! (`server.endpoints`), each served, placed and logged as configured.
 //!
-//! | Path | Question it answers | Who asks |
-//! |---|---|---|
-//! | `GET <framework_path>/health/live` | is the process alive? | the orchestrator's restart policy |
-//! | `GET <framework_path>/health/ready` | should it receive traffic? | the load balancer |
-//! | `GET <framework_path>/health/status` | what is running in here? | a human |
+//! | Group | Default path | Question it answers | Who asks |
+//! |---|---|---|---|
+//! | `probes` | `GET <framework_path>/health/live` | is the process alive? | the orchestrator's restart policy |
+//! | `probes` | `GET <framework_path>/health/ready` | should it receive traffic? | the load balancer |
+//! | `status` | `GET <framework_path>/health/status` | what is running in here? | a human |
+//! | `public_status` | `GET <framework_path>/health/public` | is it working? | the public (off by default) |
 //!
 //! The distinction between live and ready is the one that matters operationally:
 //! a service whose database is down is *live* (restarting it will not help) but not
 //! *ready* (do not send it traffic). Conflating them turns a dependency outage into a
 //! restart loop.
+//!
+//! `status` names every check and reports its error, which describes the
+//! infrastructure behind the service. `public_status` says how the service is and
+//! nothing about why: `{"status": "up"}` when ready, `"degraded"` (still 200) when
+//! started but a check fails, `"down"` (503) before it has started and once it is
+//! stopping.
 //!
 //! ### What checks itself, and what you register
 //!
@@ -267,21 +275,33 @@ struct StatusReport {
 #[derive(Clone)]
 pub(crate) struct HealthEndpointState(pub HealthRegistry, pub StatusInfo);
 
-pub(crate) fn health_router(registry: HealthRegistry, status: StatusInfo) -> Router {
+/// `probes`: `<prefix>/live` and `<prefix>/ready`.
+pub(crate) fn probes_router(registry: HealthRegistry, prefix: &str) -> Router {
     Router::new()
-        .route("/health/live", get(live))
-        .route("/health/ready", get(ready))
-        .route("/health/status", get(status_report))
+        .route(&format!("{prefix}/live"), get(live))
+        .route(&format!("{prefix}/ready"), get(ready))
+        .with_state(registry)
+}
+
+/// `status`, at `path`.
+pub(crate) fn status_router(registry: HealthRegistry, status: StatusInfo, path: &str) -> Router {
+    Router::new()
+        .route(path, get(status_report))
         .with_state(HealthEndpointState(registry, status))
+}
+
+/// `public_status`, at `path`.
+pub(crate) fn public_status_router(registry: HealthRegistry, path: &str) -> Router {
+    Router::new()
+        .route(path, get(public_status))
+        .with_state(registry)
 }
 
 async fn live() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "up" }))
 }
 
-async fn ready(
-    State(HealthEndpointState(registry, _)): State<HealthEndpointState>,
-) -> impl IntoResponse {
+async fn ready(State(registry): State<HealthRegistry>) -> impl IntoResponse {
     let checks = registry.run_checks().await;
     let ready = registry.started() && !registry.stopping() && checks.iter().all(CheckReport::is_up);
     let report = HealthReport {
@@ -300,6 +320,36 @@ async fn ready(
         StatusCode::SERVICE_UNAVAILABLE
     };
     (code, Json(report))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PublicState {
+    Up,
+    Degraded,
+    Down,
+}
+
+/// How the service is, and nothing about why: no check names, errors or versions.
+#[derive(Serialize)]
+struct PublicReport {
+    status: PublicState,
+}
+
+async fn public_status(State(registry): State<HealthRegistry>) -> impl IntoResponse {
+    let status = if !registry.started() || registry.stopping() {
+        PublicState::Down
+    } else if registry.run_checks().await.iter().all(CheckReport::is_up) {
+        PublicState::Up
+    } else {
+        PublicState::Degraded
+    };
+    let code = if status == PublicState::Down {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    (code, Json(PublicReport { status }))
 }
 
 async fn status_report(
@@ -372,6 +422,59 @@ mod tests {
             }],
             consumers: Vec::new(),
         }
+    }
+
+    /// Every health group, at its default path under an empty framework prefix.
+    fn health_router(registry: HealthRegistry, status: StatusInfo) -> Router {
+        probes_router(registry.clone(), "/health")
+            .merge(status_router(registry.clone(), status, "/health/status"))
+            .merge(public_status_router(registry, "/health/public"))
+    }
+
+    #[tokio::test]
+    async fn public_status_says_how_the_service_is_and_nothing_else() {
+        let healthy = Arc::new(AtomicBool::new(true));
+        struct Toggle(Arc<AtomicBool>);
+        #[async_trait]
+        impl HealthCheck for Toggle {
+            fn name(&self) -> &str {
+                "secret-database-name"
+            }
+            async fn check(&self) -> Result<(), String> {
+                if self.0.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
+                    Err("connection refused by 10.0.0.7".into())
+                }
+            }
+        }
+        let registry = HealthRegistry::new(vec![Arc::new(Toggle(healthy.clone()))]);
+        let router = health_router(registry.clone(), status_info());
+
+        let (status, body) = call(router.clone(), "/health/public").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "not started yet");
+        assert_eq!(body, serde_json::json!({"status": "down"}));
+
+        registry.mark_started();
+        let (status, body) = call(router.clone(), "/health/public").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"status": "up"}));
+
+        healthy.store(false, Ordering::Release);
+        let (status, body) = call(router.clone(), "/health/public").await;
+        assert_eq!(status, StatusCode::OK, "degraded is still serving");
+        assert_eq!(body, serde_json::json!({"status": "degraded"}));
+        // The readiness probe, by contrast, takes it out of rotation.
+        assert_eq!(
+            call(router.clone(), "/health/ready").await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        healthy.store(true, Ordering::Release);
+        registry.mark_stopping();
+        let (status, body) = call(router, "/health/public").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "stopping");
+        assert_eq!(body, serde_json::json!({"status": "down"}));
     }
 
     async fn call(router: Router, uri: &str) -> (StatusCode, serde_json::Value) {

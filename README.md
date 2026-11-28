@@ -388,16 +388,38 @@ requests, scheduled runs and messages being handled get `server.shutdown_timeout
 to finish.
 
 Its own endpoints live under `server.framework_path` (`/j`), namespaced away from
-`server.api_path` (`/api`) so the framework can never collide with a route you wanted:
+`server.api_path` (`/api`) so the framework can never collide with a route you wanted.
+They come in groups, each configured under `server.endpoints.<group>`:
 
-| Path | |
-|---|---|
-| `GET /j/health/live` | is the process alive — for the restart policy |
-| `GET /j/health/ready` | should it get traffic — for the load balancer |
-| `GET /j/health/status` | what is mounted, both versions, every dependency's state |
-| `GET /j/metrics` | Prometheus scrape (`telemetry-prometheus`), optionally behind Basic auth |
-| `GET /j/openapi.json` | the API description (`openapi`) |
-| `GET /j/swagger` | a browsable UI, assets compiled in (`swagger-ui`) |
+| Group | Path | |
+|---|---|---|
+| `probes` | `GET /j/health/live` | is the process alive — for the restart policy |
+| `probes` | `GET /j/health/ready` | should it get traffic — for the load balancer |
+| `status` | `GET /j/health/status` | what is mounted, both versions, every dependency's state |
+| `metrics` | `GET /j/metrics` | Prometheus scrape (`telemetry-prometheus`), optionally behind Basic auth |
+| `openapi` | `GET /j/openapi.json` | the API description (`openapi`) |
+| `swagger` | `GET /j/swagger` | a browsable UI over that document, assets compiled in (`swagger-ui`); off by default, follows `openapi` |
+| `public_status` | `GET /j/health/public` | `up`, `degraded` or `down` and nothing else; off by default |
+
+Every group has `enabled`, `listener` (`api` or `management`), `path` (replacing the
+default) and `log_requests`; probes, status, public status and metrics are not
+access-logged unless that is turned on. With `server.management.address` set (`[::]:8081`,
+say), the groups move to a listener of their own at the same paths, and the API's port
+answers `/j/…` with 404 whatever sits in front of it. It stops last on shutdown, so
+`/j/health/ready` reports `stopping` for the whole drain rather than refusing the
+connection (ADR-020):
+
+```yaml
+server:
+  management:
+    address: "[::]:8081"
+  endpoints:
+    openapi: { listener: api, path: /docs/openapi.json }
+    swagger: { enabled: true }
+    public_status: { enabled: true, listener: api, path: /status }
+    metrics:
+      auth: { username: prometheus, password: change-me }
+```
 
 `/j/health/status` reports the framework version, your service's name and version (what
 `jenny::service!()` read from your package, unless `service_name` / `service_version`
@@ -481,7 +503,7 @@ reads every key to list; see above.)
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL, Apache AGE graphs (`graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
-| `jenny-server` | composition root | runtime, the service identity, config, health, hosting; `events()` with configured headers, bus handlers (`handle`), JetStream consumers, tasks and handlers as system principals (`with_authorizer`); the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
+| `jenny-server` | composition root | runtime, the service identity, config, the framework's endpoint groups (`server.endpoints`) on the API or a management listener (`server.management`), hosting; `events()` with configured headers, bus handlers (`handle`), JetStream consumers, tasks and handlers as system principals (`with_authorizer`); the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 
@@ -577,7 +599,6 @@ design is open for discussion, and each one lists its open questions.
 | ADR | What | Builds on |
 |---|---|---|
 | **Day 2** | | |
-| [ADR-020](docs/adr/ADR-020-management-interface.md) | `/j` on a management listener of its own; each endpoint group configurable | ADR-007 |
 | [ADR-021](docs/adr/ADR-021-protobuf-contracts.md) | Rust-first protobuf contracts from `#[derive(Dto)]`, over gRPC, binary HTTP and JSON | ADR-005, ADR-011 |
 | [ADR-022](docs/adr/ADR-022-streaming-sse-and-websocket.md) | server-sent events and WebSocket | ADR-006 inbound dispatch |
 | [ADR-023](docs/adr/ADR-023-credentials-signed-keys-algorithms-mtls.md) | signed API keys, a key-algorithm policy, mTLS | ADR-011 |
@@ -592,8 +613,9 @@ design is open for discussion, and each one lists its open questions.
 | **Milestone 3.0** | | |
 | [ADR-029](docs/adr/ADR-029-clustered-deployments.md) | clustered deployments: Raft-replicated state, then several services | everything |
 
-The day-2 work goes in this order (ADR-031, authenticating to NATS, and ADR-032,
-enriched event headers, are built): ADR-020, then ADR-026 with ADR-029's leases, then
+The day-2 work goes in this order (ADR-031, authenticating to NATS, ADR-032, enriched
+event headers, and ADR-020, the management listener, are built): ADR-026 with ADR-029's
+leases, then
 ADR-023 (its key-algorithm policy first), then ADR-027, ADR-024 and ADR-025, and finally
 ADR-021 and ADR-022.
 

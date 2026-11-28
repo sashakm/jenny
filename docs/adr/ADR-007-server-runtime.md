@@ -1,6 +1,6 @@
 # ADR-007: The Server Runtime and Composition Root
 
-**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `service_name`, `service_version` and `system` (ADR-033), `server`, `telemetry`, `messaging`, `persistence` and `objects`; with `messaging`, it also runs bus handlers and JetStream consumers, which drain with requests at shutdown (ADR-006)
+**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `service_name`, `service_version` and `system` (ADR-033), `server`, `telemetry`, `messaging`, `persistence` and `objects`; with `messaging`, it also runs bus handlers and JetStream consumers, which drain with requests at shutdown (ADR-006); the framework's endpoints are configurable groups that can move to a management listener, which closes last (ADR-020)
 **Date:** 2026-08-24
 
 ## Context
@@ -101,7 +101,10 @@ On a signal or `ServerHandle::shutdown`:
    began; they finish the messages they are handling, beside the requests (ADR-006).
 4. All of them are bounded together by `server.shutdown_timeout_seconds` (default `30`, what
    Kubernetes waits before `SIGKILL`); what is still running then is abandoned.
-5. The broker stops (draining its listeners) and telemetry flushes.
+5. The outbox relay, the broker (draining its listeners), the NATS connection and the
+   Postgres pool stop, in that order. With `server.management`, the management listener
+   closes after them, so readiness reports `stopping` throughout (ADR-020). Then
+   telemetry flushes.
 
 ### The framework's endpoints get their own prefix
 
@@ -111,6 +114,10 @@ the framework can never claim a route the service wanted — and so an operator 
 either without touching code. `/j` is short because it appears in every probe URL in
 every manifest.
 
+ADR-020 builds on this: each group of endpoints (probes, status, metrics, OpenAPI,
+Swagger, a public status) can be switched off, given a path of its own, and moved to a
+second, management listener (`server.management`), where `/j` keeps the same paths.
+
 ### Health is three endpoints, not one
 
 | Path | Question | Asked by |
@@ -118,6 +125,10 @@ every manifest.
 | `GET /j/health/live` | is the process alive? | the restart policy |
 | `GET /j/health/ready` | should it get traffic? | the load balancer |
 | `GET /j/health/status` | what is running in here? | a human |
+
+These are the `probes` and `status` groups under `server.endpoints`; an opt-in
+`public_status` group (`GET /j/health/public`) says only `up`, `degraded` or `down`
+(ADR-020).
 
 The live/ready split is the one that matters operationally. A service whose database is
 down is *live* — restarting will not help — but not *ready*. Conflating them turns a
@@ -155,16 +166,19 @@ does not for anything else.
 
 ### The metrics endpoint can be locked
 
-`server.metrics.auth` adds HTTP Basic authentication to the scrape endpoint. Off by
+`server.endpoints.metrics.auth` (ADR-020) adds HTTP Basic authentication to the scrape
+endpoint. Off by
 default, because in most deployments the endpoint is only reachable from inside the
 cluster; available because that stops being true at some point in every cluster's life.
 See ADR-005 for the comparison and redaction details.
 
 ### Cross-cutting layers apply to everything
 
-Body limit, tracing and the problem-shaped 404/405 fallbacks are applied above every
-route, including the fallbacks themselves, so a 404 has the same shape as any other
-failure (ADR-005).
+The body limit and the problem-shaped 404/405 fallbacks are applied above every route of
+each listener, including the fallbacks themselves, so a 404 has the same shape as any
+other failure (ADR-005). Tracing wraps the REST adapters, the fallback and every
+framework group whose `log_requests` is on; probes, status and scrapes are not traced by
+default (ADR-020).
 
 Outermost of all is `RequestIdLayer`. It keeps an inbound `x-request-id` that is a UUID
 (so a gateway's correlation id survives the hop) and mints one otherwise, then puts that

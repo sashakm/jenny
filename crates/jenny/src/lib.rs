@@ -73,7 +73,7 @@
 //! | `objects` | blob storage — S3 and compatibles, local files, memory — behind [`Blobs`](port::Blobs); with `server`, a store from `objects` |
 //! | `security` | authentication and Cedar authorization |
 //! | `openapi` | OpenAPI schemas for the REST wire types |
-//! | `swagger-ui` | a browsable Swagger UI, assets compiled in (implies `openapi`) |
+//! | `swagger-ui` | a browsable Swagger UI, assets compiled in (implies `openapi`); served once `server.endpoints.swagger.enabled` is set |
 //! | `telemetry-otlp` / `telemetry-prometheus` / `telemetry-loki` | telemetry backends (imply `server`) |
 //! | `full` | every adapter and the runtime |
 

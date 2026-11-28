@@ -5,7 +5,7 @@
 //! binds port `0` and asks the listener what it got, so the test never races another
 //! process for a fixed port.
 
-use jenny::server::{JennyServer, ServerArgs};
+use jenny::server::{ConfigSource, JennyServer, ServerArgs};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -488,6 +488,63 @@ async fn the_example_service_works_end_to_end() {
     a_note_can_carry_an_attachment(&svc).await;
     notes_link_to_each_other(&svc).await;
     failures_are_problem_documents(&svc).await;
+
+    handle.shutdown();
+    serving.await.unwrap().unwrap();
+}
+
+/// With `server.management.address` set, here as `JENNY__SERVER__MANAGEMENT__ADDRESS`
+/// would in a deployment, the framework's endpoints move to a second listener at the
+/// same paths, and the API's listener no longer serves them (ADR-020).
+#[tokio::test]
+async fn the_management_listener_takes_the_framework_endpoints() {
+    // A prefix of its own, so the variable cannot reach the test beside this one.
+    let prefix = "BASIC_EXAMPLE_SPLIT";
+    // SAFETY: the variable name is unique to this test.
+    unsafe {
+        std::env::set_var(
+            format!("{prefix}__SERVER__MANAGEMENT__ADDRESS"),
+            "127.0.0.1:0",
+        )
+    };
+    let args = ServerArgs {
+        address: Some("127.0.0.1:0".to_string()),
+        config_path: Some(format!(
+            "{}/../../examples/basic/config.yaml",
+            env!("CARGO_MANIFEST_DIR")
+        )),
+        env_prefix: Some(prefix.to_string()),
+        ..Default::default()
+    };
+    // `from_config` rather than `from_parsed_args`: the test beside this one installed
+    // the process's telemetry already.
+    let source = ConfigSource::load(&args).unwrap();
+    let config = source.server_config(&args).unwrap();
+    unsafe { std::env::remove_var(format!("{prefix}__SERVER__MANAGEMENT__ADDRESS")) };
+    let server = JennyServer::from_config(config, source, jenny::service!()).unwrap();
+    let parts = crate::build(server).unwrap().bind().await.unwrap();
+
+    let client = Client::new();
+    let api = Service {
+        client: client.clone(),
+        base: format!("http://{}", parts.local_addr().unwrap()),
+    };
+    let management = Service {
+        client,
+        base: format!("http://{}", parts.management_addr().unwrap().unwrap()),
+    };
+    let handle = parts.handle();
+    let serving = tokio::spawn(parts.serve());
+
+    health_endpoints_describe_the_service(&management).await;
+    let (status, problem) = api.get("/j/health/ready").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(problem["type"], "urn:jenny:problem:not-found");
+
+    let (status, _) = api.get("/api/notes").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = management.get("/api/notes").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     handle.shutdown();
     serving.await.unwrap().unwrap();

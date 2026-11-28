@@ -57,6 +57,11 @@
 //!   --config-path examples/basic/config.yaml
 //! ```
 //!
+//! Health, metrics and OpenAPI share the API's port here. With
+//! `JENNY__SERVER__MANAGEMENT__ADDRESS=[::]:8081` they move to a port of their own, at
+//! the same paths, and port 8000 answers `/j/…` with 404
+//! (`the_management_listener_takes_the_framework_endpoints` in the test).
+//!
 //! Then poke at it:
 //!
 //! ```sh
