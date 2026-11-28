@@ -10,7 +10,7 @@
 //! | Logs | Stdout (pretty / JSON) | always |
 //! | Logs + Traces | OTLP → OTel Collector → Logstash / Loki | `telemetry-otlp` |
 //! | Logs | Direct Loki push | `telemetry-loki` |
-//! | Metrics (pull) | Prometheus scrape `/metrics` | `telemetry-prometheus` |
+//! | Metrics (pull) | Prometheus scrape, the `metrics` endpoint group | `telemetry-prometheus` |
 //! | Metrics (push) | OTLP → OTel Collector → Grafana | `telemetry-otlp` |
 //!
 //! # Usage
@@ -46,8 +46,11 @@
 //!   debug: false
 //!   otlp_endpoint: "http://otel-collector:4317"   # requires telemetry-otlp feature
 //!   loki_url: "http://loki:3100"                  # requires telemetry-loki feature
-//!   prometheus_port: 9090                         # requires telemetry-prometheus feature
 //! ```
+//!
+//! With `telemetry-prometheus` the Prometheus exporter is always on. Where the scrape is
+//! served, on which listener and behind which credentials, is the business of the
+//! `server.endpoints.metrics` group ([`EndpointsConfig`](crate::EndpointsConfig)).
 
 mod logging;
 #[cfg(any(feature = "telemetry-otlp", feature = "telemetry-prometheus"))]
@@ -120,16 +123,6 @@ pub struct TelemetryConfig {
     ///
     /// Requires the `telemetry-loki` feature.
     pub loki_url: Option<String>,
-
-    /// Port to expose a Prometheus `/metrics` scrape endpoint.
-    ///
-    /// When set, a Prometheus-compatible metrics exporter is configured and the registry is
-    /// made available via [`TelemetryHandle::prometheus_registry`]. The `jenny-server`
-    /// runtime mounts `/metrics` from it automatically; a hand-rolled axum app can mount
-    /// `jenny_server::metrics_handler` itself.
-    ///
-    /// Requires the `telemetry-prometheus` feature.
-    pub prometheus_port: Option<u16>,
 }
 
 impl TelemetryConfig {
@@ -174,14 +167,6 @@ impl TelemetryConfig {
         self
     }
 
-    /// Set the port on which to expose a Prometheus `/metrics` scrape endpoint.
-    ///
-    /// Has no effect unless the `telemetry-prometheus` feature is enabled.
-    pub fn with_prometheus_port(mut self, port: u16) -> Self {
-        self.prometheus_port = Some(port);
-        self
-    }
-
     /// Initialise the global telemetry stack from this configuration.
     ///
     /// Sets up the `tracing` subscriber with the configured backends and installs global
@@ -213,9 +198,10 @@ pub struct TelemetryHandle {
 }
 
 impl TelemetryHandle {
-    /// Returns the Prometheus metric registry, if `prometheus_port` was configured.
+    /// Returns the Prometheus metric registry, which [`TelemetryConfig::init`] always
+    /// builds with the `telemetry-prometheus` feature.
     ///
-    /// The `jenny-server` runtime mounts a `/metrics` handler automatically; use this to
+    /// The `jenny-server` runtime serves it as the `metrics` endpoint group; use this to
     /// mount `jenny_server::metrics_handler` in a hand-rolled axum app.
     #[cfg(feature = "telemetry-prometheus")]
     pub fn prometheus_registry(&self) -> Option<&prometheus::Registry> {

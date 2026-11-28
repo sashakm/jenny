@@ -1,26 +1,37 @@
 //! Prometheus scrape endpoint.
 
-use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Extension, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get,
+};
+use jenny_rest::RequestId;
 
 /// `text/plain; version=0.0.4; charset=utf-8`
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 /// Serves the registry in Prometheus text exposition format.
 ///
-/// [`JennyServer`](crate::JennyServer) mounts this at `/metrics` when the
-/// `telemetry-prometheus` feature is on and `telemetry.prometheus_port` is set. It is
-/// public so a hand-rolled axum app can mount it too.
+/// [`JennyServer`](crate::JennyServer) serves this as the `metrics` endpoint group
+/// (`<framework_path>/metrics` by default, `server.endpoints.metrics`) whenever the
+/// `telemetry-prometheus` feature is on. It is public so a hand-rolled axum app can
+/// mount it too.
+///
+/// Scrapes produce no request span by default, so a failure to encode is logged with
+/// the request id itself.
 ///
 /// Metrics are an *outbound* concern — the application emits through the telemetry
 /// port — but the scrape endpoint is inbound by direction, which is why it belongs to
 /// the runtime rather than to any application adapter.
-pub async fn metrics_handler(State(registry): State<prometheus::Registry>) -> impl IntoResponse {
+pub async fn metrics_handler(
+    State(registry): State<prometheus::Registry>,
+    request_id: Option<Extension<RequestId>>,
+) -> impl IntoResponse {
     use prometheus::Encoder;
 
     let encoder = prometheus::TextEncoder::new();
     let mut buffer = Vec::new();
     if let Err(e) = encoder.encode(&registry.gather(), &mut buffer) {
-        tracing::error!("failed to encode prometheus metrics: {e}");
+        let request_id = request_id.map(|Extension(id)| id.to_string());
+        tracing::error!(request_id, "failed to encode prometheus metrics: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     (
@@ -30,9 +41,9 @@ pub async fn metrics_handler(State(registry): State<prometheus::Registry>) -> im
         .into_response()
 }
 
-pub(crate) fn metrics_router(registry: prometheus::Registry) -> Router {
+pub(crate) fn metrics_router(registry: prometheus::Registry, path: &str) -> Router {
     Router::new()
-        .route("/metrics", get(metrics_handler))
+        .route(path, get(metrics_handler))
         .with_state(registry)
 }
 
@@ -50,7 +61,7 @@ mod tests {
         registry.register(Box::new(counter.clone())).unwrap();
         counter.inc();
 
-        let response = metrics_router(registry)
+        let response = metrics_router(registry, "/metrics")
             .oneshot(http::Request::get("/metrics").body(Body::empty()).unwrap())
             .await
             .unwrap();

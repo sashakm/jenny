@@ -4,7 +4,7 @@
 //! [`JennyServer`] is the composition root. It is deliberately the one crate allowed
 //! to depend on everything: it reads configuration, brings telemetry up, constructs
 //! concrete driven adapters, hands them to use cases, hands those to driving adapters,
-//! and hosts the lot on a single axum server. Every other crate points inward; this
+//! and hosts the lot on one axum server (two listeners, with `server.management`). Every other crate points inward; this
 //! one closes the circle.
 //!
 //! ### What the runtime brings
@@ -13,9 +13,14 @@
 //! - **Telemetry** — logs, traces and metrics initialised before anything else runs
 //!   ([`telemetry`]). It lives here rather than in `jenny-core`, because only the
 //!   composition root starts exporters, and the domain should not compile OpenTelemetry.
-//! - **Health** — `<framework_path>/health/live`, `…/ready`, `…/status`
-//!   ([`HealthCheck`]); `framework_path` defaults to `/j`.
+//! - **Health** — `<framework_path>/health/live`, `…/ready`, `…/status`, and an opt-in
+//!   public `…/public` ([`HealthCheck`]); `framework_path` defaults to `/j`.
 //! - **Metrics** — `<framework_path>/metrics`, with the `telemetry-prometheus` feature.
+//! - **A management listener** — with `server.management.address`, the framework's
+//!   endpoints move to a port of their own at the same paths, and the API's port
+//!   answers them with 404. Each group (probes, status, metrics, OpenAPI, Swagger, public
+//!   status) is switched on or off, placed and given a path under `server.endpoints`
+//!   ([`EndpointsConfig`]); probes and scrapes are not access-logged by default (ADR-020).
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the
 //!   background, each run as `System[<service_name>/tasks]` with the
 //!   [authorizer](JennyServer::with_authorizer) (ADR-033).
@@ -36,7 +41,8 @@
 //!   checks its readiness; a rotated certificate or `.creds` file reconnects it.
 //! - **An object store** — with `objects`, blobs from `objects.url`
 //!   ([`JennyServer::objects`]), its bucket's readiness checked.
-//! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
+//! - **Hosting** — every registered adapter merged into one router, with graceful
+//!   shutdown: the API drains first, and the management listener closes last.
 //!
 //! ### No injection container
 //!
@@ -57,6 +63,7 @@
 
 mod config;
 mod context;
+mod endpoints;
 mod health;
 #[cfg(feature = "telemetry-prometheus")]
 mod metrics;
@@ -70,9 +77,9 @@ pub mod telemetry;
 pub use config::PersistenceConfig;
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
-    DEFAULT_EVENT_BUFFER, DEFAULT_FRAMEWORK_PATH, DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
-    EventHeadersConfig, EventsConfig, HttpConfig, MessagingConfig, MetricsConfig, ServerArgs,
-    ServerConfig, SystemConfig,
+    DEFAULT_EVENT_BUFFER, DEFAULT_FRAMEWORK_PATH, DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, EndpointConfig,
+    EndpointsConfig, EventHeadersConfig, EventsConfig, HttpConfig, Listener, ManagementConfig,
+    MessagingConfig, MetricsEndpointConfig, ServerArgs, ServerConfig, SystemConfig,
 };
 pub use context::ServerContext;
 pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};

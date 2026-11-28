@@ -24,13 +24,18 @@
 //! server:
 //!   address: "[::]:8000"
 //!   api_path: /api        # where REST adapters mount
-//!   framework_path: /j    # where health, metrics and OpenAPI live
+//!   framework_path: /j    # the default prefix of health, metrics and OpenAPI
 //!   shutdown_delay_seconds: 5     # keep serving, reported not ready, before closing
 //!   shutdown_timeout_seconds: 30  # then wait at most this long for in-flight requests
-//!   metrics:
-//!     auth:               # optional; omit to leave the scrape endpoint open
-//!       username: prometheus
-//!       password: s3cret
+//!   management:           # optional: the framework's endpoints on a port of their own
+//!     address: "[::]:8081"
+//!   endpoints:            # per group: enabled, listener (api | management), path, log_requests
+//!     metrics:
+//!       auth:             # optional; omit to leave the scrape endpoint open
+//!         username: prometheus
+//!         password: s3cret
+//!     swagger: { enabled: false }
+//!     public_status: { enabled: true, listener: api, path: /status }
 //! telemetry:
 //!   log_format: pretty          # service_name and service_version default to the above
 //! messaging:
@@ -132,15 +137,19 @@ pub struct HttpConfig {
     /// See [`RestAdapter`](jenny_rest::RestAdapter) for the precedence rule: an
     /// explicit `.at(…)` wins over this.
     pub api_path: String,
-    /// Where the framework's own endpoints live: health, metrics, OpenAPI.
+    /// The prefix of the default paths of the framework's own endpoints: health,
+    /// metrics, OpenAPI.
     ///
     /// Namespaced away from `api_path` so the framework can never collide with a route
-    /// your service wanted. `/j` is short because it appears in every probe URL.
+    /// your service wanted. `/j` is short because it appears in every probe URL. A
+    /// group's own [`path`](EndpointConfig::path) replaces its default outright.
     pub framework_path: String,
-    /// Whether to expose `<framework_path>/health/*`.
-    pub health: bool,
-    /// The metrics scrape endpoint.
-    pub metrics: MetricsConfig,
+    /// A second listener for the framework's endpoints (ADR-020). Unset, everything is
+    /// served on [`address`](Self::address).
+    pub management: Option<ManagementConfig>,
+    /// Which of the framework's endpoint groups are served, on which listener and at
+    /// which path.
+    pub endpoints: EndpointsConfig,
     /// After `SIGTERM` (or `SIGINT`, or [`ServerHandle::shutdown`]), how long to keep
     /// accepting requests while `/health/ready` already reports the server as stopping.
     ///
@@ -164,20 +173,80 @@ impl Default for HttpConfig {
             body_limit: DEFAULT_BODY_LIMIT,
             api_path: DEFAULT_API_PATH.to_string(),
             framework_path: DEFAULT_FRAMEWORK_PATH.to_string(),
-            health: true,
-            metrics: MetricsConfig::default(),
+            management: None,
+            endpoints: EndpointsConfig::default(),
             shutdown_delay_seconds: 0,
             shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
         }
     }
 }
 
-/// The `server.metrics` section.
+/// `server.management`: the listener the framework's endpoints move to.
+///
+/// With it set, the API listener serves the REST adapters only and answers
+/// `<framework_path>/…` with 404, whatever sits in front of it, unless a group was put
+/// on the API listener explicitly. The paths are the same on either listener.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-pub struct MetricsConfig {
-    /// Whether to expose `<framework_path>/metrics` at all.
+pub struct ManagementConfig {
+    /// Socket address to bind, e.g. `[::]:8081`. Port `0` picks a free one.
+    pub address: String,
+}
+
+/// Which listener an endpoint group is served on.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Listener {
+    /// `server.address`, beside the REST adapters.
+    Api,
+    /// `server.management.address`.
+    Management,
+}
+
+impl std::fmt::Display for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Listener::Api => "api",
+            Listener::Management => "management",
+        })
+    }
+}
+
+/// One endpoint group under `server.endpoints`.
+///
+/// A key left out of the configuration keeps the group's default, so
+/// `public_status: { listener: api }` leaves that group switched off.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointConfig {
+    /// Whether the group is served at all.
     pub enabled: bool,
+    /// Where it is served. Unset: on the management listener when `server.management`
+    /// is set, else on the API listener. `management` without `server.management` is a
+    /// startup error.
+    pub listener: Option<Listener>,
+    /// Replaces the default path. The full path of the one route for `status`,
+    /// `metrics`, `openapi` and `public_status`; a prefix for `probes` (`<path>/live`,
+    /// `<path>/ready`) and `swagger` (the UI under `<path>`).
+    pub path: Option<String>,
+    /// Whether its requests produce a request span and an access-log line. They carry a
+    /// request id either way.
+    pub log_requests: bool,
+}
+
+impl EndpointConfig {
+    const fn new(enabled: bool, log_requests: bool) -> Self {
+        Self {
+            enabled,
+            listener: None,
+            path: None,
+            log_requests,
+        }
+    }
+}
+
+/// `server.endpoints.metrics`: an [`EndpointConfig`], and the scrape's credentials.
+#[derive(Clone, Debug)]
+pub struct MetricsEndpointConfig {
+    pub endpoint: EndpointConfig,
     /// Optional HTTP Basic credentials the scraper must present.
     ///
     /// Left unset the endpoint is open, which is usually right when it is only
@@ -186,11 +255,106 @@ pub struct MetricsConfig {
     pub auth: Option<BasicAuthConfig>,
 }
 
-impl Default for MetricsConfig {
+/// `server.endpoints`: the framework's endpoint groups (ADR-020).
+///
+/// | Group | Default path | Served | `log_requests` |
+/// |---|---|---|---|
+/// | `probes` | `<framework_path>/health/live`, `…/health/ready` | yes | no |
+/// | `status` | `<framework_path>/health/status` | yes | no |
+/// | `metrics` | `<framework_path>/metrics` | with `telemetry-prometheus` | no |
+/// | `openapi` | `<framework_path>/openapi.json` | with `openapi`, when an adapter supplies a document | yes |
+/// | `swagger` | `<framework_path>/swagger` | with `swagger-ui`, beside `openapi` | yes |
+/// | `public_status` | `<framework_path>/health/public` | no, until enabled | no |
+///
+/// Every group can be switched off and moved to either listener. `swagger` loads the
+/// document from the `openapi` group, so it needs that group enabled and on the same
+/// listener. `public_status` answers `{"status": "up" | "degraded" | "down"}` and
+/// nothing else, for a page the public may see; `status` names every check and its
+/// error.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "RawEndpoints")]
+pub struct EndpointsConfig {
+    pub probes: EndpointConfig,
+    pub status: EndpointConfig,
+    pub metrics: MetricsEndpointConfig,
+    pub openapi: EndpointConfig,
+    pub swagger: EndpointConfig,
+    pub public_status: EndpointConfig,
+}
+
+impl Default for EndpointsConfig {
     fn default() -> Self {
+        RawEndpoints::default().into()
+    }
+}
+
+/// What the configuration says, before each group's defaults fill the gaps.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawEndpoints {
+    probes: RawEndpoint,
+    status: RawEndpoint,
+    metrics: RawMetricsEndpoint,
+    openapi: RawEndpoint,
+    swagger: RawEndpoint,
+    public_status: RawEndpoint,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawEndpoint {
+    enabled: Option<bool>,
+    listener: Option<Listener>,
+    path: Option<String>,
+    log_requests: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawMetricsEndpoint {
+    enabled: Option<bool>,
+    listener: Option<Listener>,
+    path: Option<String>,
+    log_requests: Option<bool>,
+    auth: Option<BasicAuthConfig>,
+}
+
+impl RawEndpoint {
+    fn or(self, default: EndpointConfig) -> EndpointConfig {
+        EndpointConfig {
+            enabled: self.enabled.unwrap_or(default.enabled),
+            listener: self.listener,
+            path: self.path,
+            log_requests: self.log_requests.unwrap_or(default.log_requests),
+        }
+    }
+}
+
+impl From<RawEndpoints> for EndpointsConfig {
+    fn from(raw: RawEndpoints) -> Self {
+        let RawMetricsEndpoint {
+            enabled,
+            listener,
+            path,
+            log_requests,
+            auth,
+        } = raw.metrics;
+        let metrics = RawEndpoint {
+            enabled,
+            listener,
+            path,
+            log_requests,
+        };
         Self {
-            enabled: true,
-            auth: None,
+            probes: raw.probes.or(EndpointConfig::new(true, false)),
+            status: raw.status.or(EndpointConfig::new(true, false)),
+            metrics: MetricsEndpointConfig {
+                endpoint: metrics.or(EndpointConfig::new(true, false)),
+                auth,
+            },
+            openapi: raw.openapi.or(EndpointConfig::new(true, true)),
+            swagger: raw.swagger.or(EndpointConfig::new(true, true)),
+            public_status: raw.public_status.or(EndpointConfig::new(false, false)),
         }
     }
 }
@@ -443,8 +607,126 @@ mod tests {
         let config = source.server_config(&args).unwrap();
         assert_eq!(config.server.address, "[::]:8000");
         assert_eq!(config.server.body_limit, DEFAULT_BODY_LIMIT);
-        assert!(config.server.health);
+        assert!(config.server.management.is_none());
         assert!(!config.telemetry.debug);
+    }
+
+    fn server_section(yaml: &str, prefix: &str) -> HttpConfig {
+        let file = write_yaml(yaml);
+        let args = ServerArgs {
+            config_path: Some(file.path().to_string_lossy().into_owned()),
+            env_prefix: Some(prefix.into()),
+            ..Default::default()
+        };
+        ConfigSource::load(&args)
+            .unwrap()
+            .server_config(&args)
+            .unwrap()
+            .server
+    }
+
+    #[test]
+    fn every_endpoint_group_has_its_own_defaults() {
+        let endpoints = EndpointsConfig::default();
+        let on = |log_requests| EndpointConfig::new(true, log_requests);
+        assert_eq!(endpoints.probes, on(false));
+        assert_eq!(endpoints.status, on(false));
+        assert_eq!(endpoints.metrics.endpoint, on(false));
+        assert!(endpoints.metrics.auth.is_none());
+        assert_eq!(endpoints.openapi, on(true));
+        assert_eq!(endpoints.swagger, on(true));
+        assert_eq!(endpoints.public_status, EndpointConfig::new(false, false));
+
+        // A management listener changes no group's settings; it only changes where an
+        // unset `listener` resolves to.
+        let server = server_section(
+            "server:\n  management:\n    address: \"127.0.0.1:0\"\n",
+            "JENNY_TEST_ENDPOINTS_MANAGED",
+        );
+        assert_eq!(server.management.unwrap().address, "127.0.0.1:0");
+        assert_eq!(server.endpoints.probes, on(false));
+        assert_eq!(server.endpoints.public_status.listener, None);
+    }
+
+    #[test]
+    fn a_group_takes_what_is_configured_and_keeps_its_defaults_for_the_rest() {
+        let server = server_section(
+            r#"
+server:
+  endpoints:
+    public_status: { listener: api, path: /status }
+    openapi: { listener: management, path: /docs/openapi.json }
+    swagger: { enabled: false }
+    probes: { log_requests: true }
+    metrics:
+      path: /scrape
+      auth: { username: prometheus, password: s3cret }
+"#,
+            "JENNY_TEST_ENDPOINTS_SET",
+        );
+        let endpoints = server.endpoints;
+        assert_eq!(
+            endpoints.public_status,
+            EndpointConfig {
+                enabled: false,
+                listener: Some(Listener::Api),
+                path: Some("/status".into()),
+                log_requests: false,
+            },
+            "enabled stays off unless asked for"
+        );
+        assert_eq!(endpoints.openapi.listener, Some(Listener::Management));
+        assert_eq!(
+            endpoints.openapi.path.as_deref(),
+            Some("/docs/openapi.json")
+        );
+        assert!(endpoints.openapi.log_requests);
+        assert!(!endpoints.swagger.enabled);
+        assert!(endpoints.swagger.log_requests);
+        assert!(endpoints.probes.enabled);
+        assert!(endpoints.probes.log_requests);
+        assert_eq!(endpoints.metrics.endpoint.path.as_deref(), Some("/scrape"));
+        let auth = endpoints.metrics.auth.unwrap();
+        assert_eq!(auth.username, "prometheus");
+        assert!(!format!("{auth:?}").contains("s3cret"));
+    }
+
+    #[test]
+    fn a_group_can_be_switched_on_from_the_environment() {
+        let prefix = "JENNY_TEST_ENDPOINTS_ENV";
+        // SAFETY: the variable names are unique to this test.
+        unsafe {
+            std::env::set_var(
+                format!("{prefix}__SERVER__ENDPOINTS__PUBLIC_STATUS__ENABLED"),
+                "true",
+            );
+            std::env::set_var(
+                format!("{prefix}__SERVER__MANAGEMENT__ADDRESS"),
+                "[::]:8081",
+            );
+        }
+        let server = server_section("{}", prefix);
+        unsafe {
+            std::env::remove_var(format!(
+                "{prefix}__SERVER__ENDPOINTS__PUBLIC_STATUS__ENABLED"
+            ));
+            std::env::remove_var(format!("{prefix}__SERVER__MANAGEMENT__ADDRESS"));
+        }
+        assert!(server.endpoints.public_status.enabled);
+        assert_eq!(server.management.unwrap().address, "[::]:8081");
+    }
+
+    #[test]
+    fn the_removed_keys_no_longer_mean_anything() {
+        // `server.health`, `server.metrics` and `telemetry.prometheus_port` are gone
+        // from the types: they are ignored like any unknown key.
+        let server = server_section(
+            "server:\n  health: false\n  metrics:\n    enabled: false\ntelemetry:\n  prometheus_port: 9090\n",
+            "JENNY_TEST_ENDPOINTS_REMOVED",
+        );
+        assert!(server.endpoints.probes.enabled);
+        assert!(server.endpoints.status.enabled);
+        assert!(server.endpoints.metrics.endpoint.enabled);
     }
 
     #[test]

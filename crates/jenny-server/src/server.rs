@@ -18,9 +18,10 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use crate::{
-    config::{ConfigSource, ServerArgs, ServerConfig},
+    config::{ConfigSource, Listener, ServerArgs, ServerConfig},
     context::ServerContext,
-    health::{AdapterSummary, HealthCheck, HealthRegistry, StatusInfo, health_router},
+    endpoints::{AdapterRoutes, Available, Group},
+    health::{AdapterSummary, HealthCheck, HealthRegistry, StatusInfo},
     telemetry::TelemetryHandle,
 };
 
@@ -74,19 +75,6 @@ pub struct JennyServer {
     nats_options: Option<jenny_messaging::kv::OptionsHook>,
     #[cfg(feature = "objects")]
     objects: Option<Arc<jenny_objects::ObjectBlobs>>,
-}
-
-/// Leading slash on, trailing slash off. `"/"` or `""` mean "no prefix", which axum
-/// expresses by not nesting rather than by nesting under `"/"`.
-fn normalize_prefix(path: &str) -> String {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        String::new()
-    } else if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    }
 }
 
 /// Combine every adapter's OpenAPI document into one.
@@ -155,6 +143,8 @@ async fn shutdown_signal() {
 pub struct ServerParts {
     listener: TcpListener,
     router: Router,
+    /// The management listener and what it serves, with `server.management`.
+    management: Option<(TcpListener, Router)>,
     shutdown: watch::Sender<bool>,
     shutdown_delay: Duration,
     shutdown_timeout: Duration,
@@ -188,16 +178,34 @@ impl ServerParts {
         Ok(self.listener.local_addr()?)
     }
 
+    /// The management listener's address, resolved like [`local_addr`](Self::local_addr),
+    /// or `None` without `server.management`.
+    pub fn management_addr(&self) -> anyhow::Result<Option<SocketAddr>> {
+        self.management
+            .as_ref()
+            .map(|(listener, _)| listener.local_addr())
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// A handle that can ask this server to stop.
     pub fn handle(&self) -> ServerHandle {
         ServerHandle(self.shutdown.clone())
     }
 
     /// Serve until [`ServerHandle::shutdown`] is called, then drain, flush and stop.
+    ///
+    /// Readiness turns false first, the API keeps serving for `shutdown_delay`, then
+    /// closes and drains; the outbox relay, the broker, the NATS connection and the
+    /// Postgres pool stop in that order; the management listener closes last, so a
+    /// load balancer sees "not ready" rather than a refused connection for all of it.
+    /// `shutdown_delay + shutdown_timeout` bounds the whole sequence's waiting on
+    /// requests, management listener included.
     pub async fn serve(self) -> anyhow::Result<()> {
         let Self {
             listener,
             router,
+            management,
             shutdown,
             shutdown_delay,
             shutdown_timeout,
@@ -228,10 +236,23 @@ impl ServerParts {
             info!("closing the listener and draining in-flight requests");
         };
         let mut requested = shutdown.subscribe();
-        let deadline = async move {
+        let deadline = futures::FutureExt::shared(Box::pin(async move {
             let _ = requested.wait_for(|stopping| *stopping).await;
             tokio::time::sleep(shutdown_delay + shutdown_timeout).await;
-        };
+        }));
+
+        // Serving beside the API from the start, and closed only at the very end.
+        let management = management.map(|(listener, router)| {
+            let (close, mut closing) = watch::channel(false);
+            let serving = tokio::spawn(
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        let _ = closing.wait_for(|close| *close).await;
+                    })
+                    .into_future(),
+            );
+            (close, serving)
+        });
 
         let serving = axum::serve(listener, router)
             .with_graceful_shutdown(close_listener)
@@ -255,7 +276,7 @@ impl ServerParts {
         };
         let result = tokio::select! {
             result = drain => result,
-            () = deadline => {
+            () = deadline.clone() => {
                 warn!(
                     timeout_seconds = shutdown_timeout.as_secs(),
                     "in-flight work did not finish in time; stopping without it"
@@ -294,8 +315,27 @@ impl ServerParts {
         if let Some(postgres) = postgres {
             postgres.close().await;
         }
+        // Last of all, so readiness answered `stopping` until here.
+        let mut management_result = Ok(());
+        if let Some((close, mut serving)) = management {
+            info!("closing the management listener");
+            let _ = close.send(true);
+            tokio::select! {
+                biased;
+                joined = &mut serving => {
+                    management_result = joined
+                        .map_err(anyhow::Error::from)
+                        .and_then(|served| served.map_err(Into::into));
+                }
+                () = deadline => {
+                    warn!("the management listener did not drain in time; stopping without it");
+                    serving.abort();
+                }
+            }
+        }
         drop(telemetry);
-        Ok(result?)
+        result?;
+        management_result
     }
 }
 
@@ -884,6 +924,70 @@ impl JennyServer {
         #[cfg(not(feature = "messaging"))]
         let _ = authorizer;
 
+        // Adapters that did not choose a path in code take the configured one.
+        for adapter in &mut rest_adapters {
+            adapter.apply_default_path(&config.server.api_path);
+        }
+
+        // `register` rejects collisions between the paths known at that point, but
+        // applying the configured default can create a new one — an adapter explicitly
+        // at `/x` and `server.api_path: /x`. Checking again here is what makes that
+        // a startup failure rather than routes that silently never match.
+        for (index, adapter) in rest_adapters.iter().enumerate() {
+            if let Some(other) = rest_adapters[..index]
+                .iter()
+                .find(|earlier| earlier.path() == adapter.path())
+            {
+                anyhow::bail!(
+                    "`{}` and `{}` both resolve to the mount path `{}`; \
+                     set `server.api_path` or call `.at(…)` on one of them",
+                    other.name(),
+                    adapter.name(),
+                    adapter.path()
+                );
+            }
+        }
+
+        // Where each of the framework's endpoint groups goes: decided, and refused when
+        // it cannot work, before anything connects or binds.
+        #[cfg(feature = "openapi")]
+        let document = merged_openapi(&rest_adapters);
+        #[cfg(feature = "telemetry-prometheus")]
+        let registry = telemetry
+            .as_ref()
+            .and_then(|handle| handle.prometheus_registry().cloned());
+        let layout = crate::endpoints::resolve(
+            &config.server,
+            Available {
+                #[cfg(feature = "telemetry-prometheus")]
+                metrics: registry.is_some(),
+                #[cfg(not(feature = "telemetry-prometheus"))]
+                metrics: false,
+                #[cfg(feature = "openapi")]
+                openapi: document.is_some(),
+                #[cfg(not(feature = "openapi"))]
+                openapi: false,
+                swagger: cfg!(feature = "swagger-ui"),
+            },
+            &rest_adapters
+                .iter()
+                .map(|adapter| AdapterRoutes {
+                    name: adapter.name().to_string(),
+                    mount: adapter.path().to_string(),
+                    routes: adapter
+                        .resources()
+                        .iter()
+                        .flat_map(|resource| resource.endpoints())
+                        .map(|endpoint| match (adapter.path(), endpoint.path.as_str()) {
+                            ("", path) => path.to_string(),
+                            (mount, "/") => mount.to_string(),
+                            (mount, path) => format!("{mount}{path}"),
+                        })
+                        .collect(),
+                })
+                .collect::<Vec<_>>(),
+        )?;
+
         // Buckets too: a store whose bucket cannot be opened fails here, not later.
         #[cfg(feature = "messaging")]
         if let Some(nats) = nats.as_ref() {
@@ -967,30 +1071,6 @@ impl JennyServer {
             handles
         };
 
-        // Adapters that did not choose a path in code take the configured one.
-        for adapter in &mut rest_adapters {
-            adapter.apply_default_path(&config.server.api_path);
-        }
-
-        // `register` rejects collisions between the paths known at that point, but
-        // applying the configured default can create a new one — an adapter explicitly
-        // at `/x` and `server.api_path: /x`. Checking again here is what makes that
-        // a startup failure rather than routes that silently never match.
-        for (index, adapter) in rest_adapters.iter().enumerate() {
-            if let Some(other) = rest_adapters[..index]
-                .iter()
-                .find(|earlier| earlier.path() == adapter.path())
-            {
-                anyhow::bail!(
-                    "`{}` and `{}` both resolve to the mount path `{}`; \
-                     set `server.api_path` or call `.at(…)` on one of them",
-                    other.name(),
-                    adapter.name(),
-                    adapter.path()
-                );
-            }
-        }
-
         // Checks for what the runtime itself owns, the Postgres pool among them (above).
         // Anything it does not own is registered by the composition root.
         #[cfg(feature = "telemetry-otlp")]
@@ -1043,58 +1123,123 @@ impl JennyServer {
             },
         };
 
-        // The framework's own endpoints, gathered under one prefix so they can never
-        // collide with a route the service wanted.
-        let mut framework = Router::new();
-        if config.server.health {
-            framework = framework.merge(health_router(health.clone(), status));
+        // The REST adapters, traced, with the problem documents for a wrong method.
+        let mut api = Router::new();
+        for adapter in rest_adapters {
+            api = api.merge(adapter.into_router());
         }
+        let mut api = api
+            .method_not_allowed_fallback(jenny_rest::method_not_allowed)
+            .layer(trace_layer());
+        let mut management = config.server.management.as_ref().map(|_| Router::new());
 
+        // Each of the framework's groups is a router of its own, traced only when its
+        // `log_requests` says so, merged into the router of its listener.
+        let mut place = |group: Group, router: Router| {
+            let Some(placement) = layout.get(group) else {
+                return;
+            };
+            let router = router.method_not_allowed_fallback(jenny_rest::method_not_allowed);
+            let router = if placement.log_requests {
+                router.layer(trace_layer())
+            } else {
+                router
+            };
+            match (placement.listener, management.as_mut()) {
+                (Listener::Management, Some(management)) => {
+                    *management = std::mem::take(management).merge(router);
+                }
+                _ => api = std::mem::take(&mut api).merge(router),
+            }
+        };
+        // Only the groups that are served are built: a disabled one may have no path.
+        let path = |group: Group| layout.get(group).map(|p| p.path.clone());
+        if let Some(prefix) = path(Group::Probes) {
+            place(
+                Group::Probes,
+                crate::health::probes_router(health.clone(), &prefix),
+            );
+        }
+        if let Some(route) = path(Group::Status) {
+            place(
+                Group::Status,
+                crate::health::status_router(health.clone(), status, &route),
+            );
+        }
+        if let Some(route) = path(Group::PublicStatus) {
+            place(
+                Group::PublicStatus,
+                crate::health::public_status_router(health.clone(), &route),
+            );
+        }
         #[cfg(feature = "telemetry-prometheus")]
-        if config.server.metrics.enabled
-            && let Some(registry) = telemetry
-                .as_ref()
-                .and_then(|handle| handle.prometheus_registry().cloned())
-        {
-            let mut metrics = crate::metrics::metrics_router(registry);
-            if let Some(auth) = config.server.metrics.auth.as_ref() {
+        if let (Some(registry), Some(route)) = (registry, path(Group::Metrics)) {
+            let mut metrics = crate::metrics::metrics_router(registry, &route);
+            if let Some(auth) = config.server.endpoints.metrics.auth.as_ref() {
                 info!("metrics endpoint requires basic authentication");
                 metrics = metrics.layer(
                     jenny_rest::security::BasicAuth::new(&auth.username, &auth.password)
                         .with_realm("metrics"),
                 );
             }
-            framework = framework.merge(metrics);
+            place(Group::Metrics, metrics);
         }
-
         #[cfg(feature = "openapi")]
-        if let Some(document) = merged_openapi(&rest_adapters) {
-            framework = framework.merge(crate::openapi::openapi_router(document));
+        if let (Some(document), Some(route)) = (document, path(Group::Openapi)) {
+            #[cfg(feature = "swagger-ui")]
+            if let Some(prefix) = path(Group::Swagger) {
+                place(
+                    Group::Swagger,
+                    crate::openapi::swagger_router(&prefix, &route),
+                );
+            }
+            place(
+                Group::Openapi,
+                crate::openapi::document_router(document, &route),
+            );
         }
+        drop(place);
 
-        let framework_path = normalize_prefix(&config.server.framework_path);
-        let mut router = if framework_path.is_empty() {
-            framework
-        } else {
-            Router::new().nest(&framework_path, framework)
+        // Everything below applies to every route of a listener, including the
+        // fallback, so that a 404 looks like every other failure rather than like a
+        // hole in the API.
+        let body_limit = config.server.body_limit;
+        let finish = |router: Router| {
+            router
+                .fallback(axum::handler::Handler::layer(
+                    jenny_rest::not_found,
+                    trace_layer(),
+                ))
+                .layer(DefaultBodyLimit::max(body_limit))
+                // Outermost, so the trace span, every layer and every problem document
+                // see the same id, traced or not.
+                .layer(RequestIdLayer)
         };
+        let router = finish(api);
+        let management = management.map(finish);
 
-        for adapter in rest_adapters {
-            router = router.merge(adapter.into_router());
-        }
-
-        // Everything below applies to every route, including the fallbacks, so that a
-        // 404 looks like every other failure rather than like a hole in the API.
-        let router = router
-            .fallback(jenny_rest::not_found)
-            .method_not_allowed_fallback(jenny_rest::method_not_allowed)
-            .layer(DefaultBodyLimit::max(config.server.body_limit))
-            .layer(TraceLayer::new_for_http().make_span_with(request_span))
-            // Outermost, so the trace span, every layer and every problem document see
-            // the same id.
-            .layer(RequestIdLayer);
-
-        let listener = TcpListener::bind(&config.server.address).await?;
+        // Both sockets before the server counts as started; if either cannot be bound,
+        // neither serves.
+        let listener = TcpListener::bind(&config.server.address)
+            .await
+            .map_err(|e| {
+                anyhow::Error::from(e).context(format!(
+                    "binding `server.address` (`{}`)",
+                    config.server.address
+                ))
+            })?;
+        let management = match (config.server.management.as_ref(), management) {
+            (Some(settings), Some(router)) => Some((
+                TcpListener::bind(&settings.address).await.map_err(|e| {
+                    anyhow::Error::from(e).context(format!(
+                        "binding `server.management.address` (`{}`)",
+                        settings.address
+                    ))
+                })?,
+                router,
+            )),
+            _ => None,
+        };
 
         // Consuming starts only once nothing else can fail startup, so no message is acked
         // by a service that then does not come up.
@@ -1119,12 +1264,20 @@ impl JennyServer {
             }))
         });
 
-        info!(address = %listener.local_addr()?, "jenny server bound");
+        match management.as_ref() {
+            Some((management, _)) => info!(
+                address = %listener.local_addr()?,
+                management = %management.local_addr()?,
+                "jenny server bound"
+            ),
+            None => info!(address = %listener.local_addr()?, "jenny server bound"),
+        }
         health.mark_started();
 
         Ok(ServerParts {
             listener,
             router,
+            management,
             shutdown,
             shutdown_delay: Duration::from_secs(config.server.shutdown_delay_seconds),
             shutdown_timeout: Duration::from_secs(config.server.shutdown_timeout_seconds),
@@ -1154,6 +1307,16 @@ impl JennyServer {
         });
         parts.serve().await
     }
+}
+
+/// The request span and access log, for the REST adapters and every group whose
+/// `log_requests` is on.
+fn trace_layer() -> tower_http::trace::TraceLayer<
+    tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
+    fn(&axum::extract::Request) -> tracing::Span,
+> {
+    TraceLayer::new_for_http()
+        .make_span_with(request_span as fn(&axum::extract::Request) -> tracing::Span)
 }
 
 /// The span every request is traced in, carrying the id [`RequestIdLayer`] assigned.
@@ -1338,6 +1501,301 @@ mod tests {
         assert_eq!(problem["instance"], format!("urn:uuid:{id}"));
     }
 
+    /// A server with `server.management` on a free port.
+    fn managed_server() -> JennyServer {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.management = Some(crate::config::ManagementConfig {
+            address: "127.0.0.1:0".into(),
+        });
+        server
+    }
+
+    #[tokio::test]
+    async fn without_management_there_is_one_listener() {
+        let parts = server_with("127.0.0.1:0").bind().await.unwrap();
+        assert_eq!(parts.management_addr().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn with_management_the_framework_endpoints_move_to_their_own_listener() {
+        let parts = managed_server()
+            .register(notes())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let api = parts.local_addr().unwrap();
+        let management = parts.management_addr().unwrap().expect("a second listener");
+        assert_ne!(api, management);
+        assert_ne!(management.port(), 0);
+        let handle = parts.handle();
+        let serving = tokio::spawn(parts.serve());
+
+        for path in ["/j/health/live", "/j/health/ready", "/j/health/status"] {
+            let response = raw_get(&format!("http://{management}{path}")).await;
+            assert!(response.starts_with("HTTP/1.0 200"), "{path}: {response}");
+            let response = raw_get(&format!("http://{api}{path}")).await;
+            assert!(response.starts_with("HTTP/1.0 404"), "{path}: {response}");
+            assert!(
+                response.contains("urn:jenny:problem:not-found"),
+                "a problem document: {response}"
+            );
+        }
+        let response = raw_get(&format!("http://{api}/api/notes")).await;
+        assert!(response.starts_with("HTTP/1.0 200"), "{response}");
+        let response = raw_get(&format!("http://{management}/api/notes")).await;
+        assert!(response.starts_with("HTTP/1.0 404"), "{response}");
+        assert!(
+            response.contains("urn:jenny:problem:not-found"),
+            "{response}"
+        );
+        assert!(
+            response
+                .to_lowercase()
+                .contains(jenny_rest::REQUEST_ID_HEADER),
+            "{response}"
+        );
+
+        handle.shutdown();
+        serving.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_group_can_stay_on_the_api_listener_at_a_path_of_its_own() {
+        use crate::config::Listener;
+
+        let mut server = managed_server();
+        let public = &mut server.config.server.endpoints.public_status;
+        public.enabled = true;
+        public.listener = Some(Listener::Api);
+        public.path = Some("/status".into());
+        let parts = server.register(notes()).unwrap().bind().await.unwrap();
+        let management = parts.management.as_ref().unwrap().1.clone();
+
+        let (status, body) = call(parts.router.clone(), "/status").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"status": "up"}));
+        assert_eq!(
+            call(management.clone(), "/status").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(management.clone(), "/j/health/public").await.0,
+            StatusCode::NOT_FOUND
+        );
+        // Everything else stayed on the management listener.
+        assert_eq!(call(management, "/j/health/ready").await.0, StatusCode::OK);
+        assert_eq!(
+            call(parts.router.clone(), "/j/health/ready").await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn naming_a_management_listener_that_is_not_configured_stops_the_service() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.endpoints.status.listener = Some(crate::config::Listener::Management);
+        let Err(err) = server.bind().await else {
+            panic!("there is no management listener");
+        };
+        assert!(
+            err.to_string()
+                .contains("`server.endpoints.status.listener`"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_group_inside_an_adapters_mount_stops_the_service() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.endpoints.status.path = Some("/api/status".into());
+        let Err(err) = server.register(notes()).unwrap().bind().await else {
+            panic!("`/api/status` is inside `my-notes`, at `/api`");
+        };
+        let err = err.to_string();
+        assert!(err.contains("`server.endpoints.status.path`"), "{err}");
+        assert!(err.contains("`my-notes`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_taken_management_port_fails_bind_and_leaves_the_api_port_unbound() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let free = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut server = server_with(&free.to_string());
+        server.config.server.management = Some(crate::config::ManagementConfig {
+            address: taken.local_addr().unwrap().to_string(),
+        });
+        let Err(err) = server.bind().await else {
+            panic!("the management port is in use");
+        };
+        assert!(
+            format!("{err:#}").contains("`server.management.address`"),
+            "{err:#}"
+        );
+        assert!(
+            std::net::TcpListener::bind(free).is_ok(),
+            "the API listener was released"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_management_listener_reports_stopping_while_the_api_drains_and_closes_last() {
+        let mut server = managed_server();
+        server.config.server.shutdown_delay_seconds = 1;
+        let server = server
+            .register(
+                RestAdapter::new("slow")
+                    .unwrap()
+                    .mount(Routes::new("slow").get("/slow", || async {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        "done"
+                    }))
+                    .unwrap(),
+            )
+            .unwrap();
+        let parts = server.bind().await.unwrap();
+        let api = parts.local_addr().unwrap();
+        let management = parts.management_addr().unwrap().unwrap();
+        let handle = parts.handle();
+        let serving = tokio::spawn(parts.serve());
+
+        let ready = format!("http://{management}/j/health/ready");
+        assert!(raw_get(&ready).await.starts_with("HTTP/1.0 200"));
+        let slow = tokio::spawn(async move { raw_get(&format!("http://{api}/api/slow")).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.shutdown();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // During the delay: not ready, and the API still answers.
+        let during_delay = raw_get(&ready).await;
+        assert!(during_delay.starts_with("HTTP/1.0 503"), "{during_delay}");
+        assert!(during_delay.contains("\"stopping\""), "{during_delay}");
+
+        // After it the API listener is closed and draining the slow request, while
+        // the management listener still says why.
+        tokio::time::sleep(Duration::from_millis(1_400)).await;
+        assert!(
+            tokio::net::TcpStream::connect(api).await.is_err(),
+            "the API listener is closed"
+        );
+        let draining = raw_get(&ready).await;
+        assert!(draining.starts_with("HTTP/1.0 503"), "{draining}");
+        assert!(draining.contains("\"stopping\""), "{draining}");
+
+        serving.await.unwrap().unwrap();
+        assert!(
+            slow.await.unwrap().contains("done"),
+            "the drain finished it"
+        );
+        assert!(
+            tokio::net::TcpStream::connect(management).await.is_err(),
+            "the management listener closed last"
+        );
+    }
+
+    /// Every span opened and every event emitted, by name and target.
+    #[derive(Clone, Default)]
+    struct Recorded(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
+        fn on_new_span(
+            &self,
+            attributes: &tracing::span::Attributes<'_>,
+            _: &tracing::span::Id,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let name = attributes.metadata().name();
+            self.0.lock().unwrap().push(format!("span {name}"));
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let target = event.metadata().target();
+            self.0.lock().unwrap().push(format!("event {target}"));
+        }
+    }
+
+    impl Recorded {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+
+        fn traced(seen: &[String]) -> bool {
+            seen.iter().any(|s| s == "span request")
+                && seen.iter().any(|s| s.contains("tower_http"))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn probes_are_not_traced_unless_asked_but_still_carry_a_request_id() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let recorded = Recorded::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+        // Callsites other tests registered first, under no subscriber, cached that
+        // they are never interesting; this one wants them.
+        let rebuild = tracing::callsite::rebuild_interest_cache;
+        rebuild();
+
+        let get = |router: Router, uri: &'static str| async move {
+            router
+                .oneshot(http::Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        };
+
+        let parts = server_with("127.0.0.1:0")
+            .register(notes())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        rebuild();
+        recorded.take();
+        let response = get(parts.router.clone(), "/j/health/ready").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .contains_key(jenny_rest::REQUEST_ID_HEADER)
+        );
+        let seen = recorded.take();
+        assert!(
+            !seen
+                .iter()
+                .any(|s| s == "span request" || s.contains("tower_http")),
+            "a probe left no span and no access log: {seen:?}"
+        );
+
+        let response = get(parts.router.clone(), "/api/notes").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let seen = recorded.take();
+        assert!(Recorded::traced(&seen), "the API is traced: {seen:?}");
+        let response = get(parts.router.clone(), "/nowhere").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(Recorded::traced(&recorded.take()), "and so is a 404");
+
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.endpoints.probes.log_requests = true;
+        let parts = server.bind().await.unwrap();
+        rebuild();
+        recorded.take();
+        let response = get(parts.router.clone(), "/j/health/ready").await;
+        assert!(
+            response
+                .headers()
+                .contains_key(jenny_rest::REQUEST_ID_HEADER)
+        );
+        assert!(Recorded::traced(&recorded.take()), "log_requests: true");
+    }
+
     #[tokio::test]
     async fn a_bound_server_serves_and_then_stops_on_request() {
         let parts = server_with("127.0.0.1:0").bind().await.unwrap();
@@ -1509,13 +1967,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_endpoints_can_be_switched_off() {
+    async fn a_disabled_group_is_not_served_and_the_others_are() {
         let mut server = server_with("127.0.0.1:0");
-        server.config.server.health = false;
+        server.config.server.endpoints.probes.enabled = false;
         let parts = server.bind().await.unwrap();
 
-        let (status, _) = call(parts.router.clone(), "/j/health/live").await;
+        let (status, body) = call(parts.router.clone(), "/j/health/live").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["type"], "urn:jenny:problem:not-found");
+        let (status, _) = call(parts.router.clone(), "/j/health/status").await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -2402,29 +2863,37 @@ mod tests {
         serving.await.unwrap().unwrap();
     }
 
+    /// What `from_args` gets from telemetry init, minus the global subscriber.
+    #[cfg(feature = "telemetry-prometheus")]
+    fn with_a_registry(mut server: JennyServer) -> JennyServer {
+        server.telemetry = Some(TelemetryHandle {
+            tracer_provider: None,
+            logger_provider: None,
+            prometheus_registry: Some(prometheus::Registry::new()),
+            loki_task: None,
+        });
+        server
+    }
+
     #[cfg(feature = "telemetry-prometheus")]
     #[tokio::test]
     async fn the_metrics_endpoint_can_require_basic_auth() {
         use crate::config::BasicAuthConfig;
 
-        let mut server = server_with("127.0.0.1:0");
-        server.config.server.metrics.auth = Some(BasicAuthConfig {
+        let mut server = with_a_registry(server_with("127.0.0.1:0"));
+        server.config.server.endpoints.metrics.auth = Some(BasicAuthConfig {
             username: "prometheus".into(),
             password: "s3cret".into(),
         });
-        // A registry is normally supplied by telemetry init; build the router directly
-        // so the test does not need a live exporter.
-        let metrics = crate::metrics::metrics_router(prometheus::Registry::new()).layer(
-            jenny_rest::security::BasicAuth::new(
-                &server.config.server.metrics.auth.as_ref().unwrap().username,
-                &server.config.server.metrics.auth.as_ref().unwrap().password,
-            )
-            .with_realm("metrics"),
-        );
+        let metrics = server.bind().await.unwrap().router;
 
         let unauthorized = metrics
             .clone()
-            .oneshot(http::Request::get("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                http::Request::get("/j/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
@@ -2433,7 +2902,7 @@ mod tests {
         let credential = base64::engine::general_purpose::STANDARD.encode("prometheus:s3cret");
         let authorized = metrics
             .oneshot(
-                http::Request::get("/metrics")
+                http::Request::get("/j/metrics")
                     .header(http::header::AUTHORIZATION, format!("Basic {credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2441,6 +2910,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "telemetry-prometheus")]
+    #[tokio::test]
+    async fn metrics_move_to_the_management_listener_at_a_path_of_their_own() {
+        let mut server = with_a_registry(managed_server());
+        server.config.server.endpoints.metrics.endpoint.path = Some("/scrape".into());
+        let parts = server.bind().await.unwrap();
+        let management = parts.management.as_ref().unwrap().1.clone();
+
+        let (status, _) = call(management.clone(), "/scrape").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            call(management, "/j/metrics").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(parts.router.clone(), "/scrape").await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[cfg(feature = "persistence")]
@@ -2546,5 +3035,114 @@ mod tests {
         let (status, body) = call(parts.router.clone(), "/j/openapi.json").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["components"]["schemas"]["NoteRequest"].is_object());
+    }
+
+    #[cfg(feature = "openapi")]
+    fn documented_notes() -> RestAdapter {
+        use utoipa::OpenApi as _;
+
+        #[derive(utoipa::OpenApi)]
+        #[openapi(info(title = "notes"))]
+        struct NotesApi;
+
+        RestAdapter::new("my-notes")
+            .unwrap()
+            .with_openapi(NotesApi::openapi())
+            .mount(Routes::new("notes").get("/notes", || async { "[]" }))
+            .unwrap()
+    }
+
+    #[cfg(feature = "openapi")]
+    #[tokio::test]
+    async fn the_openapi_document_can_move_to_the_api_listener_or_be_switched_off() {
+        use crate::config::Listener;
+
+        let mut server = managed_server();
+        let endpoints = &mut server.config.server.endpoints;
+        endpoints.openapi.listener = Some(Listener::Api);
+        endpoints.openapi.path = Some("/docs/openapi.json".into());
+        endpoints.swagger.enabled = false;
+        let parts = server
+            .register(documented_notes())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let management = parts.management.as_ref().unwrap().1.clone();
+
+        let (status, body) = call(parts.router.clone(), "/docs/openapi.json").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["info"]["title"], "notes");
+        assert_eq!(
+            call(management.clone(), "/j/openapi.json").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(management, "/j/swagger/").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(parts.router.clone(), "/j/swagger/").await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.endpoints.openapi.enabled = false;
+        server.config.server.endpoints.swagger.enabled = false;
+        let parts = server
+            .register(documented_notes())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        assert_eq!(
+            call(parts.router.clone(), "/j/openapi.json").await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[cfg(feature = "swagger-ui")]
+    #[tokio::test]
+    async fn swagger_ui_loads_the_document_from_the_openapi_group() {
+        let mut server = server_with("127.0.0.1:0");
+        let endpoints = &mut server.config.server.endpoints;
+        endpoints.openapi.path = Some("/docs/openapi.json".into());
+        endpoints.swagger.path = Some("/docs/ui".into());
+        let parts = server
+            .register(documented_notes())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+
+        let response = parts
+            .router
+            .clone()
+            .oneshot(
+                http::Request::get("/docs/ui/swagger-initializer.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let script = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(script.contains("\"/docs/openapi.json\""), "{script}");
+        assert_eq!(
+            call(parts.router.clone(), "/j/openapi.json").await.0,
+            StatusCode::NOT_FOUND,
+            "no copy at the old place"
+        );
+
+        let mut server = server_with("127.0.0.1:0");
+        server.config.server.endpoints.openapi.enabled = false;
+        let Err(err) = server.register(documented_notes()).unwrap().bind().await else {
+            panic!("swagger without openapi");
+        };
+        assert!(
+            err.to_string().contains("`server.endpoints.openapi`"),
+            "{err}"
+        );
     }
 }
