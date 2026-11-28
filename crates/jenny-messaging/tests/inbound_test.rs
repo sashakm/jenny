@@ -19,6 +19,7 @@ use jenny_core::port::{Context, EventCaller, InboundEvent};
 use jenny_messaging::NatsConnectionConfig;
 use jenny_messaging::connection::NatsTlsConfig;
 use jenny_messaging::consumer::{InboundConfig, JetStreamConsumer};
+use jenny_messaging::inbound::{ByValue, IntoHandler};
 use jenny_messaging::kv::Nats;
 use jenny_messaging::{MessagingAdapter, SubjectBinding};
 use serde::Deserialize;
@@ -149,10 +150,7 @@ struct Seen {
 fn reporting(
     answer: impl Fn(u32, u64) -> Result<(), DomainError> + Send + Sync + 'static,
 ) -> (
-    impl Fn(Order, Context) -> futures::future::BoxFuture<'static, Result<(), DomainError>>
-    + Send
-    + Sync
-    + 'static,
+    impl IntoHandler<Order, ByValue>,
     mpsc::UnboundedReceiver<Seen>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -160,7 +158,7 @@ fn reporting(
     let handler = move |order: Order, cx: Context| {
         let tx = tx.clone();
         let answer = answer.clone();
-        Box::pin(async move {
+        async move {
             let event = cx.get::<InboundEvent>().cloned().unwrap();
             let attempt = event.attempt;
             let _ = tx.send(Seen {
@@ -171,7 +169,7 @@ fn reporting(
                 caller: cx.get::<EventCaller>().cloned(),
             });
             answer(order.id, attempt)
-        }) as futures::future::BoxFuture<'static, Result<(), DomainError>>
+        }
     };
     (handler, rx)
 }
@@ -298,7 +296,9 @@ async fn after_max_deliver_the_message_is_dead_lettered_and_terminated() {
     db.publish(
         "orders.created",
         serde_json::json!({ "id": 3 }),
-        &[("event-id", "e-3")],
+        // As `NatsGateway` sends it. The dead-letter subject is in the same stream, so a
+        // copy carrying it would be dropped as a duplicate.
+        &[("event-id", "e-3"), ("Nats-Msg-Id", "e-3")],
     )
     .await;
     assert_eq!(next(&mut seen).await.event.attempt, 1);
@@ -323,6 +323,7 @@ async fn after_max_deliver_the_message_is_dead_lettered_and_terminated() {
         db.subject("orders.created")
     );
     assert_eq!(headers.get("dead-letter-deliveries").unwrap().as_str(), "2");
+    assert!(headers.get("Nats-Msg-Id").is_none());
     eventually(async || db.pending().await == (0, 0)).await;
     // Terminated, so never delivered again.
     assert!(
@@ -591,5 +592,83 @@ async fn over_an_authenticated_connection_the_caller_is_trusted_and_can_be_resto
 
     stop.send(true).unwrap();
     running.await.unwrap();
+    db.delete().await;
+}
+
+#[tokio::test]
+async fn a_dead_letter_no_stream_captures_redelivers_instead_of_losing_the_message() {
+    let Some(db) = Fixture::new().await else {
+        return;
+    };
+    let (handler, mut seen) = reporting(|_, _| Err(DomainError::invalid("never")));
+    let adapter = db
+        .adapter()
+        .on(SubjectBinding::new("orders.created"), handler);
+    let config: InboundConfig = serde_json::from_value(serde_json::json!({
+        "backoff": [1],
+        "dead_letter": format!("nowhere{}.dead", uuid::Uuid::new_v4().simple()),
+    }))
+    .unwrap();
+    let (stop, running) = db.consume(&adapter, &config).await;
+
+    db.publish("orders.created", serde_json::json!({ "id": 4 }), &[])
+        .await;
+    assert_eq!(next(&mut seen).await.event.attempt, 1);
+    // Invalid would be terminated, but the copy had nowhere to go: so it comes back.
+    assert_eq!(next(&mut seen).await.event.attempt, 2);
+
+    stop.send(true).unwrap();
+    running.await.unwrap();
+    db.delete().await;
+}
+
+#[tokio::test]
+async fn more_in_flight_handles_concurrently_and_shutdown_settles_everything() {
+    let Some(db) = Fixture::new().await else {
+        return;
+    };
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let most = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (tx, mut handled) = mpsc::unbounded_channel();
+    let (now, peak) = (in_flight.clone(), most.clone());
+    let adapter = db.adapter().on(
+        SubjectBinding::new("orders.created"),
+        move |order: Order, _: Context| {
+            let (now, peak, tx) = (now.clone(), peak.clone(), tx.clone());
+            async move {
+                let running = now.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(running, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                now.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = tx.send(order.id);
+                Ok::<(), DomainError>(())
+            }
+        },
+    );
+    for id in 1..=8 {
+        db.publish("orders.created", serde_json::json!({ "id": id }), &[])
+            .await;
+    }
+    let config: InboundConfig =
+        serde_json::from_value(serde_json::json!({ "max_in_flight": 4 })).unwrap();
+    let (stop, running) = db.consume(&adapter, &config).await;
+
+    tokio::time::timeout(Duration::from_secs(10), handled.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    stop.send(true).unwrap();
+    running.await.unwrap();
+    assert!(
+        most.load(std::sync::atomic::Ordering::SeqCst) > 1,
+        "handled concurrently"
+    );
+    assert_eq!(
+        in_flight.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "all finished"
+    );
+    // Nothing is left waiting for an ack: what was handled is acked, the rest nak'd.
+    assert_eq!(db.pending().await.1, 0);
     db.delete().await;
 }
