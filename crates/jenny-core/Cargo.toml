@@ -30,3 +30,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# Capturing what the scheduler logs when a lease is lost.
+tracing-subscriber = { workspace = true }

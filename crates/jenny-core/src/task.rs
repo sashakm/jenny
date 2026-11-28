@@ -35,6 +35,22 @@
 //! system principal `System[<service>/tasks]` with the configured `system.roles`, and
 //! attaches its authorizer, so a use case's [`Context::authorize`] works the same way it
 //! does for a request, and Cedar policies address the task as `System::"<service>/tasks"`.
+//!
+//! ### Once per slot, across replicas
+//!
+//! Without a [`Lease`], every replica runs every task: a nightly job with three replicas
+//! runs three times. Given one ([`TaskScheduler::with_lease`], `tasks.lease` in
+//! `JennyServer`), each firing first acquires the key
+//! `<service>/tasks/<task name>/<slot as unix seconds>`, and only the replica that gets
+//! it runs that slot. The run's context then carries a [`TaskLease`] with the fencing
+//! token, and the lease is renewed every `ttl / 3` while the run goes on.
+//!
+//! The key is never released: it expires `ttl` after the run's last renewal. That is
+//! what makes a slot run at most once even when replicas' clocks disagree by a few
+//! seconds, as long as they disagree by less than `ttl`. A replica that crashes while
+//! holding a slot loses that slot; the next one runs as usual.
+//! [`ScheduledTask::per_replica`] opts a task out, for work that is per replica by
+//! nature, such as clearing a local cache.
 
 use std::{
     fmt::Debug,
@@ -51,10 +67,11 @@ use cron::Schedule;
 use futures::StreamExt;
 use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::domain::{Label, Principal};
 use crate::port::Context;
+use crate::port::lease::{Lease, TaskLease};
 use crate::port::outbound::Authorizer;
 
 /// Something to run when its schedule fires.
@@ -92,6 +109,7 @@ pub struct ScheduledTask {
     task: Arc<dyn Task>,
     schedule: Schedule,
     name: String,
+    per_replica: bool,
 }
 
 impl Debug for ScheduledTask {
@@ -99,6 +117,7 @@ impl Debug for ScheduledTask {
         f.debug_struct("ScheduledTask")
             .field("name", &self.name)
             .field("schedule", &self.schedule)
+            .field("per_replica", &self.per_replica)
             .finish()
     }
 }
@@ -110,7 +129,21 @@ impl ScheduledTask {
             name: name.into(),
             task: Arc::new(task),
             schedule: schedule.into().parse()?,
+            per_replica: false,
         })
+    }
+
+    /// Run on every replica, even when the scheduler has a [`Lease`]: for work that is
+    /// per replica by nature, such as clearing a local cache. Without a lease, every
+    /// task runs on every replica anyway.
+    pub fn per_replica(mut self) -> Self {
+        self.per_replica = true;
+        self
+    }
+
+    /// Whether [`per_replica`](Self::per_replica) was called.
+    pub fn is_per_replica(&self) -> bool {
+        self.per_replica
     }
 
     pub fn name(&self) -> &str {
@@ -132,6 +165,9 @@ impl ScheduledTask {
 /// the same task is still going is skipped, with a warning, rather than started beside
 /// it. Two copies of a cleanup job racing each other is rarely what anyone wanted.
 ///
+/// **One replica per slot, with a [lease](Self::with_lease).** See
+/// [the module docs](self#once-per-slot-across-replicas).
+///
 /// **Slots are wall-clock times, delays are monotonic.** The scheduler reads the wall
 /// clock once, when it starts, and advances it with tokio's monotonic clock from then
 /// on. A slot is therefore never fired twice because a timer woke a moment before the
@@ -149,6 +185,32 @@ pub struct TaskScheduler {
     tasks: Vec<ScheduledTask>,
     principal: Option<Principal>,
     authorizer: Option<Arc<dyn Authorizer>>,
+    leasing: Option<Leasing>,
+}
+
+/// How the scheduler takes a slot: the backend, for how long, and as whom.
+#[derive(Clone)]
+struct Leasing {
+    lease: Arc<dyn Lease>,
+    ttl: Duration,
+    service: String,
+    holder: String,
+}
+
+impl Leasing {
+    fn key(&self, task: &str, slot: DateTime<Utc>) -> String {
+        format!("{}/tasks/{task}/{}", self.service, slot.timestamp())
+    }
+}
+
+/// This process among the service's replicas: `$HOSTNAME` when it is set (a pod's
+/// name), otherwise a UUID made once per process.
+pub fn instance() -> &'static str {
+    static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| match std::env::var("HOSTNAME") {
+        Ok(host) if !host.trim().is_empty() => host,
+        _ => uuid::Uuid::new_v4().to_string(),
+    })
 }
 
 impl Debug for TaskScheduler {
@@ -157,6 +219,10 @@ impl Debug for TaskScheduler {
             .field("tasks", &self.tasks)
             .field("principal", &self.principal)
             .field("authorizer", &self.authorizer.is_some())
+            .field(
+                "lease",
+                &self.leasing.as_ref().map(|l| (l.ttl, l.holder.as_str())),
+            )
             .finish()
     }
 }
@@ -220,6 +286,24 @@ impl TaskScheduler {
         self
     }
 
+    /// Run each slot of every task that is not [`per_replica`](ScheduledTask::per_replica)
+    /// on one replica only: the one that acquires its key from `lease` (see
+    /// [the module docs](self#once-per-slot-across-replicas)). `service` names the keys
+    /// and, with [`instance`], the holder: `<service>/<instance>`.
+    ///
+    /// `ttl` must exceed the clock skew between replicas; it is how long a slot's key
+    /// outlives the run's last renewal. Panics when it is zero.
+    pub fn with_lease(mut self, lease: Arc<dyn Lease>, ttl: Duration, service: &str) -> Self {
+        assert!(!ttl.is_zero(), "a lease ttl of zero would never hold");
+        self.leasing = Some(Leasing {
+            lease,
+            ttl,
+            service: service.to_string(),
+            holder: format!("{service}/{}", instance()),
+        });
+        self
+    }
+
     /// The context one run of the task `name` gets.
     fn context(&self, name: &str) -> Context {
         let mut cx = Context::new().with_labels([Label::new("task", name)]);
@@ -272,12 +356,13 @@ impl TaskScheduler {
                         warn!(task = %name, "skipping a scheduled run: the previous one is still going");
                     } else {
                         let cx = self.context(&name);
-                        info!(task = %name, request_id = %cx.request_id(), "executing scheduled task");
                         let task = scheduled.task.clone();
                         let busy = busy[index].clone();
+                        let leasing = self.leasing.clone().filter(|_| !scheduled.per_replica);
                         runs.spawn(async move {
-                            if let Err(e) = task.execute(&cx).await {
-                                error!(task = %name, request_id = %cx.request_id(), "scheduled task failed: {e}");
+                            match leasing {
+                                None => run(&*task, &name, cx).await,
+                                Some(leasing) => run_leased(&*task, &name, slot, cx, &leasing).await,
                             }
                             busy.store(false, Ordering::Release);
                         });
@@ -305,6 +390,69 @@ impl TaskScheduler {
             );
         }
         while runs.join_next().await.is_some() {}
+    }
+}
+
+/// One run, its failure logged.
+async fn run(task: &dyn Task, name: &str, cx: Context) {
+    info!(task = %name, request_id = %cx.request_id(), "executing scheduled task");
+    if let Err(e) = task.execute(&cx).await {
+        error!(task = %name, request_id = %cx.request_id(), "scheduled task failed: {e}");
+    }
+}
+
+/// One run of `slot`, if this replica acquires it, renewing the lease while it goes on.
+/// The lease is never released: its key expires on its own.
+async fn run_leased(
+    task: &dyn Task,
+    name: &str,
+    slot: DateTime<Utc>,
+    cx: Context,
+    leasing: &Leasing,
+) {
+    let key = leasing.key(name, slot);
+    let held = match leasing
+        .lease
+        .acquire(&key, &leasing.holder, leasing.ttl)
+        .await
+    {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            debug!(task = %name, %slot, key, "skipping a scheduled run: another replica holds its slot");
+            return;
+        }
+        Err(e) => {
+            error!(task = %name, %slot, key, "skipping a scheduled run: acquiring its lease failed: {e}");
+            return;
+        }
+    };
+    let cx = cx.with(TaskLease {
+        key: key.clone(),
+        token: held.token(),
+    });
+
+    let execution = run(task, name, cx);
+    tokio::pin!(execution);
+    let every = leasing.ttl / 3;
+    let mut renewals = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    renewals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut renewing = true;
+    loop {
+        tokio::select! {
+            () = &mut execution => break,
+            _ = renewals.tick(), if renewing => {
+                match leasing.lease.renew(&held, leasing.ttl).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // Another replica may run this slot too now; the run goes on, and
+                        // the fencing token is what keeps its writes apart.
+                        error!(task = %name, %slot, key, token = held.token(), "lost the lease of a running scheduled task; it keeps running");
+                        renewing = false;
+                    }
+                    Err(e) => error!(task = %name, %slot, key, "renewing the lease of a running scheduled task failed: {e}"),
+                }
+            }
+        }
     }
 }
 
@@ -529,6 +677,238 @@ mod tests {
             runs.iter()
                 .all(|(_, principal, _, authorized)| principal.is_none() && !authorized)
         );
+    }
+
+    /// The lease key of every run, from its context.
+    #[derive(Default)]
+    struct Slots(std::sync::Mutex<Vec<Option<TaskLease>>>);
+
+    #[async_trait]
+    impl Task for Arc<Slots> {
+        async fn execute(&self, cx: &Context) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(cx.get::<TaskLease>().cloned());
+            Ok(())
+        }
+    }
+
+    fn leased(lease: &Arc<crate::memory::MemoryLease>, task: ScheduledTask) -> TaskScheduler {
+        TaskScheduler::default()
+            .with_lease(lease.clone(), Duration::from_secs(30), "my-notes")
+            .with_task(task)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_a_lease_each_slot_runs_once_across_schedulers() {
+        let lease = Arc::new(crate::memory::MemoryLease::new());
+        let slots = Arc::new(Slots::default());
+        let task = || ScheduledTask::new("tidy", slots.clone(), "*/1 * * * * * *").unwrap();
+        let one = tokio::spawn(leased(&lease, task()).run());
+        let two = tokio::spawn(leased(&lease, task()).run());
+        tokio::time::sleep(Duration::from_millis(5_500)).await;
+        tokio::task::yield_now().await;
+        one.abort();
+        two.abort();
+
+        let runs = slots.0.lock().unwrap();
+        assert!(
+            (5..=6).contains(&runs.len()),
+            "one run per slot, got {}",
+            runs.len()
+        );
+        let mut keys: Vec<_> = runs
+            .iter()
+            .map(|lease| lease.clone().expect("a leased run carries its lease").key)
+            .collect();
+        assert!(
+            keys.iter()
+                .all(|key| key.starts_with("my-notes/tasks/tidy/")),
+            "{keys:?}"
+        );
+        let tokens: std::collections::BTreeSet<_> = runs
+            .iter()
+            .map(|lease| lease.as_ref().unwrap().token)
+            .collect();
+        assert_eq!(tokens.len(), runs.len(), "a token per run");
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), runs.len(), "no slot ran twice");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_per_replica_task_runs_on_every_scheduler() {
+        let lease = Arc::new(crate::memory::MemoryLease::new());
+        let slots = Arc::new(Slots::default());
+        let task = || {
+            ScheduledTask::new("cache", slots.clone(), "*/1 * * * * * *")
+                .unwrap()
+                .per_replica()
+        };
+        assert!(task().is_per_replica());
+        let one = tokio::spawn(leased(&lease, task()).run());
+        let two = tokio::spawn(leased(&lease, task()).run());
+        tokio::time::sleep(Duration::from_millis(5_500)).await;
+        tokio::task::yield_now().await;
+        one.abort();
+        two.abort();
+
+        let runs = slots.0.lock().unwrap();
+        assert!(
+            (10..=12).contains(&runs.len()),
+            "both run every slot, got {}",
+            runs.len()
+        );
+        assert!(runs.iter().all(Option::is_none), "no lease, no TaskLease");
+    }
+
+    /// Acquires; then renewals report the lease lost, or fail outright.
+    struct Losing {
+        renewal: Result<bool, ()>,
+        renewals: AtomicU32,
+    }
+
+    #[async_trait]
+    impl Lease for Losing {
+        async fn acquire(
+            &self,
+            key: &str,
+            holder: &str,
+            _: Duration,
+        ) -> crate::domain::DomainResult<Option<crate::port::HeldLease>> {
+            Ok(Some(crate::port::HeldLease::new(key, holder, 7)))
+        }
+        async fn renew(
+            &self,
+            _: &crate::port::HeldLease,
+            _: Duration,
+        ) -> crate::domain::DomainResult<bool> {
+            self.renewals.fetch_add(1, Ordering::SeqCst);
+            self.renewal
+                .map_err(|()| crate::domain::DomainError::internal("backend down"))
+        }
+        async fn release(&self, _: crate::port::HeldLease) -> crate::domain::DomainResult<()> {
+            panic!("the scheduler never releases a slot")
+        }
+    }
+
+    /// Everything logged while it is the default subscriber, as text.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Logs {
+        fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            let logs = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(move || logs.clone())
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::DEBUG)
+                    .finish(),
+            )
+        }
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    async fn run_once_with(lease: Arc<dyn Lease>, takes: Duration) -> (Arc<Slow>, String) {
+        let logs = Logs::default();
+        let _guard = logs.capture();
+        let slow = Arc::new(Slow {
+            takes,
+            ..Default::default()
+        });
+        let scheduler = TaskScheduler::default()
+            .with_lease(lease, Duration::from_secs(3), "my-notes")
+            .with_task(ScheduledTask::new("slow", slow.clone(), "*/1 * * * * * *").unwrap());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn(scheduler.run_until(async {
+            let _ = stopped.await;
+        }));
+        // The first slot starts within a second; stop before a second run could.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        stop.send(()).unwrap();
+        running.await.unwrap();
+        (slow, logs.text())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_lease_is_logged_and_the_run_goes_on() {
+        let lease = Arc::new(Losing {
+            renewal: Ok(false),
+            renewals: AtomicU32::new(0),
+        });
+        let (slow, logs) = run_once_with(lease.clone(), Duration::from_secs(5)).await;
+        assert_eq!(slow.runs.load(Ordering::SeqCst), 1);
+        assert_eq!(slow.in_flight.load(Ordering::SeqCst), 0, "the run finished");
+        assert_eq!(
+            lease.renewals.load(Ordering::SeqCst),
+            1,
+            "no renewing once lost"
+        );
+        assert!(logs.contains("lost the lease"), "{logs}");
+        assert!(logs.contains("task=slow"), "{logs}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_renewal_is_logged_retried_and_the_run_goes_on() {
+        let lease = Arc::new(Losing {
+            renewal: Err(()),
+            renewals: AtomicU32::new(0),
+        });
+        // ttl 3s: renewals at 1s, 2s, 3s, 4s of a 4.5s run.
+        let (slow, logs) = run_once_with(lease.clone(), Duration::from_millis(4_500)).await;
+        assert_eq!(slow.runs.load(Ordering::SeqCst), 1);
+        assert_eq!(slow.in_flight.load(Ordering::SeqCst), 0, "the run finished");
+        assert_eq!(lease.renewals.load(Ordering::SeqCst), 4);
+        assert!(logs.contains("renewing the lease"), "{logs}");
+        assert!(logs.contains("backend down"), "{logs}");
+    }
+
+    struct Unreachable;
+
+    #[async_trait]
+    impl Lease for Unreachable {
+        async fn acquire(
+            &self,
+            _: &str,
+            _: &str,
+            _: Duration,
+        ) -> crate::domain::DomainResult<Option<crate::port::HeldLease>> {
+            Err(crate::domain::DomainError::internal("backend down"))
+        }
+        async fn renew(
+            &self,
+            _: &crate::port::HeldLease,
+            _: Duration,
+        ) -> crate::domain::DomainResult<bool> {
+            unreachable!()
+        }
+        async fn release(&self, _: crate::port::HeldLease) -> crate::domain::DomainResult<()> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_lease_no_run() {
+        let (slow, logs) = run_once_with(Arc::new(Unreachable), Duration::from_secs(1)).await;
+        assert_eq!(slow.runs.load(Ordering::SeqCst), 0);
+        assert!(logs.contains("acquiring its lease failed"), "{logs}");
+    }
+
+    #[test]
+    fn the_instance_is_stable_for_the_process() {
+        assert!(!instance().is_empty());
+        assert_eq!(instance(), instance());
     }
 
     #[test]
