@@ -271,6 +271,7 @@ impl NatsConnectionConfig {
             options = options.token(token.clone());
         }
         if let Some(tls) = &self.tls {
+            ensure_crypto_provider();
             options = options.require_tls(true);
             if let Some(ca) = &tls.ca {
                 options = options.add_root_certificates(ca.clone());
@@ -296,6 +297,22 @@ impl NatsConnectionConfig {
             cert: tls.and_then(|tls| tls.cert.clone().zip(tls.key.clone())),
             creds: self.auth.creds.clone(),
         }
+    }
+}
+
+/// Make sure rustls has a process-level crypto provider before async-nats builds its
+/// TLS configuration with `ClientConfig::builder()`.
+///
+/// rustls only picks one by itself when exactly one of its `ring` and `aws-lc-rs`
+/// features is on. A service whose other dependencies enable `aws-lc-rs` next to the
+/// `ring` that async-nats asks for has both, and the first TLS handshake would panic.
+/// A provider the application installed itself is kept; otherwise ring, the one
+/// async-nats is built with, becomes the default.
+fn ensure_crypto_provider() {
+    use async_nats::rustls::crypto::{CryptoProvider, ring};
+    if CryptoProvider::get_default().is_none() {
+        // Losing a race to another installer is fine: either provider works.
+        let _ = ring::default_provider().install_default();
     }
 }
 
@@ -458,6 +475,13 @@ pub(crate) mod tests {
                 .tls
                 .is_none()
         );
+    }
+
+    #[test]
+    fn asking_for_tls_installs_a_crypto_provider() {
+        let config = config(json!({ "url": "tls://a:4222", "tls": {} }));
+        config.connect_options().unwrap();
+        assert!(async_nats::rustls::crypto::CryptoProvider::get_default().is_some());
     }
 
     #[test]
