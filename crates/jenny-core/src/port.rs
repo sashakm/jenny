@@ -32,6 +32,8 @@
 pub mod blobs;
 pub mod context;
 pub mod events;
+pub mod headers;
+pub mod inbound;
 pub mod outbound;
 pub mod store;
 pub mod use_case;
@@ -42,6 +44,12 @@ pub use blobs::{Access, Blob, BlobInfo, Blobs};
 pub use context::{Context, Extensions};
 #[doc(inline)]
 pub use events::{Events, Raised};
+#[doc(inline)]
+pub use headers::{
+    CALLER_ACTOR, CALLER_SUBJECT, Caller, Enrich, Headers, SOURCE_SERVICE, SOURCE_VERSION, Source,
+};
+#[doc(inline)]
+pub use inbound::{EventCaller, InboundEvent, RestoredCaller};
 #[doc(inline)]
 pub use outbound::{
     AccessRequest, Authenticator, Authorizer, EventEnvelope, EventPublisher, HealthCheck,

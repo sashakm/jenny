@@ -445,6 +445,8 @@ where
                 if announce && let Some(updated) = updated {
                     envelopes.extend(updated.envelopes(cx).map_err(encoding)?);
                 }
+                // Before the write, so an outbox stores what the enrichers wrote.
+                events.enrich(&mut envelopes, cx);
                 Ok(envelopes)
             },
         ))
@@ -556,7 +558,8 @@ where
     fn into_future(self) -> Self::IntoFuture {
         let Self { add, events, cx } = self;
         Box::pin(async move {
-            let envelopes = add.raised.envelopes(cx).map_err(encoding)?;
+            let mut envelopes = add.raised.envelopes(cx).map_err(encoding)?;
+            events.enrich(&mut envelopes, cx);
             let (inserted, unsent) = add.store.insert_raising(add.aggregate, envelopes).await?;
             events.deliver(unsent, cx).await;
             Ok(inserted)

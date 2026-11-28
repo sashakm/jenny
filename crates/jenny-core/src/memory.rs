@@ -832,6 +832,113 @@ mod tests {
         assert_eq!(recorded.names().len(), 1);
     }
 
+    /// Writes `seen-by` = what was there plus `name`, so the order shows.
+    fn stamp(name: &'static str) -> impl crate::port::Enrich {
+        move |_: &crate::port::Context, headers: &mut crate::port::Headers| {
+            let before = headers.get("seen-by").unwrap_or_default().to_string();
+            headers.insert("seen-by", format!("{before}{name}"));
+        }
+    }
+
+    fn enriched_recorder() -> (
+        std::sync::Arc<crate::testing::RecordedEvents>,
+        crate::port::Events,
+    ) {
+        let (recorded, events) = recorder();
+        (
+            recorded,
+            events
+                .enriched_with(crate::port::Caller)
+                .enriched_with(stamp("a"))
+                .enriched_with(stamp("b")),
+        )
+    }
+
+    fn caller() -> crate::port::Context {
+        crate::port::Context::new().with_principal(crate::domain::Principal::builder("u-7").build())
+    }
+
+    #[tokio::test]
+    async fn every_raising_path_enriches_in_registration_order() {
+        let notes = store();
+        let (recorded, events) = enriched_recorder();
+        let cx = caller();
+
+        notes
+            .add(Note::new(1, "Shopping", 2), Created { id: 1 })
+            .raising(&events, &cx)
+            .await
+            .unwrap();
+        notes
+            .change(&1, archive_raising)
+            .raising(&events, &cx)
+            .announcing_changes()
+            .await
+            .unwrap();
+        events.publish(&Created { id: 2 }, &cx).await;
+        // A no-op change still delivers what it raised, enriched.
+        notes
+            .change(&1, |note| Ok(Archived { id: note.id }))
+            .raising(&events, &cx)
+            .await
+            .unwrap();
+
+        let envelopes = recorded.envelopes();
+        let names: Vec<&str> = envelopes.iter().map(|e| e.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "note.created",
+                "note.archived",
+                "note.updated",
+                "note.created",
+                "note.archived"
+            ]
+        );
+        for envelope in &envelopes {
+            assert_eq!(
+                envelope.headers()["caller-subject"],
+                "u-7",
+                "{}",
+                envelope.name()
+            );
+            assert_eq!(envelope.headers()["seen-by"], "ab", "{}", envelope.name());
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_hands_envelopes_on_as_they_are() {
+        let (recorded, events) = enriched_recorder();
+        events
+            .deliver(
+                vec![crate::port::EventEnvelope::new(
+                    "note.created",
+                    b"{}".to_vec(),
+                )],
+                &caller(),
+            )
+            .await;
+        assert!(recorded.envelopes()[0].headers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_enricher_sees_only_the_headers() {
+        let (recorded, events) = recorder();
+        let events = events.enriched_with(
+            |_: &crate::port::Context, headers: &mut crate::port::Headers| {
+                assert!(headers.is_empty(), "no id, name or payload in here");
+                headers.insert("event-id", "forged");
+            },
+        );
+        let cx = caller();
+        events.publish(&Created { id: 1 }, &cx).await;
+        let envelope = &recorded.envelopes()[0];
+        // The envelope's own id is untouched; the bus overwrites the reserved header.
+        assert_ne!(envelope.id().to_string(), "forged");
+        assert_eq!(envelope.correlation_id(), Some(cx.request_id()));
+        assert_eq!(envelope.payload(), br#"{"id":1}"#);
+    }
+
     #[tokio::test]
     async fn an_added_aggregate_is_published_with_what_created_it() {
         let notes = store();

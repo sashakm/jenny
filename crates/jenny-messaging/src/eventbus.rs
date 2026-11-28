@@ -175,6 +175,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reserved_header_an_enricher_wrote_is_overwritten() {
+        use jenny_core::port::{Context, Events, Headers};
+        let (bus, mut rx) = bus(4);
+        let events = Events::new(std::sync::Arc::new(bus)).enriched_with(
+            |_: &Context, headers: &mut Headers| {
+                headers.insert(headers::EVENT_ID, "forged");
+                headers.insert(headers::EVENT_NAME, "forged");
+                headers.insert(headers::CORRELATION_ID, "forged");
+                headers.insert("tenant", "acme");
+            },
+        );
+        #[derive(serde::Serialize)]
+        struct Created;
+        impl jenny_core::domain::DomainEvent for Created {
+            fn name(&self) -> &str {
+                "note.created"
+            }
+        }
+        let cx = Context::new();
+        events.publish(&Created, &cx).await;
+
+        let msg = rx.recv().await.unwrap();
+        assert_ne!(msg.header(headers::EVENT_ID), Some("forged"));
+        assert_eq!(msg.header(headers::EVENT_NAME), Some("note.created"));
+        assert_eq!(
+            msg.header(headers::CORRELATION_ID),
+            Some(cx.request_id().to_string().as_str())
+        );
+        assert_eq!(msg.header("tenant"), Some("acme"));
+    }
+
+    #[tokio::test]
     async fn an_uncorrelated_event_carries_no_correlation_header() {
         let (bus, mut rx) = bus(4);
         bus.publish(EventEnvelope::new("note.created", b"{}".to_vec()))

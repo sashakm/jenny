@@ -151,6 +151,11 @@ impl EventEnvelope {
         &self.headers
     }
 
+    /// For [`Events`](super::Events), which hands them to its enrichers.
+    pub(crate) fn headers_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.headers
+    }
+
     pub fn timestamp(&self) -> DateTime<Utc> {
         self.occurred_at
     }
