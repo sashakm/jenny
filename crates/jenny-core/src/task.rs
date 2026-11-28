@@ -51,6 +51,11 @@
 //! holding a slot loses that slot; the next one runs as usual.
 //! [`ScheduledTask::per_replica`] opts a task out, for work that is per replica by
 //! nature, such as clearing a local cache.
+//!
+//! The lease keeps one *slot* from running twice; it does not keep two slots apart.
+//! "One run per task at a time" is per replica: while replica A's run of one slot is
+//! still going, A skips the next slot, and replica B may run it beside A's. A task whose
+//! runs can outlast its interval passes the [`TaskLease`] token on to what it writes.
 
 use std::{
     fmt::Debug,
@@ -431,28 +436,32 @@ async fn run_leased(
         token: held.token(),
     });
 
-    let execution = run(task, name, cx);
-    tokio::pin!(execution);
-    let every = leasing.ttl / 3;
-    let mut renewals = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-    renewals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut renewing = true;
-    loop {
-        tokio::select! {
-            () = &mut execution => break,
-            _ = renewals.tick(), if renewing => {
-                match leasing.lease.renew(&held, leasing.ttl).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        // Another replica may run this slot too now; the run goes on, and
-                        // the fencing token is what keeps its writes apart.
-                        error!(task = %name, %slot, key, token = held.token(), "lost the lease of a running scheduled task; it keeps running");
-                        renewing = false;
-                    }
-                    Err(e) => error!(task = %name, %slot, key, "renewing the lease of a running scheduled task failed: {e}"),
+    // Renewals in a future of their own, polled beside the run, so a slow or hung
+    // backend never holds the run up.
+    let renewing = async {
+        // At least a millisecond: `interval` panics on a zero period.
+        let every = (leasing.ttl / 3).max(Duration::from_millis(1));
+        let mut renewals = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        renewals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            renewals.tick().await;
+            match leasing.lease.renew(&held, leasing.ttl).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Another replica may run this slot too now; the run goes on, and
+                    // the fencing token is what keeps its writes apart.
+                    error!(task = %name, %slot, key, token = held.token(), "lost the lease of a running scheduled task; it keeps running");
+                    return std::future::pending::<()>().await;
+                }
+                Err(e) => {
+                    error!(task = %name, %slot, key, "renewing the lease of a running scheduled task failed: {e}")
                 }
             }
         }
+    };
+    tokio::select! {
+        () = run(task, name, cx) => {}
+        () = renewing => {}
     }
 }
 
@@ -872,6 +881,68 @@ mod tests {
         assert_eq!(lease.renewals.load(Ordering::SeqCst), 4);
         assert!(logs.contains("renewing the lease"), "{logs}");
         assert!(logs.contains("backend down"), "{logs}");
+    }
+
+    /// Acquires; every renewal hangs for a minute.
+    struct Hanging;
+
+    #[async_trait]
+    impl Lease for Hanging {
+        async fn acquire(
+            &self,
+            key: &str,
+            holder: &str,
+            _: Duration,
+        ) -> crate::domain::DomainResult<Option<crate::port::HeldLease>> {
+            Ok(Some(crate::port::HeldLease::new(key, holder, 1)))
+        }
+        async fn renew(
+            &self,
+            _: &crate::port::HeldLease,
+            _: Duration,
+        ) -> crate::domain::DomainResult<bool> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(true)
+        }
+        async fn release(&self, _: crate::port::HeldLease) -> crate::domain::DomainResult<()> {
+            unreachable!()
+        }
+    }
+
+    /// Records when its one run finished.
+    #[derive(Default)]
+    struct Timed(std::sync::Mutex<Option<tokio::time::Instant>>);
+
+    #[async_trait]
+    impl Task for Arc<Timed> {
+        async fn execute(&self, _: &Context) -> anyhow::Result<()> {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            *self.0.lock().unwrap() = Some(tokio::time::Instant::now());
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_renewal_does_not_hold_the_run_up() {
+        let timed = Arc::new(Timed::default());
+        let scheduler = TaskScheduler::default()
+            .with_lease(Arc::new(Hanging), Duration::from_secs(3), "my-notes")
+            .with_task(ScheduledTask::new("slow", timed.clone(), "*/1 * * * * * *").unwrap());
+        let started = tokio::time::Instant::now();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn(scheduler.run_until(async {
+            let _ = stopped.await;
+        }));
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        stop.send(()).unwrap();
+        running.await.unwrap();
+        let finished = timed.0.lock().unwrap().expect("the run finished");
+        // Started within the first second, took 5s; the renewal at 1s hangs for 60s.
+        assert!(
+            finished - started < Duration::from_secs(7),
+            "{:?}",
+            finished - started
+        );
     }
 
     struct Unreachable;

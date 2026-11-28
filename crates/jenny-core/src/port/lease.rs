@@ -49,7 +49,9 @@ use crate::domain::DomainResult;
 /// - [`renew`](Self::renew) extends a lease that is still held, and reports `false` once
 ///   it was lost: expired, or taken over;
 /// - [`release`](Self::release) gives a lease up early, and does nothing to a lease that
-///   was already lost.
+///   was already lost;
+/// - a backend may refuse, with an internal error, a `ttl` it cannot honour: a NATS
+///   lease lasts its bucket's `max_age`, so it refuses a longer one.
 ///
 /// Expiry is the backend's clock (the database's `now()`, the NATS server's), never a
 /// replica's, except in [`MemoryLease`](crate::memory::MemoryLease), which has one
@@ -106,11 +108,13 @@ impl HeldLease {
     }
 
     /// For adapters: the backend's revision of the lease, for compare-and-swap.
+    #[doc(hidden)]
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 
     /// For adapters: the revision a renewal wrote.
+    #[doc(hidden)]
     pub fn set_revision(&self, revision: u64) {
         self.revision.store(revision, Ordering::Release);
     }
