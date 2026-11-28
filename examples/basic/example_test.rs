@@ -492,3 +492,106 @@ async fn the_example_service_works_end_to_end() {
     handle.shutdown();
     serving.await.unwrap().unwrap();
 }
+
+/// With a NATS (`JENNY__MESSAGING__NATS__URL`, as CI and `just test-nats` set it) and a
+/// stream named in `applications.my-notes.requests_stream`, an archive request on
+/// JetStream archives the note: the JetStream handler calls the same use case as
+/// `POST /api/notes/{id}/archive`. Skipped without a NATS.
+#[cfg(feature = "messaging")]
+#[tokio::test]
+async fn an_archive_request_on_jetstream_archives_the_note() {
+    let Ok(url) = std::env::var("JENNY__MESSAGING__NATS__URL") else {
+        eprintln!("skipping: JENNY__MESSAGING__NATS__URL is not set");
+        return;
+    };
+    let stream = format!("NOTES_{}", Uuid::new_v4().simple());
+    let jetstream = jenny::messaging::async_nats::jetstream::new(
+        jenny::messaging::async_nats::connect(&url).await.unwrap(),
+    );
+    jetstream
+        .create_stream(jenny::messaging::async_nats::jetstream::stream::Config {
+            name: stream.clone(),
+            subjects: vec!["notes.requests.>".to_string()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // The example's configuration, plus the stream.
+    let example = std::fs::read_to_string(format!(
+        "{}/../../examples/basic/config.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let config = std::env::temp_dir().join(format!("{stream}.yaml"));
+    std::fs::write(
+        &config,
+        example
+            .replace(
+                "    # requests_stream: NOTES",
+                &format!("    requests_stream: {stream}"),
+            )
+            // Buckets of its own, so the end-to-end test's listing never sees this note.
+            .replace(
+                "messaging:\n",
+                &format!(
+                    "messaging:\n  namespace: example-{}\n  nats:\n    url: {url}\n",
+                    Uuid::new_v4().simple()
+                ),
+            ),
+    )
+    .unwrap();
+    let args = ServerArgs {
+        address: Some("127.0.0.1:0".to_string()),
+        config_path: Some(config.to_string_lossy().into_owned()),
+        // Not `JENNY`: the environment's namespace would share the other test's buckets.
+        env_prefix: Some("JENNY_EXAMPLE_JETSTREAM".to_string()),
+        ..Default::default()
+    };
+    // Without telemetry: the end-to-end test installs it, once per process.
+    let source = jenny::server::ConfigSource::load(&args).unwrap();
+    let server_config = source.server_config(&args).unwrap();
+    let server = JennyServer::from_config(server_config, source, jenny::service!()).unwrap();
+    let parts = crate::build(server).unwrap().bind().await.unwrap();
+    let svc = Service {
+        client: Client::new(),
+        base: format!("http://{}", parts.local_addr().unwrap()),
+    };
+    let handle = parts.handle();
+    let serving = tokio::spawn(parts.serve());
+
+    let (_, id) = svc
+        .post("/api/notes", json!({ "title": "Requested" }))
+        .await;
+    let id: Uuid = serde_json::from_value(id).unwrap();
+    jetstream
+        .publish(
+            "notes.requests.archive",
+            json!({ "note": id }).to_string().into(),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+
+    let mut archived = false;
+    for _ in 0..100 {
+        let (_, note) = svc.get(&format!("/api/notes/{id}")).await;
+        if note["archived"] == true {
+            archived = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(archived, "the request was consumed and the note archived");
+    let (_, status) = svc.get("/j/health/status").await;
+    assert_eq!(
+        status["consumers"][0]["name"],
+        "basic-example-note-requests"
+    );
+
+    handle.shutdown();
+    serving.await.unwrap().unwrap();
+    jetstream.delete_stream(&stream).await.unwrap();
+    let _ = std::fs::remove_file(&config);
+}
