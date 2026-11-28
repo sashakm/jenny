@@ -221,12 +221,7 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     #[cfg(feature = "messaging")]
     {
         // Topics are `<namespace>.<event name>`; the namespace defaults to the service name.
-        let namespace = server
-            .config()
-            .messaging
-            .namespace
-            .clone()
-            .unwrap_or_else(|| server.service().name.clone());
+        let namespace = server.namespace();
         server.handle(
             &format!("{namespace}.note.archived"),
             adapter::inbound::events::audit_archived,

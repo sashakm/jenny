@@ -116,9 +116,17 @@ contain dots), because the right answer depends on whether the effect is idempot
 | undecodable payload, `Invalid`, `NotFound`, `Forbidden`, `Unauthenticated` | term, with a warning |
 | `Internal`, `Stale`, `Conflict` | nak, delayed by `backoff` (seconds, default `[1, 5, 30]`, the last repeating), until `max_deliver` (default 5); then term |
 
-Before any term, an optional `dead_letter` subject gets the payload and headers, plus
-`dead-letter-reason`, `dead-letter-subject` and `dead-letter-deliveries`; if that publish
-fails, the message is nak'd rather than lost. jenny counts deliveries itself (the consumer's
+`DomainError` has no `Unavailable` variant, so "unavailable" failures arrive as
+`Internal`; a new variant has to be classified in `Outcome::is_retryable`, whose
+exhaustive match makes that a compile error rather than an oversight.
+
+Before any term, an optional `dead_letter` subject gets the payload and headers (minus
+the `Nats-*` ones, so the copy is not deduplicated against the original), plus
+`dead-letter-reason`, `dead-letter-subject` and `dead-letter-deliveries`. It is published
+to JetStream and its acknowledgement awaited, so the subject must be captured by a
+stream; if that fails, the message is nak'd rather than lost. A handler that runs long
+sends a progress ack every half `ack_wait` (default 30 seconds), so it is not
+redelivered meanwhile. jenny counts deliveries itself (the consumer's
 own `max_deliver` is unlimited), so nothing is dropped without going through that path.
 `max_in_flight` (default 1) is how many messages a consumer holds: at 1, messages are
 handled in stream order as long as they succeed; more trades order for throughput.
@@ -126,8 +134,10 @@ handled in stream order as long as they succeed; more trades order for throughpu
 Delivery is at least once, and jenny keeps no dedup store: a handler whose effect is not
 idempotent records the `InboundEvent` id.
 
-At shutdown, consumers stop fetching as soon as it begins, finish the messages they hold
-and ack or nak them, beside the HTTP drain; then the relay, the broker, the NATS
+Consumers start once the listener is bound, so no message is acked by a service whose
+startup then fails. At shutdown, they stop fetching as soon as it begins, finish the
+messages they are handling and settle them, nak any they pulled but had not started,
+beside the HTTP drain; then the relay, the broker, the NATS
 connection and the pool close, in that order (ADR-016, ADR-031). `/health/status` lists
 each consumer with its stream, filter subjects and pending count.
 

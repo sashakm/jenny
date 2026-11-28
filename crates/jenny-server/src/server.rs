@@ -691,7 +691,7 @@ impl JennyServer {
     /// rejects as having an empty segment, so a blank one falls back too; the service
     /// name never is blank.
     #[cfg(feature = "messaging")]
-    fn namespace(&self) -> String {
+    pub fn namespace(&self) -> String {
         self.config
             .messaging
             .namespace
@@ -957,13 +957,7 @@ impl JennyServer {
                     Box::pin(async move { status.report().await })
                         as futures::future::BoxFuture<'static, serde_json::Value>
                 }) as crate::health::StatusProbe);
-                let mut requested = shutdown.subscribe();
-                let (stop, stopping) = watch::channel(false);
-                tokio::spawn(async move {
-                    let _ = requested.wait_for(|stopping| *stopping).await;
-                    let _ = stop.send(true);
-                });
-                handles.push(consumer.spawn(stopping));
+                handles.push(consumer);
             }
             handles
         };
@@ -1096,6 +1090,22 @@ impl JennyServer {
             .layer(RequestIdLayer);
 
         let listener = TcpListener::bind(&config.server.address).await?;
+
+        // Consuming starts only once nothing else can fail startup, so no message is acked
+        // by a service that then does not come up.
+        #[cfg(feature = "messaging")]
+        let consumers: Vec<_> = consumers
+            .into_iter()
+            .map(|consumer| {
+                let mut requested = shutdown.subscribe();
+                let (stop, stopping) = watch::channel(false);
+                tokio::spawn(async move {
+                    let _ = requested.wait_for(|stopping| *stopping).await;
+                    let _ = stop.send(true);
+                });
+                consumer.spawn(stopping)
+            })
+            .collect();
 
         let scheduler_handle = (!scheduler.is_empty()).then(|| {
             let mut requested = shutdown.subscribe();
