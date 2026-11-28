@@ -16,7 +16,8 @@ server:
   address: "[::]:8000"
   # Where REST adapters mount unless one chose a path in code.
   api_path: /api
-  # Where health, metrics and OpenAPI live, namespaced away from your API.
+  # The default prefix of health, metrics and OpenAPI, namespaced away from your API
+  # (a group's own `path` under `endpoints` replaces it).
   framework_path: /j
   # After SIGTERM, keep serving (reported not ready) this long before closing, so a
   # load balancer can stop routing here first. About 5 on Kubernetes.

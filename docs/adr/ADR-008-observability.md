@@ -1,6 +1,6 @@
 # ADR-008: Observability
 
-**Status:** Accepted — use-case metrics built (ADR-012); HTTP metrics and trace propagation not implemented
+**Status:** Accepted — use-case metrics built (ADR-012); HTTP metrics and trace propagation not implemented; where the scrape is served is ADR-020's
 **Date:** 2026-08-24
 
 ## Context
@@ -39,7 +39,7 @@ builds each backend and each pair on its own (ADR-002).
 | Logs | stdout, pretty or JSON | always |
 | Logs + traces | OTLP → OTel Collector | `telemetry-otlp` |
 | Logs | direct Loki push | `telemetry-loki` |
-| Metrics (pull) | Prometheus `/metrics` | `telemetry-prometheus` |
+| Metrics (pull) | Prometheus scrape, the `metrics` endpoint group (ADR-020) | `telemetry-prometheus` |
 | Metrics (push) | OTLP → Collector | `telemetry-otlp` |
 
 The **recommended production path is OTLP to an OpenTelemetry Collector**, which fans out

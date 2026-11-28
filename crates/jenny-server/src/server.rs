@@ -371,7 +371,8 @@ impl JennyServer {
     }
 
     /// Build from an already-loaded configuration, **without** touching telemetry.
-    /// Use [`from_args`](Self::from_args) for the full bootstrap.
+    /// Use [`from_args`](Self::from_args) for the full bootstrap. Without telemetry
+    /// there is no Prometheus registry, so the `metrics` endpoint group is not served.
     ///
     /// Fails when the service name is empty once configuration has had its say.
     pub fn from_config(

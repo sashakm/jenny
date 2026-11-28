@@ -503,7 +503,7 @@ reads every key to list; see above.)
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL, Apache AGE graphs (`graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
-| `jenny-server` | composition root | runtime, the service identity, config, health, hosting; `events()` with configured headers, bus handlers (`handle`), JetStream consumers, tasks and handlers as system principals (`with_authorizer`); the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
+| `jenny-server` | composition root | runtime, the service identity, config, the framework's endpoint groups (`server.endpoints`) on the API or a management listener (`server.management`), hosting; `events()` with configured headers, bus handlers (`handle`), JetStream consumers, tasks and handlers as system principals (`with_authorizer`); the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 

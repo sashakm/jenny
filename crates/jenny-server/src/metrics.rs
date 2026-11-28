@@ -11,9 +11,9 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 /// Serves the registry in Prometheus text exposition format.
 ///
 /// [`JennyServer`](crate::JennyServer) serves this as the `metrics` endpoint group
-/// (`<framework_path>/metrics` by default, `server.endpoints.metrics`) whenever the
-/// `telemetry-prometheus` feature is on. It is public so a hand-rolled axum app can
-/// mount it too.
+/// (`<framework_path>/metrics` by default, `server.endpoints.metrics`) with the
+/// `telemetry-prometheus` feature, unless `server.endpoints.metrics.enabled` is false.
+/// It is public so a hand-rolled axum app can mount it too.
 ///
 /// Scrapes produce no request span by default, so a failure to encode is logged with
 /// the request id itself.

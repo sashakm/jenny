@@ -25,7 +25,7 @@ rather than along topics.
 | `jenny-persistence` | driven adapter | Postgres: the pool, `PgDocuments` and `PgTable` stores, the outbox and its relay, criteria to SQL, Apache AGE graphs (feature `graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: the `Blobs` port over `object_store` (S3 and compatibles, files, memory) |
 | `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, Cedar authorization |
-| `jenny-server` | composition root | runtime, the service identity, configuration, telemetry, health, hosting; bus handlers, JetStream consumers, system principals for tasks and handlers |
+| `jenny-server` | composition root | runtime, the service identity, configuration, telemetry, the framework's endpoint groups (`server.endpoints`) on the API or a management listener (`server.management`), hosting; bus handlers, JetStream consumers, system principals for tasks and handlers |
 | `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` — scaffolding (ADR-009) |
 | `jenny` | — | facade of feature-gated re-exports |

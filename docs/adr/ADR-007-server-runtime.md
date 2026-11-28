@@ -1,6 +1,6 @@
 # ADR-007: The Server Runtime and Composition Root
 
-**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `service_name`, `service_version` and `system` (ADR-033), `server`, `telemetry`, `messaging`, `persistence` and `objects`; with `messaging`, it also runs bus handlers and JetStream consumers, which drain with requests at shutdown (ADR-006)
+**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `service_name`, `service_version` and `system` (ADR-033), `server`, `telemetry`, `messaging`, `persistence` and `objects`; with `messaging`, it also runs bus handlers and JetStream consumers, which drain with requests at shutdown (ADR-006); the framework's endpoints are configurable groups that can move to a management listener, which closes last (ADR-020)
 **Date:** 2026-08-24
 
 ## Context
@@ -101,8 +101,9 @@ On a signal or `ServerHandle::shutdown`:
    began; they finish the messages they are handling, beside the requests (ADR-006).
 4. All of them are bounded together by `server.shutdown_timeout_seconds` (default `30`, what
    Kubernetes waits before `SIGKILL`); what is still running then is abandoned.
-5. The broker stops (draining its listeners). With `server.management`, the management
-   listener closes only now, so readiness reports `stopping` throughout (ADR-020). Then
+5. The outbox relay, the broker (draining its listeners), the NATS connection and the
+   Postgres pool stop, in that order. With `server.management`, the management listener
+   closes after them, so readiness reports `stopping` throughout (ADR-020). Then
    telemetry flushes.
 
 ### The framework's endpoints get their own prefix
@@ -124,6 +125,10 @@ second, management listener (`server.management`), where `/j` keeps the same pat
 | `GET /j/health/live` | is the process alive? | the restart policy |
 | `GET /j/health/ready` | should it get traffic? | the load balancer |
 | `GET /j/health/status` | what is running in here? | a human |
+
+These are the `probes` and `status` groups under `server.endpoints`; an opt-in
+`public_status` group (`GET /j/health/public`) says only `up`, `degraded` or `down`
+(ADR-020).
 
 The live/ready split is the one that matters operationally. A service whose database is
 down is *live* — restarting will not help — but not *ready*. Conflating them turns a
