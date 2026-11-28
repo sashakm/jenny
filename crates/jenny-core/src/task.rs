@@ -20,13 +20,21 @@
 //!
 //! #[async_trait]
 //! impl Task for ExpiryTask {
-//!     async fn execute(&self) -> anyhow::Result<()> {
-//!         let expired = self.0.expire_stale(&Context::new()).await?;
+//!     async fn execute(&self, cx: &Context) -> anyhow::Result<()> {
+//!         let expired = self.0.expire_stale(cx).await?;
 //!         tracing::info!(expired, "expired stale notes");
 //!         Ok(())
 //!     }
 //! }
 //! ```
+//!
+//! ### Who a task runs as
+//!
+//! Each run gets a fresh [`Context`]: a new request id, the label `task=<name>`, and
+//! whatever the scheduler was told to run as. The `JennyServer` runtime makes that the
+//! system principal `System[<service>/tasks]` with the configured `system.roles`, and
+//! attaches its authorizer, so a use case's [`Context::authorize`] works the same way it
+//! does for a request, and Cedar policies address the task as `System::"<service>/tasks"`.
 
 use std::{
     fmt::Debug,
@@ -45,10 +53,15 @@ use tokio::task::JoinSet;
 use tokio_util::time::DelayQueue;
 use tracing::{error, info, warn};
 
+use crate::domain::{Label, Principal};
+use crate::port::Context;
+use crate::port::outbound::Authorizer;
+
 /// Something to run when its schedule fires.
 #[async_trait]
 pub trait Task: Send + Sync + 'static {
-    async fn execute(&self) -> anyhow::Result<()>;
+    /// One run. `cx` is new for every run; see [the module docs](self) for what it holds.
+    async fn execute(&self, cx: &Context) -> anyhow::Result<()>;
 }
 
 /// A [`Task`] bound to a cron schedule and a name.
@@ -64,7 +77,7 @@ pub trait Task: Send + Sync + 'static {
 ///
 /// #[async_trait]
 /// impl Task for Ping {
-///     async fn execute(&self) -> anyhow::Result<()> {
+///     async fn execute(&self, _: &jenny_core::port::Context) -> anyhow::Result<()> {
 ///         println!("ping");
 ///         Ok(())
 ///     }
@@ -131,9 +144,21 @@ impl ScheduledTask {
 /// tasks outside a server.
 ///
 /// [`JennyServer`]: https://docs.rs/jenny-server
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct TaskScheduler {
     tasks: Vec<ScheduledTask>,
+    principal: Option<Principal>,
+    authorizer: Option<Arc<dyn Authorizer>>,
+}
+
+impl Debug for TaskScheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskScheduler")
+            .field("tasks", &self.tasks)
+            .field("principal", &self.principal)
+            .field("authorizer", &self.authorizer.is_some())
+            .finish()
+    }
 }
 
 /// The scheduler's notion of now: the wall clock when it started, plus the runtime's
@@ -182,6 +207,31 @@ impl TaskScheduler {
         self
     }
 
+    /// Run every task as `principal`, usually [`Principal::system`]`(service, "tasks")`.
+    /// Without one, a run's context has no principal.
+    pub fn running_as(mut self, principal: Principal) -> Self {
+        self.principal = Some(principal);
+        self
+    }
+
+    /// Attach `authorizer` to every run's context.
+    pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> Self {
+        self.authorizer = Some(authorizer);
+        self
+    }
+
+    /// The context one run of the task `name` gets.
+    fn context(&self, name: &str) -> Context {
+        let mut cx = Context::new().with_labels([Label::new("task", name)]);
+        if let Some(principal) = &self.principal {
+            cx = cx.with_principal(principal.clone());
+        }
+        if let Some(authorizer) = &self.authorizer {
+            cx = cx.with_authorizer(authorizer.clone());
+        }
+        cx
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
@@ -221,12 +271,13 @@ impl TaskScheduler {
                     if busy[index].swap(true, Ordering::AcqRel) {
                         warn!(task = %name, "skipping a scheduled run: the previous one is still going");
                     } else {
-                        info!(task = %name, "executing scheduled task");
+                        let cx = self.context(&name);
+                        info!(task = %name, request_id = %cx.request_id(), "executing scheduled task");
                         let task = scheduled.task.clone();
                         let busy = busy[index].clone();
                         runs.spawn(async move {
-                            if let Err(e) = task.execute().await {
-                                error!(task = %name, "scheduled task failed: {e}");
+                            if let Err(e) = task.execute(&cx).await {
+                                error!(task = %name, request_id = %cx.request_id(), "scheduled task failed: {e}");
                             }
                             busy.store(false, Ordering::Release);
                         });
@@ -270,7 +321,7 @@ mod tests {
 
     #[async_trait]
     impl Task for Counting {
-        async fn execute(&self) -> anyhow::Result<()> {
+        async fn execute(&self, _: &Context) -> anyhow::Result<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -280,7 +331,7 @@ mod tests {
 
     #[async_trait]
     impl Task for Failing {
-        async fn execute(&self) -> anyhow::Result<()> {
+        async fn execute(&self, _: &Context) -> anyhow::Result<()> {
             anyhow::bail!("nope")
         }
     }
@@ -312,7 +363,7 @@ mod tests {
 
     #[async_trait]
     impl Task for Arc<Slow> {
-        async fn execute(&self) -> anyhow::Result<()> {
+        async fn execute(&self, _: &Context) -> anyhow::Result<()> {
             self.runs.fetch_add(1, Ordering::SeqCst);
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.most_in_flight.fetch_max(now, Ordering::SeqCst);
@@ -404,6 +455,78 @@ mod tests {
             "the run was allowed to finish"
         );
         assert_eq!(slow.runs.load(Ordering::SeqCst), 1);
+    }
+
+    /// Keeps the context of every run.
+    #[derive(Default)]
+    struct Witness(std::sync::Mutex<Vec<(uuid::Uuid, Option<Principal>, Vec<Label>, bool)>>);
+
+    #[async_trait]
+    impl Task for Arc<Witness> {
+        async fn execute(&self, cx: &Context) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push((
+                cx.request_id(),
+                cx.principal().cloned(),
+                cx.labels().to_vec(),
+                cx.authorizer().is_some(),
+            ));
+            Ok(())
+        }
+    }
+
+    struct AllowAll;
+
+    #[async_trait]
+    impl Authorizer for AllowAll {
+        async fn authorize(
+            &self,
+            _: &Principal,
+            _: &crate::port::AccessRequest,
+        ) -> Result<(), crate::domain::AuthorizationError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_run_gets_a_fresh_context_as_the_configured_principal() {
+        let witness = Arc::new(Witness::default());
+        let scheduler = TaskScheduler::default()
+            .running_as(Principal::system("my-notes", "tasks"))
+            .with_authorizer(Arc::new(AllowAll))
+            .with_task(ScheduledTask::new("tidy", witness.clone(), "*/1 * * * * * *").unwrap());
+        let running = tokio::spawn(scheduler.run());
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        tokio::task::yield_now().await;
+        running.abort();
+
+        let runs = witness.0.lock().unwrap();
+        assert!(runs.len() >= 2, "{}", runs.len());
+        assert_ne!(runs[0].0, runs[1].0, "a request id per run");
+        for (_, principal, labels, authorized) in runs.iter() {
+            assert_eq!(
+                principal.as_ref().unwrap().subject(),
+                "System[my-notes/tasks]"
+            );
+            assert_eq!(labels, &[Label::new("task", "tidy")]);
+            assert!(authorized);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_scheduler_told_nothing_runs_without_a_principal() {
+        let witness = Arc::new(Witness::default());
+        let scheduler = TaskScheduler::default()
+            .with_task(ScheduledTask::new("tidy", witness.clone(), "*/1 * * * * * *").unwrap());
+        let running = tokio::spawn(scheduler.run());
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        tokio::task::yield_now().await;
+        running.abort();
+        let runs = witness.0.lock().unwrap();
+        assert!(!runs.is_empty());
+        assert!(
+            runs.iter()
+                .all(|(_, principal, _, authorized)| principal.is_none() && !authorized)
+        );
     }
 
     #[test]

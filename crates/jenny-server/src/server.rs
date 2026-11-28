@@ -59,6 +59,9 @@ pub struct JennyServer {
     messaging_adapters: Vec<MessagingAdapter>,
     scheduler: TaskScheduler,
     checks: Vec<Arc<dyn HealthCheck>>,
+    authorizer: Option<Arc<dyn jenny_core::port::outbound::Authorizer>>,
+    /// Whether `handle` has built a dispatcher, which took the authorizer as it was.
+    handlers_registered: bool,
     #[cfg(feature = "messaging")]
     events: Option<Arc<jenny_messaging::EventBus>>,
     #[cfg(feature = "messaging")]
@@ -330,6 +333,8 @@ impl JennyServer {
             messaging_adapters: Vec::new(),
             scheduler: TaskScheduler::default(),
             checks: Vec::new(),
+            authorizer: None,
+            handlers_registered: false,
             #[cfg(feature = "messaging")]
             events: None,
             #[cfg(feature = "messaging")]
@@ -348,6 +353,47 @@ impl JennyServer {
     /// Who the service is, once configuration has overridden what `service!()` read.
     pub fn service(&self) -> &jenny_core::Service {
         &self.service
+    }
+
+    /// The service acting on its own as `component`: `System[<service_name>/<component>]`,
+    /// with the roles under `system.roles`.
+    pub fn system_principal(&self, component: &str) -> jenny_core::domain::Principal {
+        jenny_core::domain::Principal::system(&self.service.name, component)
+            .with_roles(self.config.system.roles.iter().cloned())
+    }
+
+    /// The policy engine attached to the [`Context`](jenny_core::port::Context) of every
+    /// scheduled run and every inbound event, so a use case's `cx.authorize(…)` gets an
+    /// answer there as it does in a request. REST adapters take theirs from their own
+    /// `Authorization` layer.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use jenny_server::JennyServer;
+    /// # fn wire(mut server: JennyServer, cedar: Arc<dyn jenny_core::port::outbound::Authorizer>) -> anyhow::Result<()> {
+    /// server.with_authorizer(cedar)?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Fails when an event handler is already registered: its contexts would be built
+    /// without it.
+    pub fn with_authorizer(
+        &mut self,
+        authorizer: Arc<dyn jenny_core::port::outbound::Authorizer>,
+    ) -> anyhow::Result<&mut Self> {
+        if self.handlers_registered {
+            anyhow::bail!(
+                "with_authorizer() must come before handle(): an event handler was already \
+                 registered without it"
+            );
+        }
+        self.authorizer = Some(authorizer);
+        Ok(self)
+    }
+
+    /// The authorizer given to [`with_authorizer`](Self::with_authorizer), if any.
+    pub fn authorizer(&self) -> Option<&Arc<dyn jenny_core::port::outbound::Authorizer>> {
+        self.authorizer.as_ref()
     }
 
     pub fn config(&self) -> &ServerConfig {
@@ -691,17 +737,28 @@ impl JennyServer {
     }
 
     /// Run a task on a cron schedule alongside the server.
+    ///
+    /// Every run gets a fresh [`Context`](jenny_core::port::Context) as the system
+    /// principal `System[<service_name>/tasks]`, with `system.roles`, the
+    /// [authorizer](Self::with_authorizer) when there is one, and the label `task=<name>`.
     pub fn schedule(mut self, task: ScheduledTask) -> Self {
         self.scheduler = self.scheduler.with_task(task);
         self
     }
 
     /// Assemble the router and bind the socket, without serving yet.
-    pub async fn bind(#[allow(unused_mut)] mut self) -> anyhow::Result<ServerParts> {
+    pub async fn bind(mut self) -> anyhow::Result<ServerParts> {
         // Whenever NATS is configured, even if nothing asked for the connection: a
         // server that refuses it should stop the service now, not at its first event.
         #[cfg(feature = "messaging")]
         self.nats();
+        // Every run as the service itself, checked by the same policies as a request.
+        let scheduler =
+            std::mem::take(&mut self.scheduler).running_as(self.system_principal("tasks"));
+        let scheduler = match self.authorizer.clone() {
+            Some(authorizer) => scheduler.with_authorizer(authorizer),
+            None => scheduler,
+        };
         let Self {
             service,
             config,
@@ -710,9 +767,11 @@ impl JennyServer {
             mut rest_adapters,
             #[cfg(feature = "messaging")]
             messaging_adapters,
-            scheduler,
+            scheduler: _,
             #[allow(unused_mut)]
             mut checks,
+            authorizer: _,
+            handlers_registered: _,
             #[cfg(feature = "messaging")]
             events,
             #[cfg(feature = "messaging")]
@@ -1241,6 +1300,67 @@ mod tests {
         let (_, body) = call(parts.router.clone(), "/j/health/status").await;
         assert_eq!(body["service"], "test-service");
         assert_eq!(body["service_version"], "9.9.9");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_task_runs_as_the_system_principal_with_the_configured_roles() {
+        use jenny_core::port::Context;
+        use jenny_core::task::Task;
+        use std::sync::Mutex;
+
+        struct Seen(Arc<Mutex<Vec<(String, Vec<String>, bool)>>>);
+
+        #[async_trait::async_trait]
+        impl Task for Seen {
+            async fn execute(&self, cx: &Context) -> anyhow::Result<()> {
+                let principal = cx.require_principal()?;
+                self.0.lock().unwrap().push((
+                    principal.to_string(),
+                    principal.roles(),
+                    cx.authorizer().is_some(),
+                ));
+                Ok(())
+            }
+        }
+
+        struct AllowAll;
+
+        #[async_trait::async_trait]
+        impl jenny_core::port::outbound::Authorizer for AllowAll {
+            async fn authorize(
+                &self,
+                _: &jenny_core::domain::Principal,
+                _: &jenny_core::port::AccessRequest,
+            ) -> Result<(), jenny_core::domain::AuthorizationError> {
+                Ok(())
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut server = server_with("127.0.0.1:0");
+        server.config.system.roles = vec!["Maintenance".into()];
+        server.with_authorizer(Arc::new(AllowAll)).unwrap();
+        let parts = server
+            .schedule(ScheduledTask::new("tidy", Seen(seen.clone()), "*/1 * * * * * *").unwrap())
+            .bind()
+            .await
+            .unwrap();
+        let handle = parts.handle();
+        let serving = tokio::spawn(parts.serve());
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        handle.shutdown();
+        serving.await.unwrap().unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert_eq!(
+            seen[0],
+            (
+                "System[test-service/tasks]".to_string(),
+                vec!["Maintenance".to_string()],
+                true
+            )
+        );
     }
 
     #[tokio::test]

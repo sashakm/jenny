@@ -19,6 +19,8 @@
 //! ```yaml
 //! service_name: my-service    # defaults to the package name `jenny::service!()` read
 //! service_version: "1.2.3"    # defaults to the package version
+//! system:
+//!   roles: [Maintenance]      # what tasks and event handlers hold, as System[…]
 //! server:
 //!   address: "[::]:8000"
 //!   api_path: /api        # where REST adapters mount
@@ -227,6 +229,18 @@ impl Default for MessagingConfig {
     }
 }
 
+/// The `system` section: the service acting on its own.
+///
+/// Scheduled tasks run as `System[<service_name>/tasks]` and inbound event handlers as
+/// `System[<service_name>/events]`; Cedar sees them as `System::"<service_name>/…"`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SystemConfig {
+    /// The roles every system principal holds, for policies written against roles.
+    /// Empty by default; a policy can also name `System::"my-notes/tasks"` itself.
+    pub roles: Vec<String>,
+}
+
 /// The `persistence` section. Applies with the `persistence` feature.
 #[cfg(feature = "persistence")]
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -246,6 +260,7 @@ pub struct ServerConfig {
     /// The service's version (`JENNY__SERVICE_VERSION`). Overrides the package version,
     /// and is the default for `telemetry.service_version` and `/health/status`.
     pub service_version: Option<String>,
+    pub system: SystemConfig,
     pub server: HttpConfig,
     pub telemetry: TelemetryConfig,
     pub messaging: MessagingConfig,
