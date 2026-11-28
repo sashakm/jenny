@@ -1,8 +1,8 @@
 //! The driven side of event publishing.
 {{#if messaging}}
 //!
-//! The runtime starts an in-process bus and hands the
-//! [`EventPublisher`](jenny::EventPublisher) port back from `server.events()`.
+//! The runtime starts an in-process bus and hands [`Events`](jenny::Events) over it back
+//! from `server.events()`.
 //! Publishing fans out to every subscribed listener, and this is one such listener.
 //!
 //! Each listener is its own small outbound effect. A real service would sit an

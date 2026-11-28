@@ -112,8 +112,9 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
 {{#if messaging}}
 
     // The runtime started an in-process bus; one publish fans out to every listener.
+    // `events()` carries the headers `messaging.events.headers` turns on.
     server.subscribe(EventLogListener)?;
-    let events = Events::new(server.events()?);
+    let events = server.events()?;
 {{else}}
     let events = Events::new(Arc::new(EventLog));
 {{/if}}

@@ -63,8 +63,9 @@ pub mod telemetry;
 pub use config::PersistenceConfig;
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
-    DEFAULT_EVENT_BUFFER, DEFAULT_FRAMEWORK_PATH, DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig,
-    MessagingConfig, MetricsConfig, ServerArgs, ServerConfig, SystemConfig,
+    DEFAULT_EVENT_BUFFER, DEFAULT_FRAMEWORK_PATH, DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+    EventHeadersConfig, EventsConfig, HttpConfig, MessagingConfig, MetricsConfig, ServerArgs,
+    ServerConfig, SystemConfig,
 };
 pub use context::ServerContext;
 pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};

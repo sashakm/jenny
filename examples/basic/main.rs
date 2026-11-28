@@ -89,11 +89,11 @@ mod example_test;
 
 use std::sync::Arc;
 
+use jenny::Events;
 use jenny::domain::ValueKind;
 use jenny::memory::{Memory, MemoryBlobs};
 use jenny::rest::RestAdapter;
 use jenny::server::JennyServer;
-use jenny::{EventPublisher, Events};
 use serde::Deserialize;
 
 #[cfg(not(feature = "messaging"))]
@@ -192,21 +192,22 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
     let links = note_links(&mut server)?;
 
     // With the `messaging` feature the runtime has already started an in-process bus,
-    // so the port comes from it and one publish fans out to every listener. Without
-    // it, a publisher that writes to the log satisfies the same port.
+    // so `Events` comes from it, carrying the headers `messaging.events.headers` turns
+    // on, and one publish fans out to every listener. Without it, a publisher that
+    // writes to the log satisfies the same port.
     #[cfg(feature = "messaging")]
-    let events: Arc<dyn EventPublisher> = {
+    let events: Events = {
         server.subscribe(adapter::outbound::events::EventLogListener)?;
         server.events()?
     };
     #[cfg(not(feature = "messaging"))]
-    let events: Arc<dyn EventPublisher> = Arc::new(EventLog);
+    let events = Events::new(Arc::new(EventLog));
 
     // Anything several adapters need can be shared through the context while wiring.
     server.context_mut().provide(store.clone());
 
     // --- application: use cases over those ports ----------------------------------
-    let notes = Notes::new(store, attachments, links, Events::new(events));
+    let notes = Notes::new(store, attachments, links, events);
 
     // --- driving adapter: HTTP in -------------------------------------------------
     // No mount path given, so it takes `server.api_path` from configuration, which
