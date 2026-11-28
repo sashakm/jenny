@@ -93,7 +93,7 @@ this" has no useful answer, and the client's remedy is to authenticate.
 
 | Cedar | Built from |
 |---|---|
-| `principal` | `User::"<id>"`, member of `Role::"<r>"` for each of `Principal::roles()`; attributes are the claims plus `id` |
+| `principal` | `User::"<id>"`, or `System::"<service>/<component>"` for the service itself (a system principal, ADR-033), member of `Role::"<r>"` for each of `Principal::roles()`; attributes are the claims plus `id` |
 | `action` | `Action::"<action>"` |
 | `resource` | `<kind>::"<id>"`, member of its parents, with its attributes |
 | `context` | the request's context |
@@ -125,6 +125,14 @@ the schema rejects) denies and logs at `error`. Cedar skips a policy whose evalu
 errors. For a `permit` that only withholds a grant, but a skipped `forbid` grants more
 than the policies say, so `CedarAuthorizer` denies whenever a `forbid` errored. Policy
 templates are rejected at load, because nothing in jenny links them.
+
+### The service itself is `System`, not a `User`
+
+A scheduled task or an inbound event handler runs as a system principal (ADR-033). The
+principal's kind, not its id, picks the entity type, so `System::"my-notes/tasks"` can be
+granted what the cleanup needs and no token, whatever its `sub`, is ever that entity.
+System principals hold the roles in `system.roles`; with a schema, `System` must be
+declared for them to be authorized.
 
 ## Consequences
 

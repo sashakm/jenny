@@ -475,7 +475,7 @@ reads every key to list; see above.)
 | `jenny` | — | facade: feature-gated re-exports |
 | `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Blobs`, `Events`, the outbound ports, `Memory`, `MemoryBlobs`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
-| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), the `Nats` connection (`NatsConnectionConfig`: TLS, credentials), NATS gateway, `NatsKv` store |
+| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` + `JetStreamConsumer` and the inbound `Handler` dispatch (driving), the `Nats` connection (`NatsConnectionConfig`: TLS, credentials), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL, Apache AGE graphs (`graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
@@ -515,6 +515,30 @@ Every envelope has its own id and can be correlated with the request that raised
 headers, and the NATS forwarder passes them on, the id as `Nats-Msg-Id` so JetStream
 drops a replayed duplicate.
 
+Who raised an event goes with it when configured: `messaging.events.headers.caller`
+writes `caller-subject` (and `caller-actor` when someone acted on the subject's behalf,
+RFC 8693), `source` writes `source-service` and `source-version`. `main` adds headers of
+its own with `server.events()?.enriched_with(|cx: &Context, headers: &mut Headers| …)`.
+They are written before the outbox stores the event, so a replay carries them too
+(ADR-032).
+
+Events come in through typed handlers, from the bus and from JetStream:
+
+```rust,ignore
+server.handle("my-notes.note.archived", audit::archived)?;       // the in-process bus
+let requests = MessagingAdapter::new("note-requests", "notes.requests")?
+    .stream("NOTES")                                             // must exist
+    .on(SubjectBinding::new("archive"), archive_requested);      // a durable consumer
+server = server.register_messaging(requests);
+```
+
+A handler gets the payload decoded into its DTO and a `Context` whose request id is the
+event's correlation id, and runs as the service itself, `System[my-notes/events]` — a
+principal no token can impersonate, which Cedar sees as `System::"my-notes/events"`.
+Scheduled tasks run as `System[my-notes/tasks]` the same way (ADR-033). On JetStream a
+failure is retried with backoff, then dead-lettered, as `messaging.inbound` says
+(ADR-006).
+
 ## Authorization
 
 The `Authorizer` port asks one question, *may this principal do this action on this
@@ -551,7 +575,6 @@ design is open for discussion, and each one lists its open questions.
 | ADR | What | Builds on |
 |---|---|---|
 | **Day 2** | | |
-| [ADR-032](docs/adr/ADR-032-enriching-event-envelopes.md) | event headers filled from the request's `Context`, such as the caller's subject and actor (RFC 8693) | ADR-006, ADR-016 |
 | [ADR-020](docs/adr/ADR-020-management-interface.md) | `/j` on a management listener of its own; each endpoint group configurable | ADR-007 |
 | [ADR-021](docs/adr/ADR-021-protobuf-contracts.md) | Rust-first protobuf contracts from `#[derive(Dto)]`, over gRPC, binary HTTP and JSON | ADR-005, ADR-011 |
 | [ADR-022](docs/adr/ADR-022-streaming-sse-and-websocket.md) | server-sent events and WebSocket | ADR-006 inbound dispatch |
@@ -567,8 +590,8 @@ design is open for discussion, and each one lists its open questions.
 | **Milestone 3.0** | | |
 | [ADR-029](docs/adr/ADR-029-clustered-deployments.md) | clustered deployments: Raft-replicated state, then several services | everything |
 
-The day-2 work goes in this order: ADR-032 (ADR-031, authenticating to NATS, is built),
-then ADR-020, then ADR-026 with ADR-029's leases, then
+The day-2 work goes in this order (ADR-031, authenticating to NATS, and ADR-032,
+enriched event headers, are built): ADR-020, then ADR-026 with ADR-029's leases, then
 ADR-023 (its key-algorithm policy first), then ADR-027, ADR-024 and ADR-025, and finally
 ADR-021 and ADR-022.
 

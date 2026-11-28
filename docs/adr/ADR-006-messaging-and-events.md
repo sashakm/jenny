@@ -1,6 +1,6 @@
 # ADR-006: Messaging and the In-Process Event Bus
 
-**Status:** Accepted — inbound dispatch not implemented; events committed with a Postgres write reach the bus through the outbox relay (ADR-016); `messaging.nats.url` also backs key-value stores (ADR-017)
+**Status:** Accepted — implemented, inbound dispatch included (2026-11-28); events committed with a Postgres write reach the bus through the outbox relay (ADR-016); `messaging.nats.url` also backs key-value stores (ADR-017)
 **Date:** 2026-08-24
 
 ## Context
@@ -79,28 +79,59 @@ not fail the publisher or the other listeners. That is the right default for eff
 that are genuinely independent, and it is why the dual-write discussion in ADR-004
 matters: neither the bus nor the publisher makes events durable.
 
-### Inbound dispatch is declared, not implemented
+### Inbound dispatch: typed handlers, from the bus and from JetStream
 
-`MessagingAdapter` is the messaging counterpart to `RestAdapter`: a named driving
-adapter, rooted at a subject prefix, declaring which subjects the service consumes. The
-runtime records and logs them at startup and reports them on `/health/status`.
+A service consumes events through typed handlers. A handler is a driving adapter: it gets
+the payload decoded as JSON into its own DTO, converts it into the **same domain command**
+a REST DTO converts into (ADR-001), and calls the use case, which cannot tell which
+arrived. `jenny_messaging::inbound::Handler<M>` (`async fn handle(&self, message: M, cx:
+&Context)`) is the trait; a closure works too, taking the `Context` by value, because
+stable Rust cannot prove `Send` for a closure's future that borrows it.
 
-The dispatch path — consume, build a `Context`, convert the payload into a domain
-command, invoke a use case, ack or nack — is **not built**. Shipping declaration-only is
-a deliberate choice rather than an omission: the shape of the declaration is what other
-things (configuration, status reporting, the future CLI's scaffolding) need to be stable,
-and it is stable now. The dispatch behind it can land without that shape changing.
+One dispatch core (`jenny_messaging::inbound::Dispatcher`) serves both sources. It builds
+the `Context` every other driving adapter builds (ADR-003): the request id from the
+`correlation-id` header when it is a UUID, the server's authorizer, an `InboundEvent`
+(id, name, occurred-at, attempt) for idempotency, the caller from `caller-subject` /
+`caller-actor` when the transport is trusted, and the principal: the service itself,
+`System[<service>/events]`, unless `principal: envelope` restores the caller (ADR-032,
+ADR-033). What a handler raises is therefore correlated with the request that started it.
 
-When it does land, the design it has to satisfy is already fixed by the rest of the
-framework:
+**The in-process bus.** `JennyServer::handle(pattern, handler)` subscribes a
+`BusHandler` for a topic pattern; the raw `subscribe(EventConsumer)` stays. Bus headers
+are always trusted. A failure or an undecodable payload is logged with the event id and
+name, and not redelivered: the bus is in memory, and a retry belongs to a broker.
 
-- an inbound message converts into the **same domain command** a REST DTO converts into
-  (ADR-001), so a use case cannot tell which arrived;
-- the consumer builds the same `Context` every other driving adapter builds (ADR-003),
-  with the correlation id taken from message headers where the broker has them;
-- failure handling — ack-and-log, nack for retry, dead-letter — is configurable per
-  subscription rather than baked in, because the right answer depends on whether the
-  effect is idempotent.
+**JetStream.** `MessagingAdapter::stream("SHOP")` names the stream and `.on(binding,
+handler)` binds a subject; `.subscribe(binding)` still only declares one. At `bind`, the
+runtime creates or updates one durable pull consumer per adapter, named
+`<service_name>-<adapter>`, with the handled subjects as filter subjects, over the shared
+NATS connection (ADR-031). It never creates the stream; a missing one is a startup error
+naming it. What becomes of a message is configurable under `messaging.inbound`, with
+overrides per full subject in `messaging.inbound.subscriptions` (a list, since keys cannot
+contain dots), because the right answer depends on whether the effect is idempotent:
+
+| The handler | The message |
+|---|---|
+| succeeded | ack |
+| undecodable payload, `Invalid`, `NotFound`, `Forbidden`, `Unauthenticated` | term, with a warning |
+| `Internal`, `Stale`, `Conflict` | nak, delayed by `backoff` (seconds, default `[1, 5, 30]`, the last repeating), until `max_deliver` (default 5); then term |
+
+Before any term, an optional `dead_letter` subject gets the payload and headers, plus
+`dead-letter-reason`, `dead-letter-subject` and `dead-letter-deliveries`; if that publish
+fails, the message is nak'd rather than lost. jenny counts deliveries itself (the consumer's
+own `max_deliver` is unlimited), so nothing is dropped without going through that path.
+`max_in_flight` (default 1) is how many messages a consumer holds: at 1, messages are
+handled in stream order as long as they succeed; more trades order for throughput.
+
+Delivery is at least once, and jenny keeps no dedup store: a handler whose effect is not
+idempotent records the `InboundEvent` id.
+
+At shutdown, consumers stop fetching as soon as it begins, finish the messages they hold
+and ack or nak them, beside the HTTP drain; then the relay, the broker, the NATS
+connection and the pool close, in that order (ADR-016, ADR-031). `/health/status` lists
+each consumer with its stream, filter subjects and pending count.
+
+Other brokers and creating or configuring streams are out of scope.
 
 ### Event metadata travels as headers
 
