@@ -76,6 +76,7 @@ jobs:
       JENNY_TEST_POSTGRES_URL: postgres://jenny:jenny@localhost:5432/jenny
       JENNY_TEST_AGE_URL: postgres://jenny:jenny@localhost:5433/jenny
       JENNY_TEST_NATS_URL: nats://localhost:4222
+      JENNY_TEST_NATS_TLS_URL: tls://127.0.0.1:4223
       JENNY_TEST_S3_URL: s3://jenny-test
       AWS_ENDPOINT: http://localhost:9000
       AWS_ALLOW_HTTP: "true"
@@ -100,6 +101,22 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # Beside the plain one, for the TLS tests (ADR-031): mTLS with `verify_and_map`,
+      # certificates from the script, the same way `just test-nats` starts it. They go
+      # outside `target/`, which the Rust cache restores after this step.
+      - name: Start NATS with TLS client certificates
+        run: |
+          dir="$RUNNER_TEMP/nats-tls"
+          echo "JENNY_TEST_NATS_TLS_DIR=$dir" >> "$GITHUB_ENV"
+          scripts/nats-test-certs.sh "$dir"
+          docker run -d --name nats-tls -p 127.0.0.1:4223:4222 \
+            -v "$dir:/certs:ro" nats:2-alpine -js -c /certs/nats.conf
+          for _ in $(seq 1 30); do
+            docker logs nats-tls 2>&1 | grep -q 'Server is ready' && exit 0
+            sleep 1
+          done
+          docker logs nats-tls
+          exit 1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
