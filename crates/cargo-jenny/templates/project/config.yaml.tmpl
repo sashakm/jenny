@@ -1,6 +1,6 @@
 # Configuration for {{project_kebab}}.
 #
-# The runtime reads `service_name`, `service_version`, `system`, `server`, `telemetry`,
+# The runtime reads `service_name`, `service_version`, `system`, `tasks`, `server`, `telemetry`,
 # `messaging`, `persistence` and `objects`.
 # Everything under `applications.<name>` is yours, passed through untouched.
 #
@@ -11,6 +11,16 @@
 # principal its scheduled tasks and event handlers run as. Defaults to the package name;
 # `service_version` (default: the package version) works the same way.
 service_name: {{project_kebab}}
+
+# With several replicas, run each slot of a scheduled task on one of them only: the one
+# that acquires its lease. Unset, every replica runs every task. `postgres` needs the
+# persistence feature and `persistence.postgres`, `nats` the messaging feature and
+# `messaging.nats`; `memory` is for one replica. The ttl, in seconds, must exceed the
+# clock skew between replicas.
+# tasks:
+#   lease:
+#     backend: postgres
+#     ttl: 30
 
 server:
   address: "[::]:8000"
