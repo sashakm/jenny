@@ -36,6 +36,11 @@ async fn main() -> Result<(), anyhow::Error> {
             PrintTask("Three second task".into()),
             "*/3 * * * * *",
         )?);
+    // With several replicas, give the scheduler a lease so each slot runs on one of them
+    // (`tasks.lease` in `JennyServer`), and keep per-replica work on every replica:
+    //
+    //     let scheduler = scheduler.with_lease(lease, Duration::from_secs(30), "tasks-example");
+    //     ScheduledTask::new("clear local cache", ClearCache, "0 * * * * *")?.per_replica()
 
     // Stop starting runs on Ctrl-C, and let the ones in progress finish.
     scheduler

@@ -64,6 +64,8 @@ pub(crate) struct Inner {
     prefix: String,
     client: OnceCell<async_nats::Client>,
     buckets: Mutex<Vec<Arc<Bucket>>>,
+    /// Every lease handed out, its bucket opened by `prepare`.
+    leases: Mutex<Vec<crate::lease::NatsLease>>,
     /// Tells the file watcher to stop; dropped with the last handle, which stops it too.
     stop: watch::Sender<bool>,
     watcher: Mutex<Option<JoinHandle<()>>>,
@@ -108,6 +110,7 @@ impl Nats {
                 prefix,
                 client: OnceCell::new(),
                 buckets: Mutex::new(Vec::new()),
+                leases: Mutex::new(Vec::new()),
                 stop: watch::Sender::new(false),
                 watcher: Mutex::new(None),
             }),
@@ -148,6 +151,39 @@ impl Nats {
         }
     }
 
+    /// Leases in the bucket [`LEASE_BUCKET`](crate::lease::LEASE_BUCKET), `jenny_leases`,
+    /// each lasting `ttl`, the bucket's `max_age`. The runtime uses it for
+    /// `tasks.lease.backend: nats`; a service may use it for leader election of its own.
+    /// See [`NatsLease`](crate::lease::NatsLease).
+    pub fn lease(&self, ttl: Duration) -> crate::lease::NatsLease {
+        self.lease_in(crate::lease::LEASE_BUCKET, ttl)
+    }
+
+    /// [`lease`](Self::lease) in a bucket of your choosing. Panics when `bucket` is not a
+    /// valid bucket name, or `ttl` is zero.
+    pub fn lease_in(&self, bucket: &str, ttl: Duration) -> crate::lease::NatsLease {
+        assert!(
+            !bucket.is_empty()
+                && bucket
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "`{bucket}` is not a valid NATS bucket name: use letters, digits, `-` and `_`"
+        );
+        assert!(!ttl.is_zero(), "a lease ttl of zero would never hold");
+        let lease = crate::lease::NatsLease {
+            nats: self.inner.clone(),
+            bucket: bucket.to_string(),
+            ttl,
+            store: Arc::default(),
+        };
+        self.inner
+            .leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(lease.clone());
+        lease
+    }
+
     /// The connected client, connecting the first time.
     ///
     /// Fails with the server's reason when it refuses the connection: an invalid
@@ -168,7 +204,7 @@ impl Nats {
         Ok(self.inner.client().await?.server_info().auth_required)
     }
 
-    /// Connect, and open or create the bucket of every store handed out.
+    /// Connect, and open or create the bucket of every store and lease handed out.
     pub async fn prepare(&self) -> anyhow::Result<()> {
         self.inner.client().await?;
         let buckets = self
@@ -182,6 +218,15 @@ impl Nats {
                 .store(&bucket)
                 .await
                 .map_err(|e| anyhow::anyhow!("opening NATS bucket `{}`: {e}", bucket.name))?;
+        }
+        let leases = self
+            .inner
+            .leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for lease in leases {
+            lease.store().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         Ok(())
     }

@@ -1,4 +1,4 @@
-//! An in-memory [`Store`] and [`Blobs`] — for tests, prototypes and services that start
+//! An in-memory [`Store`], [`Blobs`] and [`Lease`] — for tests, prototypes and services that start
 //! without a database or an object store.
 //!
 //! A driven adapter, living in the core for the same reason [`task`](crate::task) does:
@@ -9,12 +9,14 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::{Aggregate, Check, Criteria, DomainError, DomainResult, Filter, ValueKind};
 use crate::port::blobs::{Access, Blob, BlobInfo, Blobs, check_key, is_under};
+use crate::port::lease::{HeldLease, Lease};
 use crate::port::outbound::HealthCheck;
 use crate::port::store::{Loaded, Store, Version, encode, expect_version};
 
@@ -487,6 +489,88 @@ fn compare(left: Option<&Value>, right: Option<&Value>) -> Ordering {
             .cmp(&b.to_lowercase())
             .then_with(|| a.cmp(b)),
         _ => rank(left).cmp(&rank(right)),
+    }
+}
+
+/// Leases kept in a map — for tests, and a single replica that wants the same code path
+/// as a cluster.
+///
+/// One process only: expiry is tokio's monotonic clock, so `tokio::time::pause` drives
+/// it in tests. Tokens count acquisitions from 1, across every key.
+#[derive(Debug, Default)]
+pub struct MemoryLease {
+    held: Mutex<BTreeMap<String, MemoryHeld>>,
+    tokens: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Debug)]
+struct MemoryHeld {
+    token: u64,
+    expires: tokio::time::Instant,
+}
+
+impl MemoryLease {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> DomainResult<MutexGuard<'_, BTreeMap<String, MemoryHeld>>> {
+        self.held
+            .lock()
+            .map_err(|e| DomainError::internal(format!("lease table is poisoned: {e}")))
+    }
+}
+
+#[async_trait]
+impl Lease for MemoryLease {
+    async fn acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        ttl: Duration,
+    ) -> DomainResult<Option<HeldLease>> {
+        let now = tokio::time::Instant::now();
+        let mut held = self.lock()?;
+        // Expired entries go as they are noticed, so the map does not grow per slot.
+        held.retain(|_, lease| lease.expires > now);
+        if held.contains_key(key) {
+            return Ok(None);
+        }
+        let token = self
+            .tokens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        held.insert(
+            key.to_string(),
+            MemoryHeld {
+                token,
+                expires: now + ttl,
+            },
+        );
+        Ok(Some(HeldLease::new(key, holder, token)))
+    }
+
+    async fn renew(&self, lease: &HeldLease, ttl: Duration) -> DomainResult<bool> {
+        let now = tokio::time::Instant::now();
+        let mut held = self.lock()?;
+        match held.get_mut(lease.key()) {
+            Some(current) if current.token == lease.token() && current.expires > now => {
+                current.expires = now + ttl;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn release(&self, lease: HeldLease) -> DomainResult<()> {
+        let mut held = self.lock()?;
+        if held
+            .get(lease.key())
+            .is_some_and(|current| current.token == lease.token())
+        {
+            held.remove(lease.key());
+        }
+        Ok(())
     }
 }
 
@@ -1088,6 +1172,41 @@ mod tests {
         let criteria = Criteria::new().with_sort("title".parse().unwrap());
         assert!(notes.list(&criteria).await.is_err());
         assert!(notes.list(&Criteria::new()).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leases_keep_the_contract() {
+        crate::testing::lease::conformance(
+            &MemoryLease::new(),
+            Duration::from_secs(30),
+            Duration::from_millis(1),
+            "memory",
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lease_expires_on_the_monotonic_clock() {
+        let lease = MemoryLease::new();
+        let ttl = Duration::from_secs(10);
+        let held = lease.acquire("k", "one", ttl).await.unwrap().unwrap();
+        assert_eq!(held.token(), 1);
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(lease.renew(&held, ttl).await.unwrap());
+        // Renewed at 6s, so still held at 12s, past the first ttl.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(lease.acquire("k", "two", ttl).await.unwrap().is_none());
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let taken = lease.acquire("k", "two", ttl).await.unwrap().unwrap();
+        assert!(taken.token() > held.token());
+        assert!(!lease.renew(&held, ttl).await.unwrap());
+        assert_eq!(
+            lease.held.lock().unwrap().len(),
+            1,
+            "expired entries are dropped"
+        );
     }
 
     #[tokio::test]

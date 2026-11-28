@@ -23,7 +23,9 @@
 //!   ([`EndpointsConfig`]); probes and scrapes are not access-logged by default (ADR-020).
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the
 //!   background, each run as `System[<service_name>/tasks]` with the
-//!   [authorizer](JennyServer::with_authorizer) (ADR-033).
+//!   [authorizer](JennyServer::with_authorizer) (ADR-033); with `tasks.lease`, each slot
+//!   on one replica only (a memory, Postgres or NATS lease), and
+//!   [`JennyServer::lease`] for leader election of your own (ADR-029).
 //! - **Inbound events** — with `messaging`, typed handlers on the bus
 //!   ([`JennyServer::handle`]) and on JetStream (a `MessagingAdapter` with `.on(…)`, given
 //!   to [`JennyServer::register_messaging`]: one durable consumer per adapter, ack, nak
@@ -77,9 +79,10 @@ pub mod telemetry;
 pub use config::PersistenceConfig;
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
-    DEFAULT_EVENT_BUFFER, DEFAULT_FRAMEWORK_PATH, DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, EndpointConfig,
-    EndpointsConfig, EventHeadersConfig, EventsConfig, HttpConfig, Listener, ManagementConfig,
-    MessagingConfig, MetricsEndpointConfig, ServerArgs, ServerConfig, SystemConfig,
+    DEFAULT_EVENT_BUFFER, DEFAULT_FRAMEWORK_PATH, DEFAULT_LEASE_TTL_SECONDS,
+    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, EndpointConfig, EndpointsConfig, EventHeadersConfig,
+    EventsConfig, HttpConfig, LeaseBackend, LeaseConfig, Listener, ManagementConfig,
+    MessagingConfig, MetricsEndpointConfig, ServerArgs, ServerConfig, SystemConfig, TasksConfig,
 };
 pub use context::ServerContext;
 pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};

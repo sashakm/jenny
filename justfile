@@ -157,7 +157,7 @@ test-nats:
   export JENNY_TEST_NATS_URL="nats://127.0.0.1:$(port "$name")"
   export JENNY_TEST_NATS_TLS_URL="tls://127.0.0.1:$(port "$tls_name")"
   export JENNY_TEST_NATS_TLS_DIR="$tls_dir"
-  cargo test -p jenny-messaging --test kv_test --test tls_test --test inbound_test
+  cargo test -p jenny-messaging --test kv_test --test tls_test --test inbound_test --test lease_test
   cargo test -p jenny-server --features messaging --lib -- nats buckets handler
   # The example's end-to-end suite, with its notes in a NATS bucket.
   JENNY__MESSAGING__NATS__URL="$JENNY_TEST_NATS_URL" JENNY__MESSAGING__NAMESPACE="example-$$" \

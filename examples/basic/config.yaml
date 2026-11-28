@@ -1,6 +1,6 @@
 # Configuration for the `basic` example.
 #
-# `service_name`, `system`, `server`, `telemetry` and (with their features) `messaging`,
+# `service_name`, `service_version`, `system`, `tasks`, `server`, `telemetry` and (with their features) `messaging`,
 # `persistence` and `objects` are the only sections the jenny runtime interprets. Notes are kept in memory unless
 # `persistence.postgres.url` is set — best through JENNY__PERSISTENCE__POSTGRES__URL,
 # since it carries the password — or `messaging.nats.url` (JENNY__MESSAGING__NATS__URL;

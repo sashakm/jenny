@@ -20,6 +20,9 @@
 //! };
 //! ```
 //!
+//! [`Postgres::lease`] hands out a [`PgLease`], the `Lease` port over a `jenny_leases`
+//! table, which the runtime uses for `tasks.lease.backend: postgres` (ADR-029).
+//!
 //! ### Ports of your own
 //!
 //! Queries phrased in your domain's language go on a port that extends `Store<A>`
@@ -48,6 +51,7 @@ mod error;
 #[cfg(feature = "graph")]
 pub mod graph;
 pub mod health;
+mod lease;
 mod outbox;
 mod postgres;
 mod query_format;
@@ -66,6 +70,8 @@ pub use graph::{Cypher, Graph};
 /// one an in-memory store's allowlist uses.
 pub use jenny_core::domain::ValueKind;
 pub use jenny_macros::QueryFormat;
+#[doc(inline)]
+pub use lease::PgLease;
 #[doc(inline)]
 pub use outbox::OutboxRelay;
 #[doc(inline)]

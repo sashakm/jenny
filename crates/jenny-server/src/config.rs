@@ -10,8 +10,9 @@
 //! That order is the deployment order: a file for defaults you commit, environment
 //! variables for what differs per environment, flags for what differs per run.
 //!
-//! The framework reads the sections it owns — `server`, `telemetry`, and `messaging`,
-//! `persistence` and `objects` when those features are on. Everything else passes
+//! The framework reads the sections it owns — `service_name`, `service_version`,
+//! `system`, `tasks`, `server`, `telemetry`, and `messaging`, `persistence` and
+//! `objects` when those features are on. Everything else passes
 //! through untyped, so it imposes no schema on your configuration: an adapter
 //! deserialises its own `applications.<name>` section into whatever type it likes, via
 //! [`ServerContext::app_section`](crate::ServerContext::app_section).
@@ -21,6 +22,10 @@
 //! service_version: "1.2.3"    # defaults to the package version
 //! system:
 //!   roles: [Maintenance]      # what tasks and event handlers hold, as System[…]
+//! tasks:
+//!   lease:                    # optional: each slot of a scheduled task on one replica
+//!     backend: postgres       # memory | postgres | nats
+//!     ttl: 30                 # seconds; must exceed the clock skew between replicas
 //! server:
 //!   address: "[::]:8000"
 //!   api_path: /api        # where REST adapters mount
@@ -447,6 +452,46 @@ pub struct SystemConfig {
     pub roles: Vec<String>,
 }
 
+/// Default `tasks.lease.ttl`, in seconds.
+pub const DEFAULT_LEASE_TTL_SECONDS: u64 = 30;
+
+/// The `tasks` section: how scheduled tasks run.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TasksConfig {
+    /// Run each slot of every scheduled task on one replica only, the one that acquires
+    /// its lease (ADR-029). Unset, every replica runs every task, as without a cluster.
+    pub lease: Option<LeaseConfig>,
+}
+
+/// `tasks.lease`: where leases live and how long they last.
+#[derive(Clone, Debug, Deserialize)]
+pub struct LeaseConfig {
+    pub backend: LeaseBackend,
+    /// Seconds a slot's lease outlives the run's last renewal; renewed every third of
+    /// it. Must exceed the clock skew between replicas. Defaults to 30; 0 is a startup
+    /// error.
+    #[serde(default = "default_lease_ttl")]
+    pub ttl: u64,
+}
+
+fn default_lease_ttl() -> u64 {
+    DEFAULT_LEASE_TTL_SECONDS
+}
+
+/// Where `tasks.lease` keeps its leases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LeaseBackend {
+    /// In the process: one replica, or tests.
+    Memory,
+    /// The table `jenny_leases` in `persistence.postgres`. Needs the `persistence`
+    /// feature.
+    Postgres,
+    /// The bucket `jenny_leases` over `messaging.nats`. Needs the `messaging` feature.
+    Nats,
+}
+
 /// The `persistence` section. Applies with the `persistence` feature.
 #[cfg(feature = "persistence")]
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -467,6 +512,7 @@ pub struct ServerConfig {
     /// and is the default for `telemetry.service_version` and `/health/status`.
     pub service_version: Option<String>,
     pub system: SystemConfig,
+    pub tasks: TasksConfig,
     pub server: HttpConfig,
     pub telemetry: TelemetryConfig,
     pub messaging: MessagingConfig,
@@ -777,6 +823,38 @@ applications:
         let mut config = ConfigSource::load(&args)?.server_config(&args)?;
         let service = config.identify(jenny_core::Service::new("from-package", "0.1.0"))?;
         Ok((config, service))
+    }
+
+    #[test]
+    fn tasks_lease_is_off_unless_configured_and_ttl_defaults_to_30() {
+        let (config, _) = identified("{}", "JENNY_TEST_LEASE_NONE").unwrap();
+        assert!(config.tasks.lease.is_none());
+
+        let (config, _) = identified(
+            "tasks:\n  lease:\n    backend: nats\n",
+            "JENNY_TEST_LEASE_NATS",
+        )
+        .unwrap();
+        let lease = config.tasks.lease.unwrap();
+        assert_eq!(lease.backend, LeaseBackend::Nats);
+        assert_eq!(lease.ttl, DEFAULT_LEASE_TTL_SECONDS);
+
+        let (config, _) = identified(
+            "tasks:\n  lease:\n    backend: postgres\n    ttl: 12\n",
+            "JENNY_TEST_LEASE_PG",
+        )
+        .unwrap();
+        let lease = config.tasks.lease.unwrap();
+        assert_eq!(lease.backend, LeaseBackend::Postgres);
+        assert_eq!(lease.ttl, 12);
+
+        assert!(
+            identified(
+                "tasks:\n  lease:\n    backend: redis\n",
+                "JENNY_TEST_LEASE_BAD"
+            )
+            .is_err()
+        );
     }
 
     #[test]

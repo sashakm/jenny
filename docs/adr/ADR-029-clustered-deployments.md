@@ -1,6 +1,6 @@
 # ADR-029: Clustered Deployments
 
-**Status:** Proposed — milestone 3.0, except for leases, which are day-2 work
+**Status:** Proposed — milestone 3.0; step 1 (leases) built
 **Date:** 2026-11-20
 
 ## Context
@@ -25,7 +25,7 @@ Some things do not hold across replicas today:
 
 - The in-process bus delivers in the replica that published (ADR-006).
 - Every replica runs every scheduled task, so a nightly job with three replicas runs
-  three times (ADR-007).
+  three times (ADR-007). Step 1 below fixes this once `tasks.lease` is configured.
 - The API-key file, the JWKS, and later the policies, scopes and revocation lists
   (ADR-023 to ADR-025), are cached per replica, and each finds out about changes on its
   own schedule.
@@ -72,10 +72,32 @@ attacker inside an instance.
 
 ### Order of work
 
-1. **Leases over the stores that exist**: a Postgres advisory lock, or a NATS KV key with
-   a time-to-live (ADR-017 lists per-key TTL as not built). They give singleton
-   scheduled tasks and leader election without new infrastructure. Scheduled tasks need
-   them now, so this is day-2 work.
+1. **Leases over the stores that exist** (built). A `Lease` port in `jenny-core`
+   (`acquire`, `renew`, `release`) with three adapters: `MemoryLease` (one process),
+   `PgLease` (a `jenny_leases` table, tokens from the sequence `jenny_lease_tokens`, every
+   time the database's `now()`) and `NatsLease` (a `jenny_leases` key-value bucket whose
+   `max_age` is the lease's `ttl`, so per-key TTL was not needed; shared by every service
+   on the NATS account, which must therefore agree on the `ttl`). Every acquisition
+   carries a **fencing token**, strictly increasing across all keys of a backend, for
+   whatever the holder writes to. Session advisory locks were rejected: they tie the
+   lease to one pooled connection, break under PgBouncer's transaction pooling, give no
+   token, and would behave differently from NATS.
+
+   With `tasks.lease: { backend: memory | postgres | nats, ttl: 30 }`, each firing of a
+   scheduled task acquires the **per-slot key** `<service>/tasks/<task>/<slot as unix
+   seconds>`, as `<service>/<$HOSTNAME or a UUID>`. Only the replica that gets it runs the
+   slot; the run's `Context` carries a `TaskLease { key, token }`, and the lease is
+   renewed every `ttl / 3` while it runs. A lost renewal is logged, not a reason to
+   cancel the run; a backend error on acquire skips the slot. The key is never released,
+   only left to expire, so a slot runs **at most once**: one key per task released after
+   a fast run would let a replica whose clock is a few seconds behind take it and run the
+   same slot again. That holds as long as **`ttl` exceeds the clock skew between
+   replicas**. A replica that crashes holding a slot loses that slot. The lease keeps one
+   slot from running twice, not two slots apart: one run per task at a time is a rule
+   per replica, so a run that outlasts its interval can overlap the next slot's run on
+   another replica, and the fencing token is what keeps their writes apart. `ScheduledTask::
+   per_replica()` opts a task out, and `JennyServer::lease()` hands the lease to services
+   for leader election of their own.
 2. **Change notification across replicas**: `LISTEN/NOTIFY` (an ADR-016 gap) or NATS
    subjects, so caches of policies, scopes and revocations are invalidated, not polled.
 3. **The Raft store**, for the framework's state and small aggregates, with a signed
@@ -107,8 +129,9 @@ therefore opt-in, and steps 1 and 2 must stand without it.
 
 ## Consequences
 
-- Leases move into the day-2 work, because duplicated scheduled tasks already affect
-  anyone running more than one replica.
+- Leases moved into the day-2 work, because duplicated scheduled tasks already affected
+  anyone running more than one replica, and are built (step 1). Leader election built
+  into the framework itself is not: outbox relays keep `SKIP LOCKED` (ADR-016).
 - With step 3, jenny runs a consensus protocol, and its correctness becomes jenny's
   responsibility. That calls for testing under faults (partitions, restarts, clock
   jumps) of a kind the project does not do yet.

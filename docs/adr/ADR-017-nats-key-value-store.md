@@ -99,4 +99,10 @@ same container in a step, because a service container cannot be given the `-js` 
 ## Not built yet
 
 - Watching a bucket (`watch`) as a source of change events for other services.
-- Time-to-live per key, which JetStream supports and sessions would want.
+- Time-to-live per key, which JetStream supports and sessions would want. Leases
+  (ADR-029) did without it: they live in a bucket of their own, `jenny_leases` (history 1,
+  `max_age` = `tasks.lease.ttl`). It is not namespaced: every service on the NATS
+  account shares it (the keys carry the service name), so they must agree on
+  `tasks.lease.ttl`, or each startup resets the bucket's `max_age` to its own. A
+  renewal is a plain `update` that restarts the entry's age, so NATS servers older than
+  2.11 work. The store's public API still has no per-key TTL.
