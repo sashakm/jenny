@@ -106,14 +106,20 @@ use domain::port::{Attachments, NoteLinks, NoteStore};
 /// This service's own configuration, read from `applications.my-notes`. The framework
 /// imposes no schema on it — the shape below is entirely ours.
 #[derive(Debug, Deserialize)]
+#[serde(default)]
 struct NotesConfig {
     greeting: String,
+    /// The JetStream stream archive requests arrive on. jenny never creates streams, so
+    /// the request handler is only registered when one is named (and NATS configured).
+    #[cfg_attr(not(feature = "messaging"), allow(dead_code))]
+    requests_stream: Option<String>,
 }
 
 impl Default for NotesConfig {
     fn default() -> Self {
         Self {
             greeting: "hello from the built-in default".to_string(),
+            requests_stream: None,
         }
     }
 }
@@ -208,6 +214,35 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
 
     // --- application: use cases over those ports ----------------------------------
     let notes = Notes::new(store, attachments, links, events);
+
+    // --- driving adapters: events and the clock in -----------------------------------
+    // A bus handler, and, when a stream is configured, a JetStream consumer. Both run as
+    // `System[basic-example/events]`; the task runs as `System[basic-example/tasks]`.
+    #[cfg(feature = "messaging")]
+    {
+        // Topics are `<namespace>.<event name>`; the namespace defaults to the service name.
+        let namespace = server
+            .config()
+            .messaging
+            .namespace
+            .clone()
+            .unwrap_or_else(|| server.service().name.clone());
+        server.handle(
+            &format!("{namespace}.note.archived"),
+            adapter::inbound::events::audit_archived,
+        )?;
+        if let Some(stream) = config.requests_stream.as_deref()
+            && server.nats().is_some()
+        {
+            server = server
+                .register_messaging(adapter::inbound::events::requests(notes.clone(), stream)?);
+        }
+    }
+    server = server.schedule(jenny::task::ScheduledTask::new(
+        "note-count",
+        adapter::inbound::tasks::NoteCount(notes.clone()),
+        "0 0 * * * * *",
+    )?);
 
     // --- driving adapter: HTTP in -------------------------------------------------
     // No mount path given, so it takes `server.api_path` from configuration, which

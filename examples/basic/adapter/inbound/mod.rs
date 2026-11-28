@@ -5,4 +5,7 @@
 //! would sit beside `rest` here with its own protobuf types and the same use-case
 //! calls underneath.
 
+#[cfg(feature = "messaging")]
+pub mod events;
 pub mod rest;
+pub mod tasks;

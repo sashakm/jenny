@@ -1,7 +1,7 @@
 # Configuration for the `basic` example.
 #
-# `server`, `telemetry` and (with their features) `messaging`, `persistence` and
-# `objects` are the only sections the jenny runtime interprets. Notes are kept in memory unless
+# `service_name`, `system`, `server`, `telemetry` and (with their features) `messaging`,
+# `persistence` and `objects` are the only sections the jenny runtime interprets. Notes are kept in memory unless
 # `persistence.postgres.url` is set — best through JENNY__PERSISTENCE__POSTGRES__URL,
 # since it carries the password — or `messaging.nats.url` (JENNY__MESSAGING__NATS__URL;
 # `messaging.nats.tls` and `.auth` secure that connection, see ADR-031).
@@ -23,6 +23,19 @@ server:
   address: "[::]:8000"
 telemetry:
   log_format: pretty
+messaging:
+  events:
+    headers:
+      caller: true   # caller-subject, and caller-actor when delegated
+      source: true   # source-service, source-version
+  # inbound:         # how event handlers run, and what becomes of a failed message
+  #   principal: system
+  #   max_deliver: 5
+  #   backoff: [1, 5, 30]
+  #   dead_letter: NOTES.dead
 applications:
   my-notes:
     greeting: "hello from config.yaml"
+    # With `messaging` and a NATS, consume archive requests from this JetStream stream,
+    # which must exist and capture `notes.requests.>`.
+    # requests_stream: NOTES
