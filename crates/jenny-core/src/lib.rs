@@ -44,6 +44,45 @@ pub mod port;
 pub mod task;
 pub mod testing;
 
+/// Who the service is: its name and version, as its own `Cargo.toml` states them.
+///
+/// Build it with [`service!`], which reads both at the call site. The runtime takes it
+/// in `JennyServer::from_args(jenny::service!())`, and the top-level `service_name` and
+/// `service_version` configuration keys override it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Service {
+    /// The package name, such as `my-notes`.
+    pub name: String,
+    /// The package version, such as `1.2.3`.
+    pub version: String,
+}
+
+impl Service {
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+}
+
+/// Your crate's name and version, as a [`Service`].
+///
+/// A macro for the same reason as [`service_version!`]: `env!` expands where it is
+/// written, so called in your binary it reads your `Cargo.toml`, not jenny's.
+///
+/// ```
+/// let service = jenny_core::service!();
+/// assert_eq!(service.name, "jenny-core"); // expanded here, in jenny-core's own doc test
+/// assert!(!service.version.is_empty());
+/// ```
+#[macro_export]
+macro_rules! service {
+    () => {
+        $crate::Service::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+    };
+}
+
 /// Your crate's version, for reporting as the service version.
 ///
 /// A macro rather than a function because `env!` expands where it is *written*: called

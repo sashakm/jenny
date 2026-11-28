@@ -17,6 +17,8 @@
 //! [`ServerContext::app_section`](crate::ServerContext::app_section).
 //!
 //! ```yaml
+//! service_name: my-service    # defaults to the package name `jenny::service!()` read
+//! service_version: "1.2.3"    # defaults to the package version
 //! server:
 //!   address: "[::]:8000"
 //!   api_path: /api        # where REST adapters mount
@@ -28,9 +30,7 @@
 //!       username: prometheus
 //!       password: s3cret
 //! telemetry:
-//!   service_name: my-service
-//!   service_version: "1.2.3"
-//!   log_format: pretty
+//!   log_format: pretty          # service_name and service_version default to the above
 //! messaging:
 //!   buffer_size: 64
 //!   nats:                     # one connection: key-value stores and the gateway
@@ -71,9 +71,6 @@ pub const DEFAULT_FRAMEWORK_PATH: &str = "/j";
 pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u64 = 30;
 /// Default in-process event bus buffer.
 pub const DEFAULT_EVENT_BUFFER: usize = 64;
-/// Topic prefix used when neither `messaging.namespace` nor `telemetry.service_name`
-/// is set. Topics may not contain empty segments, so there has to be something.
-pub const DEFAULT_EVENT_NAMESPACE: &str = "jenny";
 
 /// Command-line arguments of a jenny server.
 #[derive(Debug, Default, Parser)]
@@ -211,7 +208,7 @@ pub struct MessagingConfig {
     /// How many events the in-process bus buffers before publishers wait.
     pub buffer_size: usize,
     /// Prefix for every event topic, and for the NATS buckets of key-value stores.
-    /// Defaults to `telemetry.service_name`.
+    /// Defaults to the top-level `service_name`.
     pub namespace: Option<String>,
     /// The service's NATS connection, which the key-value stores and the gateway share:
     /// its servers, TLS and credentials (ADR-031). With the `messaging` feature.
@@ -242,6 +239,13 @@ pub struct PersistenceConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// Who the service is (`JENNY__SERVICE_NAME`). Overrides the name `jenny::service!()`
+    /// read from the package, and is the default for `telemetry.service_name`, for
+    /// `messaging.namespace` and for `/health/status`. Empty is a startup error.
+    pub service_name: Option<String>,
+    /// The service's version (`JENNY__SERVICE_VERSION`). Overrides the package version,
+    /// and is the default for `telemetry.service_version` and `/health/status`.
+    pub service_version: Option<String>,
     pub server: HttpConfig,
     pub telemetry: TelemetryConfig,
     pub messaging: MessagingConfig,
@@ -250,6 +254,37 @@ pub struct ServerConfig {
     /// Where blobs live. Applies with the `objects` feature.
     #[cfg(feature = "objects")]
     pub objects: jenny_objects::ObjectsConfig,
+}
+
+impl ServerConfig {
+    /// Settle who the service is: `service_name` and `service_version` from
+    /// configuration, else `service`'s, written back here and into the `telemetry`
+    /// values that are unset.
+    ///
+    /// Fails when the name is empty after that, because topics, buckets, consumers and
+    /// system principals are all named after it.
+    pub fn identify(
+        &mut self,
+        service: jenny_core::Service,
+    ) -> anyhow::Result<jenny_core::Service> {
+        let name = self.service_name.clone().unwrap_or(service.name);
+        if name.trim().is_empty() {
+            anyhow::bail!(
+                "`service_name` is empty: set it (JENNY__SERVICE_NAME) or leave it unset to \
+                 use the package name"
+            );
+        }
+        let version = self.service_version.clone().unwrap_or(service.version);
+        self.service_name = Some(name.clone());
+        self.service_version = Some(version.clone());
+        self.telemetry
+            .service_name
+            .get_or_insert_with(|| name.clone());
+        self.telemetry
+            .service_version
+            .get_or_insert_with(|| version.clone());
+        Ok(jenny_core::Service::new(name, version))
+    }
 }
 
 /// The merged configuration tree, file and environment.
@@ -291,6 +326,9 @@ impl ConfigSource {
     }
 
     /// Deserialise [`ServerConfig`] and apply the CLI overrides on top.
+    ///
+    /// The service's identity is not resolved yet: [`ServerConfig::identify`] does that
+    /// with what `jenny::service!()` read.
     pub fn server_config(&self, args: &ServerArgs) -> anyhow::Result<ServerConfig> {
         let mut config: ServerConfig = self.0.clone().try_deserialize()?;
         // Before anything starts, rather than when the connection is first made.
@@ -353,8 +391,7 @@ mod tests {
 server:
   address: "127.0.0.1:7000"
   body_limit: 4096
-telemetry:
-  service_name: from-file
+service_name: from-file
 applications:
   my-notes:
     greeting: "hi"
@@ -362,7 +399,7 @@ applications:
         );
         let prefix = "JENNY_TEST_LAYERING";
         // SAFETY: the variable name is unique to this test.
-        unsafe { std::env::set_var(format!("{prefix}__TELEMETRY__SERVICE_NAME"), "from-env") };
+        unsafe { std::env::set_var(format!("{prefix}__SERVICE_NAME"), "from-env") };
 
         let args = ServerArgs {
             address: Some("127.0.0.1:9000".into()),
@@ -373,12 +410,68 @@ applications:
         let source = ConfigSource::load(&args).unwrap();
         let config = source.server_config(&args).unwrap();
 
-        assert_eq!(config.telemetry.service_name, "from-env", "env beats file");
+        assert_eq!(
+            config.service_name.as_deref(),
+            Some("from-env"),
+            "env beats file"
+        );
         assert_eq!(config.server.address, "127.0.0.1:9000", "cli beats file");
         assert_eq!(config.server.body_limit, 4096, "file beats the default");
         assert!(config.telemetry.debug, "--debug is applied");
 
-        unsafe { std::env::remove_var(format!("{prefix}__TELEMETRY__SERVICE_NAME")) };
+        unsafe { std::env::remove_var(format!("{prefix}__SERVICE_NAME")) };
+    }
+
+    fn identified(yaml: &str, prefix: &str) -> anyhow::Result<(ServerConfig, jenny_core::Service)> {
+        let file = write_yaml(yaml);
+        let args = ServerArgs {
+            config_path: Some(file.path().to_string_lossy().into_owned()),
+            env_prefix: Some(prefix.into()),
+            ..Default::default()
+        };
+        let mut config = ConfigSource::load(&args)?.server_config(&args)?;
+        let service = config.identify(jenny_core::Service::new("from-package", "0.1.0"))?;
+        Ok((config, service))
+    }
+
+    #[test]
+    fn the_package_identity_applies_unless_configuration_overrides_it() {
+        let (config, service) = identified("{}", "JENNY_TEST_IDENTITY_DEFAULT").unwrap();
+        assert_eq!(service, jenny_core::Service::new("from-package", "0.1.0"));
+        assert_eq!(
+            config.telemetry.service_name.as_deref(),
+            Some("from-package")
+        );
+        assert_eq!(config.telemetry.service_version.as_deref(), Some("0.1.0"));
+
+        let prefix = "JENNY_TEST_IDENTITY_ENV";
+        // SAFETY: the variable name is unique to this test.
+        unsafe { std::env::set_var(format!("{prefix}__SERVICE_VERSION"), "2.0.0") };
+        let (config, service) = identified("service_name: from-file\n", prefix).unwrap();
+        unsafe { std::env::remove_var(format!("{prefix}__SERVICE_VERSION")) };
+        assert_eq!(service, jenny_core::Service::new("from-file", "2.0.0"));
+        assert_eq!(config.service_name.as_deref(), Some("from-file"));
+        assert_eq!(config.telemetry.service_name.as_deref(), Some("from-file"));
+    }
+
+    #[test]
+    fn telemetry_names_apply_to_telemetry_only() {
+        let (config, service) = identified(
+            "service_name: notes\ntelemetry:\n  service_name: notes-eu\n  service_version: 9.9.9\n",
+            "JENNY_TEST_IDENTITY_TELEMETRY",
+        )
+        .unwrap();
+        assert_eq!(service, jenny_core::Service::new("notes", "0.1.0"));
+        assert_eq!(config.telemetry.service_name.as_deref(), Some("notes-eu"));
+        assert_eq!(config.telemetry.service_version.as_deref(), Some("9.9.9"));
+    }
+
+    #[test]
+    fn an_empty_service_name_stops_the_service() {
+        let err = identified("service_name: \"  \"\n", "JENNY_TEST_IDENTITY_EMPTY")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`service_name` is empty"), "{err}");
     }
 
     #[test]

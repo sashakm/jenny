@@ -44,7 +44,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     JennyServer::from_args()?.run().await
+//!     JennyServer::from_args(jenny_core::service!())?.run().await
 //! }
 //! ```
 
@@ -63,9 +63,8 @@ pub mod telemetry;
 pub use config::PersistenceConfig;
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
-    DEFAULT_EVENT_BUFFER, DEFAULT_EVENT_NAMESPACE, DEFAULT_FRAMEWORK_PATH,
-    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig, MessagingConfig, MetricsConfig, ServerArgs,
-    ServerConfig,
+    DEFAULT_EVENT_BUFFER, DEFAULT_FRAMEWORK_PATH, DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig,
+    MessagingConfig, MetricsConfig, ServerArgs, ServerConfig,
 };
 pub use context::ServerContext;
 pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};

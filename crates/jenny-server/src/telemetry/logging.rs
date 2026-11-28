@@ -33,7 +33,7 @@ pub(super) fn init_logging(config: TelemetryConfig) -> anyhow::Result<TelemetryH
         feature = "telemetry-loki",
         feature = "telemetry-prometheus"
     ))]
-    let service_name = config.service_name.clone();
+    let service_name = config.service_name.clone().unwrap_or_default();
 
     // --- Stdout layer (always enabled) ---
     // Box the layer so it can be composed with other optional layers without

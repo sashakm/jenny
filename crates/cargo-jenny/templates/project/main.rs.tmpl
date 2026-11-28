@@ -6,5 +6,5 @@ use jenny::server::JennyServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    {{project_snake}}::build(JennyServer::from_args()?)?.run().await
+    {{project_snake}}::build(JennyServer::from_args(jenny::service!())?)?.run().await
 }

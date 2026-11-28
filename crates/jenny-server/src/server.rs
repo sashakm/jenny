@@ -5,8 +5,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(feature = "messaging")]
-use crate::config::DEFAULT_EVENT_NAMESPACE;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use clap::Parser;
@@ -39,7 +37,7 @@ use crate::{
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let mut server = JennyServer::from_args()?;   // config loaded, telemetry up
+///     let mut server = JennyServer::from_args(jenny_core::service!())?; // config, telemetry
 ///
 ///     // let config: MyConfig = server.context().app_section("my-notes")?;
 ///     // let store = Arc::new(Memory::<Note>::new());              // driven adapter
@@ -52,6 +50,7 @@ use crate::{
 /// }
 /// ```
 pub struct JennyServer {
+    service: jenny_core::Service,
     config: ServerConfig,
     context: ServerContext,
     telemetry: Option<TelemetryHandle>,
@@ -60,7 +59,6 @@ pub struct JennyServer {
     messaging_adapters: Vec<MessagingAdapter>,
     scheduler: TaskScheduler,
     checks: Vec<Arc<dyn HealthCheck>>,
-    version: Option<String>,
     #[cfg(feature = "messaging")]
     events: Option<Arc<jenny_messaging::EventBus>>,
     #[cfg(feature = "messaging")]
@@ -283,24 +281,47 @@ impl ServerParts {
 
 impl JennyServer {
     /// Load configuration from the process arguments and bring telemetry up.
-    pub fn from_args() -> anyhow::Result<Self> {
-        Self::from_parsed_args(ServerArgs::parse())
+    ///
+    /// `service` is who the service is, from [`jenny_core::service!`], which reads your
+    /// package's name and version where you write it:
+    ///
+    /// ```no_run
+    /// # use jenny_server::JennyServer;
+    /// # fn go() -> anyhow::Result<()> {
+    /// let server = JennyServer::from_args(jenny_core::service!())?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// The top-level `service_name` and `service_version` keys override it, and
+    /// `telemetry`, `messaging.namespace` and `/health/status` default to the result.
+    pub fn from_args(service: jenny_core::Service) -> anyhow::Result<Self> {
+        Self::from_parsed_args(ServerArgs::parse(), service)
     }
 
     /// [`from_args`](Self::from_args) with arguments you built yourself.
-    pub fn from_parsed_args(args: ServerArgs) -> anyhow::Result<Self> {
+    pub fn from_parsed_args(
+        args: ServerArgs,
+        service: jenny_core::Service,
+    ) -> anyhow::Result<Self> {
         let source = ConfigSource::load(&args)?;
         let config = source.server_config(&args)?;
-        let telemetry = config.telemetry.clone().init()?;
-        let mut server = Self::from_config(config, source);
-        server.telemetry = Some(telemetry);
+        let mut server = Self::from_config(config, source, service)?;
+        server.telemetry = Some(server.config.telemetry.clone().init()?);
         Ok(server)
     }
 
     /// Build from an already-loaded configuration, **without** touching telemetry.
     /// Use [`from_args`](Self::from_args) for the full bootstrap.
-    pub fn from_config(config: ServerConfig, source: ConfigSource) -> Self {
-        Self {
+    ///
+    /// Fails when the service name is empty once configuration has had its say.
+    pub fn from_config(
+        mut config: ServerConfig,
+        source: ConfigSource,
+        service: jenny_core::Service,
+    ) -> anyhow::Result<Self> {
+        let service = config.identify(service)?;
+        Ok(Self {
+            service,
             config,
             context: ServerContext::new(source),
             telemetry: None,
@@ -309,7 +330,6 @@ impl JennyServer {
             messaging_adapters: Vec::new(),
             scheduler: TaskScheduler::default(),
             checks: Vec::new(),
-            version: None,
             #[cfg(feature = "messaging")]
             events: None,
             #[cfg(feature = "messaging")]
@@ -322,26 +342,12 @@ impl JennyServer {
             nats_options: None,
             #[cfg(feature = "objects")]
             objects: None,
-        }
+        })
     }
 
-    /// Record the service's own version, reported by `/health/status`.
-    ///
-    /// Pass [`service_version!`](jenny_core::service_version), which expands to your
-    /// crate's version at the call site:
-    ///
-    /// ```no_run
-    /// # use jenny_server::JennyServer;
-    /// # fn go(server: JennyServer) -> JennyServer {
-    /// server.with_version(jenny_core::service_version!())
-    /// # }
-    /// ```
-    ///
-    /// Falls back to `telemetry.service_version` from configuration, then to
-    /// `"unknown"`.
-    pub fn with_version(mut self, version: impl Into<String>) -> Self {
-        self.version = Some(version.into());
-        self
+    /// Who the service is, once configuration has overridden what `service!()` read.
+    pub fn service(&self) -> &jenny_core::Service {
+        &self.service
     }
 
     pub fn config(&self) -> &ServerConfig {
@@ -543,11 +549,12 @@ impl JennyServer {
         Ok(self.objects.clone())
     }
 
-    /// The prefix for event topics and NATS buckets.
+    /// The prefix for event topics and NATS buckets: `messaging.namespace`, else the
+    /// service name.
     ///
     /// An empty namespace would produce topics like `.note.created`, which the broker
-    /// rejects as having an empty segment — so fall back rather than build a bus whose
-    /// every publish fails.
+    /// rejects as having an empty segment, so a blank one falls back too; the service
+    /// name never is blank.
     #[cfg(feature = "messaging")]
     fn namespace(&self) -> String {
         self.config
@@ -555,10 +562,7 @@ impl JennyServer {
             .namespace
             .clone()
             .filter(|n| !n.trim().is_empty())
-            .or_else(|| {
-                Some(self.config.telemetry.service_name.clone()).filter(|n| !n.trim().is_empty())
-            })
-            .unwrap_or_else(|| DEFAULT_EVENT_NAMESPACE.to_string())
+            .unwrap_or_else(|| self.service.name.clone())
     }
 
     /// Start the broker if it is not running yet.
@@ -699,6 +703,7 @@ impl JennyServer {
         #[cfg(feature = "messaging")]
         self.nats();
         let Self {
+            service,
             config,
             context: _,
             telemetry,
@@ -708,7 +713,6 @@ impl JennyServer {
             scheduler,
             #[allow(unused_mut)]
             mut checks,
-            version,
             #[cfg(feature = "messaging")]
             events,
             #[cfg(feature = "messaging")]
@@ -812,10 +816,8 @@ impl JennyServer {
 
         let health = HealthRegistry::new(checks);
         let status = StatusInfo {
-            service: config.telemetry.service_name.clone(),
-            service_version: version
-                .or_else(|| config.telemetry.service_version.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
+            service: service.name.clone(),
+            service_version: service.version.clone(),
             framework_version: crate::health::FRAMEWORK_VERSION,
             adapters: {
                 #[allow(unused_mut)]
@@ -970,7 +972,12 @@ mod tests {
         };
         let source = ConfigSource::load(&args).unwrap();
         let config = source.server_config(&args).unwrap();
-        JennyServer::from_config(config, source)
+        JennyServer::from_config(
+            config,
+            source,
+            jenny_core::Service::new("test-service", "9.9.9"),
+        )
+        .unwrap()
     }
 
     fn notes() -> RestAdapter {
@@ -1213,7 +1220,6 @@ mod tests {
     #[tokio::test]
     async fn status_reports_both_versions() {
         let parts = server_with("127.0.0.1:0")
-            .with_version("9.9.9")
             .register(notes())
             .unwrap()
             .bind()
@@ -1227,10 +1233,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unset_service_version_is_reported_as_unknown() {
-        let parts = server_with("127.0.0.1:0").bind().await.unwrap();
+    async fn status_reports_the_top_level_identity_not_the_telemetry_one() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.telemetry.service_name = Some("renamed-in-traces".into());
+        server.config.telemetry.service_version = Some("0.0.0-traces".into());
+        let parts = server.bind().await.unwrap();
         let (_, body) = call(parts.router.clone(), "/j/health/status").await;
-        assert_eq!(body["service_version"], "unknown");
+        assert_eq!(body["service"], "test-service");
+        assert_eq!(body["service_version"], "9.9.9");
     }
 
     #[tokio::test]
@@ -1411,7 +1421,7 @@ mod tests {
         }
 
         let mut server = server_with("127.0.0.1:0");
-        server.config.telemetry.service_name = "test-service".to_string();
+        assert_eq!(server.service().name, "test-service");
 
         let seen = Arc::new(Mutex::new(Vec::new()));
         server.subscribe(Recorder(seen.clone())).unwrap();
@@ -1739,7 +1749,7 @@ mod tests {
         }
 
         let mut server = server_with("127.0.0.1:0");
-        server.config.telemetry.service_name = "outbox-test".to_string();
+        server.config.messaging.namespace = Some("outbox-test".to_string());
         server.config.persistence.postgres.url = Some(url);
         server.config.persistence.postgres.outbox = true;
         let seen = Arc::new(Mutex::new(Vec::new()));

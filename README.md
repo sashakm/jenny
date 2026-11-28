@@ -192,7 +192,7 @@ And `main` is the dependency graph, readable top to bottom:
 ```rust,ignore
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut server = JennyServer::from_args()?;          // config + telemetry up
+    let mut server = JennyServer::from_args(jenny::service!())?; // config + telemetry
 
     let store: Arc<NoteStore> = match server.postgres()? {        // driven adapter
         Some(postgres) => Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)),
@@ -205,10 +205,7 @@ async fn main() -> anyhow::Result<()> {
         .accept_json_patch()?
         .mount(adapter::inbound::rest::routes(notes))?;           // mounts at /api
 
-    server.with_version(jenny::service_version!())
-        .register(rest)?
-        .run()
-        .await
+    server.register(rest)?.run().await
 }
 ```
 
@@ -401,8 +398,9 @@ Its own endpoints live under `server.framework_path` (`/j`), namespaced away fro
 | `GET /j/openapi.json` | the API description (`openapi`) |
 | `GET /j/swagger` | a browsable UI, assets compiled in (`swagger-ui`) |
 
-`/j/health/status` reports the framework version, your service's version (pass
-`jenny::service_version!()`), and a check per dependency. The runtime registers checks
+`/j/health/status` reports the framework version, your service's name and version (what
+`jenny::service!()` read from your package, unless `service_name` / `service_version`
+override it), and a check per dependency. The runtime registers checks
 for what it owns — the OTLP endpoint, the in-process bus, the Postgres pool it built from
 `persistence.postgres`, the NATS connection from `messaging.nats`, the object store
 from `objects.url`. A pool you build yourself is one line:

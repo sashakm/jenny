@@ -16,10 +16,12 @@
 # Any value can be overridden by an environment variable
 # (JENNY__SERVER__ADDRESS=[::]:9000) or a CLI flag (--address), in that order of
 # increasing precedence.
+# Who the service is. Defaults to the package name `jenny::service!()` reads; it names
+# event topics, NATS buckets and consumers, and the system principal tasks run as.
+service_name: basic-example
 server:
   address: "[::]:8000"
 telemetry:
-  service_name: basic-example
   log_format: pretty
 applications:
   my-notes:
