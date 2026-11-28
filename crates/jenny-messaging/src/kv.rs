@@ -3,7 +3,9 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use async_nats::ConnectOptions;
 use async_nats::jetstream::{self, kv};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -14,37 +16,57 @@ use jenny_core::port::outbound::HealthCheck;
 use jenny_core::port::store::{Loaded, Store, Version, encode, expect_version};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, watch};
+use tokio::task::JoinHandle;
 
-/// A NATS connection for key-value stores, connecting on first use.
+use crate::connection::NatsConnectionConfig;
+use crate::rotation::Watcher;
+
+/// The service's NATS connection, shared by its key-value stores and its gateway, made
+/// on first use.
 ///
 /// Cheap to clone. Wiring is synchronous and runs before the server is up, so this does
 /// not connect when it is built: [`prepare`](Self::prepare) connects and creates the
 /// buckets of every store handed out, and the runtime calls it before binding its
-/// socket, so a NATS that is down stops the service at startup. A store used before
-/// that connects and opens its bucket on its first call.
+/// socket, so a NATS that is down, or refuses the service's credentials, stops the
+/// service at startup. A store used before that connects and opens its bucket on its
+/// first call.
+///
+/// The connection is configured by a [`NatsConnectionConfig`] (ADR-031): TLS, client
+/// certificates and credentials. Once connected, a task looks at the files it names
+/// every `refresh_interval` seconds, and forces a reconnect when they rotated and are
+/// complete, so a renewed certificate is used without a restart.
+/// [`close`](Self::close) stops it.
 ///
 /// ```no_run
+/// # use jenny_messaging::connection::NatsConnectionConfig;
 /// # use jenny_messaging::kv::Nats;
-/// # use jenny_core::domain::ValueKind;
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct Session { id: String }
 /// # impl jenny_core::domain::Aggregate for Session { type Id = String; const KIND: &'static str = "session"; fn id(&self) -> String { self.id.clone() } }
 /// # async fn wire() -> anyhow::Result<()> {
-/// let nats = Nats::new("nats://localhost:4222", "my-notes");
+/// let nats = Nats::new(NatsConnectionConfig::new("nats://localhost:4222"), "my-notes");
 /// let sessions = nats.kv::<Session>();          // bucket `my-notes-session`
+/// let events = nats.gateway("my-notes", "my-notes.>"); // the same connection
 /// nats.prepare().await?;                        // the runtime does this before serving
 /// # Ok(()) }
 /// ```
 #[derive(Clone)]
 pub struct Nats {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
-struct Inner {
-    url: String,
+/// Adjusts the options built from the configuration, or replaces them.
+pub type OptionsHook = Arc<dyn Fn(ConnectOptions) -> ConnectOptions + Send + Sync>;
+
+pub(crate) struct Inner {
+    config: NatsConnectionConfig,
+    hook: Option<OptionsHook>,
     prefix: String,
     client: OnceCell<async_nats::Client>,
     buckets: Mutex<Vec<Arc<Bucket>>>,
+    /// Tells the file watcher to stop; dropped with the last handle, which stops it too.
+    stop: watch::Sender<bool>,
+    watcher: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// One bucket, opened — or created — once.
@@ -54,15 +76,40 @@ struct Bucket {
 }
 
 impl Nats {
-    /// `url` may list several servers, comma-separated. `prefix` namespaces the
-    /// buckets, so services sharing a NATS do not share data by accident.
-    pub fn new(url: impl Into<String>, prefix: impl Into<String>) -> Self {
+    /// A connection configured by `config`, which is validated when it connects.
+    /// `prefix` namespaces the buckets, so services sharing a NATS do not share data by
+    /// accident.
+    pub fn new(config: NatsConnectionConfig, prefix: impl Into<String>) -> Self {
+        Self::build(config, None, prefix.into())
+    }
+
+    /// [`new`](Self::new), with `options` adjusting the [`ConnectOptions`] built from
+    /// `config` — for credentials kept somewhere the configuration cannot name. It runs
+    /// before each attempt at the first connection; reconnects reuse what it returned.
+    /// It may extend or replace them; the files `config` names are still the only ones
+    /// watched.
+    pub fn with_options(
+        config: NatsConnectionConfig,
+        prefix: impl Into<String>,
+        options: impl Fn(ConnectOptions) -> ConnectOptions + Send + Sync + 'static,
+    ) -> Self {
+        Self::build(config, Some(Arc::new(options)), prefix.into())
+    }
+
+    pub(crate) fn build(
+        config: NatsConnectionConfig,
+        hook: Option<OptionsHook>,
+        prefix: String,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                url: url.into(),
-                prefix: prefix.into(),
+                config,
+                hook,
+                prefix,
                 client: OnceCell::new(),
                 buckets: Mutex::new(Vec::new()),
+                stop: watch::Sender::new(false),
+                watcher: Mutex::new(None),
             }),
         }
     }
@@ -101,8 +148,17 @@ impl Nats {
         }
     }
 
+    /// The connected client, connecting the first time.
+    ///
+    /// Fails with the server's reason when it refuses the connection: an invalid
+    /// configuration, a certificate it does not trust, credentials it does not accept.
+    pub async fn client(&self) -> anyhow::Result<async_nats::Client> {
+        self.inner.client().await.cloned()
+    }
+
     /// Connect, and open or create the bucket of every store handed out.
     pub async fn prepare(&self) -> anyhow::Result<()> {
+        self.inner.client().await?;
         let buckets = self
             .inner
             .buckets
@@ -118,6 +174,30 @@ impl Nats {
         Ok(())
     }
 
+    /// Stop watching the credential files, flush what was published, and start draining
+    /// the connection, which closes the client for every handle.
+    pub async fn close(&self) {
+        let _ = self.inner.stop.send(true);
+        let watcher = self
+            .inner
+            .watcher
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(watcher) = watcher {
+            let _ = watcher.await;
+        }
+        if let Some(client) = self.inner.client.get() {
+            // `drain` only asks; flushing first is what waits for buffered publishes.
+            if let Err(e) = client.flush().await {
+                tracing::debug!(error = %e, "flushing the NATS connection");
+            }
+            if let Err(e) = client.drain().await {
+                tracing::debug!(error = %e, "draining the NATS connection");
+            }
+        }
+    }
+
     /// Readiness for this connection.
     pub fn health_check(&self) -> NatsKvCheck {
         NatsKvCheck {
@@ -127,18 +207,36 @@ impl Nats {
 }
 
 impl Inner {
-    async fn client(&self) -> DomainResult<&async_nats::Client> {
+    pub(crate) async fn client(&self) -> anyhow::Result<&async_nats::Client> {
         self.client
             .get_or_try_init(|| async {
-                let servers: Vec<&str> = self
-                    .url
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                    .collect();
-                async_nats::connect(servers)
-                    .await
-                    .map_err(|e| DomainError::internal(format!("connecting to NATS: {e}")))
+                let config = &self.config;
+                let mut options = config
+                    .connect_options()
+                    .map_err(|e| anyhow::anyhow!("invalid NATS configuration: {e}"))?;
+                if let Some(hook) = &self.hook {
+                    options = hook(options);
+                }
+                let servers = config.server_addrs()?;
+                // Taken before the client reads the files, so a rotation while it
+                // connects is still seen.
+                let files = config.files();
+                let fingerprint = files.fingerprint().await;
+                let client = options.connect(servers).await.map_err(|e| {
+                    anyhow::anyhow!("connecting to NATS at `{}`: {}", url(config), reason(&e))
+                })?;
+                if !files.is_empty() {
+                    let handle = Watcher::new(files, fingerprint).spawn(
+                        client.clone(),
+                        Duration::from_secs(config.refresh_interval),
+                        self.stop.subscribe(),
+                    );
+                    *self
+                        .watcher
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+                }
+                Ok(client)
             })
             .await
     }
@@ -147,7 +245,11 @@ impl Inner {
         bucket
             .store
             .get_or_try_init(|| async {
-                let jetstream = jetstream::new(self.client().await?.clone());
+                let client = self
+                    .client()
+                    .await
+                    .map_err(|e| DomainError::internal(e.to_string()))?;
+                let jetstream = jetstream::new(client.clone());
                 match jetstream.get_key_value(&bucket.name).await {
                     Ok(store) => Ok(store),
                     Err(_) => jetstream
@@ -169,6 +271,26 @@ impl Inner {
             })
             .await
     }
+}
+
+/// The configured URL, for messages.
+fn url(config: &NatsConnectionConfig) -> &str {
+    config.url.as_deref().unwrap_or_default()
+}
+
+/// A connect error with every cause it carries: the server's own words are usually in
+/// the innermost one.
+fn reason(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut reason = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !reason.contains(&text) {
+            reason = format!("{reason}: {text}");
+        }
+        source = cause.source();
+    }
+    reason
 }
 
 impl fmt::Debug for Nats {
@@ -371,6 +493,10 @@ impl<A> fmt::Debug for NatsKv<A> {
 }
 
 /// Readiness for a [`Nats`] connection: connected, and JetStream answering.
+///
+/// Anything but [`Connected`](async_nats::connection::State::Connected) is not ready,
+/// which includes a client that is reconnecting because the server no longer accepts
+/// its credentials.
 pub struct NatsKvCheck {
     inner: Arc<Inner>,
 }
@@ -387,6 +513,10 @@ impl HealthCheck for NatsKvCheck {
 
     async fn check(&self) -> Result<(), String> {
         let client = self.inner.client().await.map_err(|e| e.to_string())?;
+        match client.connection_state() {
+            async_nats::connection::State::Connected => {}
+            state => return Err(format!("the NATS connection is {state:?}")),
+        }
         jetstream::new(client.clone())
             .query_account()
             .await
@@ -452,6 +582,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "not a valid NATS bucket name")]
     fn a_bucket_name_nats_would_refuse_is_caught_at_wiring() {
-        let _ = Nats::new("nats://localhost:4222", "my notes").kv::<Note>();
+        let _ = Nats::new(
+            NatsConnectionConfig::new("nats://localhost:4222"),
+            "my notes",
+        )
+        .kv::<Note>();
     }
 }

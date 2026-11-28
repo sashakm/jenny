@@ -69,6 +69,8 @@ pub struct JennyServer {
     postgres: Option<jenny_persistence::Postgres>,
     #[cfg(feature = "messaging")]
     nats: Option<jenny_messaging::kv::Nats>,
+    #[cfg(feature = "messaging")]
+    nats_options: Option<jenny_messaging::kv::OptionsHook>,
     #[cfg(feature = "objects")]
     objects: Option<Arc<jenny_objects::ObjectBlobs>>,
 }
@@ -165,6 +167,9 @@ pub struct ServerParts {
     /// The running event broker, stopped on shutdown so in-flight listeners finish.
     #[cfg(feature = "messaging")]
     broker: Option<topmesys::EventBroker<topmesys::type_states::Running>>,
+    /// The NATS connection, closed once the broker's listeners are done with it.
+    #[cfg(feature = "messaging")]
+    nats: Option<jenny_messaging::kv::Nats>,
     /// The Postgres pool, closed once requests and listeners are done with it.
     #[cfg(feature = "persistence")]
     postgres: Option<jenny_persistence::Postgres>,
@@ -197,6 +202,8 @@ impl ServerParts {
             health,
             #[cfg(feature = "messaging")]
             broker,
+            #[cfg(feature = "messaging")]
+            nats,
             #[cfg(feature = "persistence")]
             postgres,
             #[cfg(feature = "persistence")]
@@ -258,6 +265,12 @@ impl ServerParts {
         if let Some(broker) = broker {
             broker.stop().await;
         }
+        // After the broker, whose listeners (a gateway among them) may still have been
+        // publishing: stops the credential watcher and drains the connection.
+        #[cfg(feature = "messaging")]
+        if let Some(nats) = nats {
+            nats.close().await;
+        }
         // Last, because listeners stopping above may still have been writing.
         #[cfg(feature = "persistence")]
         if let Some(postgres) = postgres {
@@ -305,6 +318,8 @@ impl JennyServer {
             postgres: None,
             #[cfg(feature = "messaging")]
             nats: None,
+            #[cfg(feature = "messaging")]
+            nats_options: None,
             #[cfg(feature = "objects")]
             objects: None,
         }
@@ -394,13 +409,19 @@ impl JennyServer {
         Ok(self)
     }
 
-    /// The NATS connection key-value stores use, from `messaging.nats.url`, or `None`
-    /// when no URL is configured.
+    /// The service's NATS connection, from `messaging.nats`, or `None` when no URL is
+    /// configured. The key-value stores and the gateway share it.
     ///
     /// It connects on first use, so it is available during wiring. Before the socket is
-    /// bound, the runtime connects, opens or creates the bucket of every store handed
-    /// out — named `<namespace>-<kind>`, the namespace being `messaging.namespace` or the
-    /// service name — and registers a `nats` readiness check.
+    /// bound, the runtime connects — whenever a URL is configured, even if this was never
+    /// called — opens or creates the bucket of every store handed out, named
+    /// `<namespace>-<kind>` (the namespace being `messaging.namespace` or the service
+    /// name), and registers a `nats` readiness check. A server that refuses the
+    /// connection stops the service there, with its reason.
+    ///
+    /// `messaging.nats` configures TLS, a client certificate and credentials (ADR-031);
+    /// see [`NatsConnectionConfig`](jenny_messaging::NatsConnectionConfig). The
+    /// certificates and `.creds` it names are watched, and a rotation forces a reconnect.
     ///
     /// ```no_run
     /// # use std::sync::Arc;
@@ -411,7 +432,10 @@ impl JennyServer {
     /// # impl jenny_core::domain::Aggregate for Session { type Id = String; const KIND: &'static str = "session"; fn id(&self) -> String { self.id.clone() } }
     /// # fn wire(mut server: JennyServer) -> anyhow::Result<()> {
     /// let sessions: Arc<dyn Store<Session>> = match server.nats() {
-    ///     Some(nats) => Arc::new(nats.kv::<Session>()),
+    ///     Some(nats) => {
+    ///         server.subscribe(nats.gateway("my-notes", "my-notes.>"))?; // events to JetStream
+    ///         Arc::new(nats.kv::<Session>())
+    ///     }
     ///     None => Arc::new(Memory::<Session>::new()),
     /// };
     /// # Ok(())
@@ -419,14 +443,67 @@ impl JennyServer {
     /// ```
     #[cfg(feature = "messaging")]
     pub fn nats(&mut self) -> Option<jenny_messaging::kv::Nats> {
-        if self.nats.is_none()
-            && let Some(url) = self.config.messaging.nats.url.clone()
-        {
+        if self.nats.is_none() && self.config.messaging.nats.url.is_some() {
             let prefix = self.namespace();
-            info!(prefix, "nats configured for key-value stores");
-            self.nats = Some(jenny_messaging::kv::Nats::new(url, prefix));
+            info!(prefix, "nats configured");
+            let config = self.config.messaging.nats.clone();
+            self.nats = Some(match self.nats_options.clone() {
+                Some(hook) => {
+                    jenny_messaging::kv::Nats::with_options(config, prefix, move |o| hook(o))
+                }
+                None => jenny_messaging::kv::Nats::new(config, prefix),
+            });
         }
         self.nats.clone()
+    }
+
+    /// Adjust the [`ConnectOptions`](async_nats::ConnectOptions) built from
+    /// `messaging.nats` before the connection is made, for credentials the configuration
+    /// cannot name — from Vault, a cloud secret manager, a sidecar's socket.
+    ///
+    /// The hook receives the options built from the section and returns the ones to
+    /// connect with. It may extend or replace them; replacing them is the only way to
+    /// set an auth callback, which async-nats offers only as a constructor. It runs
+    /// again before each attempt to make the first connection. The files the section
+    /// names are the only ones watched for rotation.
+    ///
+    /// ```no_run
+    /// # use std::path::PathBuf;
+    /// # use jenny_server::JennyServer;
+    /// use async_nats::ConnectOptions;
+    /// # mod vault { pub async fn nats_auth(_: Vec<u8>) -> Result<async_nats::Auth, async_nats::AuthError> { unimplemented!() } }
+    /// # fn wire(mut server: JennyServer, cert: PathBuf, key: PathBuf) -> anyhow::Result<()> {
+    /// server.nats_options(move |_options: ConnectOptions| {
+    ///     ConnectOptions::with_auth_callback(|nonce| vault::nats_auth(nonce))
+    ///         .require_tls(true)
+    ///         .add_client_certificate(cert.clone(), key.clone())
+    /// })?;
+    /// let nats = server.nats();
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Fails when [`nats`](Self::nats) has already built the connection: the stores and
+    /// gateways handed out would use options this hook never saw.
+    ///
+    /// `ConnectOptions` is async-nats's own type, so a new async-nats major is a breaking
+    /// change of this method.
+    #[cfg(feature = "messaging")]
+    pub fn nats_options(
+        &mut self,
+        options: impl Fn(async_nats::ConnectOptions) -> async_nats::ConnectOptions
+        + Send
+        + Sync
+        + 'static,
+    ) -> anyhow::Result<&mut Self> {
+        if self.nats.is_some() {
+            anyhow::bail!(
+                "nats_options() must come before nats(): the NATS connection was already \
+                 built, and the stores and gateways handed out would not use these options"
+            );
+        }
+        self.nats_options = Some(Arc::new(options));
+        Ok(self)
     }
 
     /// The object store blobs live in, from `objects.url`, or `None` when no URL is
@@ -616,7 +693,11 @@ impl JennyServer {
     }
 
     /// Assemble the router and bind the socket, without serving yet.
-    pub async fn bind(self) -> anyhow::Result<ServerParts> {
+    pub async fn bind(#[allow(unused_mut)] mut self) -> anyhow::Result<ServerParts> {
+        // Whenever NATS is configured, even if nothing asked for the connection: a
+        // server that refuses it should stop the service now, not at its first event.
+        #[cfg(feature = "messaging")]
+        self.nats();
         let Self {
             config,
             context: _,
@@ -636,6 +717,8 @@ impl JennyServer {
             postgres,
             #[cfg(feature = "messaging")]
             nats,
+            #[cfg(feature = "messaging")]
+                nats_options: _,
             #[cfg(feature = "objects")]
                 objects: _,
         } = self;
@@ -645,8 +728,8 @@ impl JennyServer {
         if let Some(nats) = nats.as_ref() {
             nats.prepare()
                 .await
-                .map_err(|e| e.context("preparing the NATS key-value buckets"))?;
-            info!("nats buckets prepared");
+                .map_err(|e| e.context("preparing the NATS connection (`messaging.nats`)"))?;
+            info!("nats connected, buckets prepared");
             checks.push(Arc::new(nats.health_check()));
         }
 
@@ -835,6 +918,8 @@ impl JennyServer {
             health,
             #[cfg(feature = "messaging")]
             broker,
+            #[cfg(feature = "messaging")]
+            nats,
             #[cfg(feature = "persistence")]
             postgres,
             #[cfg(feature = "persistence")]
@@ -1409,6 +1494,136 @@ mod tests {
             .delete_key_value(format!("{namespace}-session"))
             .await
             .unwrap();
+    }
+
+    #[cfg(feature = "messaging")]
+    #[test]
+    fn nats_options_must_come_before_nats() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.nats.url = Some("nats://127.0.0.1:1".into());
+        server.nats_options(|options| options).unwrap();
+        assert!(server.nats().is_some());
+
+        let Err(err) = server.nats_options(|options| options) else {
+            panic!("nats_options() after nats() should be refused");
+        };
+        assert!(err.to_string().contains("must come before nats()"), "{err}");
+    }
+
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn the_nats_options_hook_decides_what_bind_connects_with() {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.nats.url = Some("nats://127.0.0.1:1".into());
+        // A replacement that cannot connect anywhere: TLS against a plain port.
+        server
+            .nats_options(|_| async_nats::ConnectOptions::new().tls_first())
+            .unwrap();
+        let Err(err) = server.bind().await else {
+            panic!("nothing listens on port 1");
+        };
+        assert!(format!("{err:#}").contains("connecting to NATS"), "{err:#}");
+    }
+
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn bind_connects_whenever_a_nats_url_is_configured() {
+        let mut server = server_with("127.0.0.1:0");
+        // Nothing listens there, and nothing called `nats()`: binding still connects.
+        server.config.messaging.nats.url = Some("nats://127.0.0.1:1".into());
+        let Err(err) = server.bind().await else {
+            panic!("a NATS that cannot be reached should stop the service at startup");
+        };
+        let err = format!("{err:#}");
+        assert!(err.contains("messaging.nats"), "{err}");
+        assert!(
+            err.contains("connecting to NATS at `nats://127.0.0.1:1`"),
+            "{err}"
+        );
+    }
+
+    /// Needs `JENNY_TEST_NATS_URL`.
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn a_configured_nats_is_connected_and_checked_even_if_nothing_asked_for_it() {
+        let Some(url) = nats_url() else { return };
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.nats.url = Some(url);
+        let parts = server.bind().await.unwrap();
+        let check = nats_check(parts.router.clone()).await;
+        assert_eq!(check["status"], "up", "{check}");
+    }
+
+    /// Needs `JENNY_TEST_NATS_TLS_URL` and `JENNY_TEST_NATS_TLS_DIR`.
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn bind_connects_to_nats_with_mtls_and_refuses_what_the_server_refuses() {
+        let (url, dir) = match (
+            std::env::var("JENNY_TEST_NATS_TLS_URL"),
+            std::env::var("JENNY_TEST_NATS_TLS_DIR"),
+        ) {
+            (Ok(url), Ok(dir)) => (url, std::path::PathBuf::from(dir)),
+            _ if std::env::var_os("CI").is_some() => {
+                panic!("JENNY_TEST_NATS_TLS_URL and JENNY_TEST_NATS_TLS_DIR must be set in CI")
+            }
+            _ => {
+                return eprintln!(
+                    "skipping: JENNY_TEST_NATS_TLS_URL / JENNY_TEST_NATS_TLS_DIR are not set"
+                );
+            }
+        };
+        let tls = |client: Option<&str>| jenny_messaging::connection::NatsTlsConfig {
+            ca: Some(dir.join("ca.crt")),
+            cert: client.map(|name| dir.join(format!("{name}.crt"))),
+            key: client.map(|name| dir.join(format!("{name}.key"))),
+            ..Default::default()
+        };
+
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.nats.url = Some(url.clone());
+        server.config.messaging.nats.tls = Some(tls(Some("client-a")));
+        let parts = server.bind().await.unwrap();
+        let check = nats_check(parts.router.clone()).await;
+        assert_eq!(check["status"], "up", "{check}");
+
+        for (client, reason) in [(None, "CertificateRequired"), (Some("other"), "UnknownCA")] {
+            let mut server = server_with("127.0.0.1:0");
+            server.config.messaging.nats.url = Some(url.clone());
+            server.config.messaging.nats.tls = Some(tls(client));
+            let Err(err) = server.bind().await else {
+                panic!("{client:?}: the server refuses this client");
+            };
+            let err = format!("{err:#}");
+            assert!(err.contains("connecting to NATS"), "{err}");
+            assert!(err.contains(reason), "{reason} in {err}");
+        }
+    }
+
+    #[cfg(feature = "messaging")]
+    fn nats_url() -> Option<String> {
+        match std::env::var("JENNY_TEST_NATS_URL") {
+            Ok(url) => Some(url),
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("JENNY_TEST_NATS_URL must be set in CI")
+            }
+            Err(_) => {
+                eprintln!("skipping: JENNY_TEST_NATS_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// The `nats` entry of the readiness report.
+    #[cfg(feature = "messaging")]
+    async fn nats_check(router: Router) -> serde_json::Value {
+        let (_, ready) = call(router, "/j/health/ready").await;
+        ready["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "nats")
+            .expect("the runtime registers the NATS readiness check")
+            .clone()
     }
 
     #[cfg(feature = "objects")]

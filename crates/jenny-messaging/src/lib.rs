@@ -3,8 +3,9 @@
 //! | Module | Side | What it is |
 //! |---|---|---|
 //! | [`eventbus`] | driven | [`EventBus`] — the in-process bus behind the [`EventPublisher`] port |
+//! | [`connection`] | driven | [`NatsConnectionConfig`] — the `messaging.nats` section: servers, TLS, credentials |
+//! | [`kv`] | driven | [`Nats`](kv::Nats) — the one connection, shared — and [`NatsKv`](kv::NatsKv), a [`Store`](jenny_core::port::Store) over a JetStream key-value bucket |
 //! | [`nats`] | driven | [`NatsGateway`](nats::NatsGateway) — a bus listener that forwards events to JetStream |
-//! | [`kv`] | driven | [`NatsKv`](kv::NatsKv) — a [`Store`](jenny_core::port::Store) over a JetStream key-value bucket |
 //! | [`subscription`] | driving | [`MessagingAdapter`] — declares the subjects this service consumes |
 //!
 //! ### One publish, many effects
@@ -25,6 +26,14 @@
 //!                                └──▶ notification sender
 //! ```
 //!
+//! ### One NATS connection
+//!
+//! A service has one NATS connection, [`Nats`](kv::Nats), configured by
+//! [`NatsConnectionConfig`]: plain, TLS, mTLS with a client certificate, a `.creds` file,
+//! an NKey, a user and password, or a token (ADR-031). The key-value stores and the
+//! gateway ([`Nats::gateway`](kv::Nats::gateway)) share it. Certificates and `.creds` are
+//! read again at each connect, and a watcher forces a reconnect when they rotate.
+//!
 //! ### Inbound is declaration-only for now
 //!
 //! [`MessagingAdapter`] records which subjects a service means to consume, and the
@@ -34,10 +43,12 @@
 //!
 //! [`EventPublisher`]: jenny_core::port::outbound::EventPublisher
 
+pub mod connection;
 pub mod eventbus;
 pub mod health;
 pub mod kv;
 pub mod nats;
+mod rotation;
 
 /// The headers [`EventBus`] puts on every message, from the
 /// [`EventEnvelope`](jenny_core::port::outbound::EventEnvelope)'s metadata, and
@@ -54,11 +65,17 @@ pub mod headers {
     pub const CORRELATION_ID: &str = "correlation-id";
 }
 
+/// The NATS client, re-exported because its `Client` and `ConnectOptions` are part of
+/// this crate's public surface (and, through `JennyServer::nats_options`, the runtime's):
+/// a service can reach them without depending on the same async-nats major itself.
+pub use async_nats;
 /// The in-process broker, re-exported because its `EventConsumer` trait is part of
 /// this crate's public surface: subscribing a listener means implementing it.
 pub use topmesys;
 pub mod subscription;
 
+#[doc(inline)]
+pub use connection::NatsConnectionConfig;
 #[doc(inline)]
 pub use eventbus::EventBus;
 #[doc(inline)]

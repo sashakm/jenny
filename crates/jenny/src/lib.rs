@@ -13,7 +13,7 @@
 //! | [`jenny::domain`](domain) | the hexagon | [`Aggregate`], [`DomainError`], [`DomainEvent`], [`Changes`], [`Validate`], [`Principal`], [`Urn`] |
 //! | [`jenny::port`](port) | the boundary | [`Store`], [`Blobs`](port::Blobs), [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
-//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving), `kv::NatsKv` store |
+//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving), `kv::Nats` connection (TLS, credentials) with its `kv::NatsKv` store and `NatsGateway` |
 //! | `jenny::objects` | driven adapter | `ObjectBlobs` over S3 and compatibles, files or memory; `ObjectsConfig` |
 //! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck`; with `graph`, Apache AGE's `Graph` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
@@ -67,7 +67,7 @@
 //! |---|---|
 //! | `rest` | the axum driving adapter |
 //! | `server` | the runtime and composition root (implies `rest`) |
-//! | `messaging` | the event bus, the NATS gateway and the NATS key-value store; with `server`, a connection from `messaging.nats` |
+//! | `messaging` | the event bus, the NATS gateway and the NATS key-value store; with `server`, one connection from `messaging.nats` (TLS, mTLS, `.creds`, NKey, password or token) |
 //! | `persistence` | Postgres: document and table stores, the outbox, criteria to SQL; with `server`, a pool from `persistence.postgres` |
 //! | `graph` | Apache AGE graphs in that Postgres, queried in Cypher, created before serving (implies `persistence`) |
 //! | `objects` | blob storage — S3 and compatibles, local files, memory — behind [`Blobs`](port::Blobs); with `server`, a store from `objects` |

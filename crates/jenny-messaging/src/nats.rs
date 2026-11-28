@@ -1,90 +1,16 @@
 use std::fmt::Debug;
 
 use async_nats::{
-    Client, ServerAddr,
+    Client,
     jetstream::{self, Context},
 };
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 use tracing::instrument;
 
+use crate::kv::Nats;
+
 use topmesys::{Delivery, EventConsumer, EventMessage, HandlerError, Subscription, Subscriptions};
-
-/// Holds NATS client configuration. Url string can hold multiple server urls, separated by comma.
-/// #### Example:
-/// ```
-/// # use serde_json::{from_value, json};
-/// use jenny_messaging::nats::NatsConfig;
-///
-/// let nats_cfg: NatsConfig = from_value(json!({
-///     "url": "nats://nats-1:4222,nats://nats-2:4222",
-///     "stream": "my-stream",
-///     "consumer": "my-consumer"
-/// })).unwrap();
-/// # assert_eq!(nats_cfg.stream(), "my-stream");
-/// ```
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct NatsConfig {
-    url: String,
-    stream: String,
-    consumer: String,
-}
-
-impl NatsConfig {
-    pub fn new(url: String, stream: String, consumer: String) -> Self {
-        Self {
-            url,
-            stream,
-            consumer,
-        }
-    }
-
-    /// Parse NATS server url string and create a connected client.
-    ///
-    /// Fails on any url that does not parse, rather than connecting to the rest: a typo
-    /// in one of three cluster addresses should be found at startup, not during the
-    /// outage of the other two.
-    pub async fn create_client(&self) -> anyhow::Result<async_nats::Client> {
-        Ok(async_nats::connect(self.server_addrs()?).await?)
-    }
-
-    fn server_addrs(&self) -> anyhow::Result<Vec<ServerAddr>> {
-        let addrs = self
-            .url
-            .split(',')
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .map(|url| {
-                url.parse::<ServerAddr>()
-                    .map_err(|e| anyhow::anyhow!("invalid NATS server url `{url}`: {e}"))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        if addrs.is_empty() {
-            anyhow::bail!("no NATS server url configured");
-        }
-        Ok(addrs)
-    }
-
-    /// Get configured stream name.
-    pub fn stream(&self) -> &str {
-        &self.stream
-    }
-
-    /// Create stream pull consumer from configured stream and consumer names.
-    pub async fn generate_consumer(
-        &self,
-        client: async_nats::Client,
-    ) -> anyhow::Result<async_nats::jetstream::consumer::PullConsumer> {
-        Ok(async_nats::jetstream::new(client)
-            .get_consumer_from_stream(&self.consumer, &self.stream)
-            .await?)
-    }
-
-    /// Get configured consumer name.
-    pub fn consumer(&self) -> &str {
-        &self.consumer
-    }
-}
 
 /// A bus listener that forwards events to NATS JetStream.
 ///
@@ -96,14 +22,48 @@ impl NatsConfig {
 ///
 /// `subscription` is a topic pattern, or a [`Subscription`] when failed publishes should
 /// be retried — a broker that is briefly unreachable is exactly the case retries are for.
+///
+/// Get one from the service's connection with [`Nats::gateway`], so it publishes with the
+/// credentials `messaging.nats` configures, over the connection the key-value stores
+/// use. [`new`](Self::new) takes a client of your own instead, such as one for another
+/// NATS account.
 #[derive(Debug)]
 pub struct NatsGateway {
     stream: String,
-    ctx: Context,
+    client: Source,
     subscription: Subscription,
 }
 
+/// Where a gateway's JetStream context comes from.
+#[derive(Debug)]
+enum Source {
+    /// A client of the service's own, from [`NatsGateway::new`].
+    Own(Context),
+    /// The shared connection, resolved on the first publish.
+    Shared(Nats, OnceCell<Context>),
+}
+
+impl Nats {
+    /// A gateway publishing to `stream` over this connection, for the events
+    /// `subscription` matches.
+    ///
+    /// Wiring is synchronous, so this does not connect: the runtime connects before
+    /// serving, and the gateway takes the connected client on its first publish.
+    pub fn gateway(
+        &self,
+        stream: impl Into<String>,
+        subscription: impl Into<Subscription>,
+    ) -> NatsGateway {
+        NatsGateway {
+            stream: stream.into(),
+            client: Source::Shared(self.clone(), OnceCell::new()),
+            subscription: subscription.into(),
+        }
+    }
+}
+
 impl NatsGateway {
+    /// A gateway over a client of your own.
     pub fn new(
         client: Client,
         stream: impl Into<String>,
@@ -111,7 +71,7 @@ impl NatsGateway {
     ) -> Self {
         Self {
             stream: stream.into(),
-            ctx: jetstream::new(client),
+            client: Source::Own(jetstream::new(client)),
             subscription: subscription.into(),
         }
     }
@@ -119,7 +79,8 @@ impl NatsGateway {
     /// Publish received [EventMessage]s to [jetstream], with their headers.
     #[instrument(skip(self), level = "debug")]
     pub async fn publish_to_stream(&self, msg: &EventMessage) -> anyhow::Result<()> {
-        self.ctx
+        self.ctx()
+            .await?
             .publish_with_headers(
                 format!("{}.{}", self.stream, msg.topic().text()),
                 nats_headers(msg),
@@ -134,8 +95,16 @@ impl NatsGateway {
         &self.stream
     }
 
-    pub fn ctx(&self) -> &Context {
-        &self.ctx
+    /// The JetStream context it publishes with, connecting a gateway from a [`Nats`]
+    /// when it has not yet.
+    pub async fn ctx(&self) -> anyhow::Result<&Context> {
+        match &self.client {
+            Source::Own(ctx) => Ok(ctx),
+            Source::Shared(nats, ctx) => {
+                ctx.get_or_try_init(|| async { Ok(jetstream::new(nats.client().await?)) })
+                    .await
+            }
+        }
     }
 }
 
@@ -168,24 +137,18 @@ impl EventConsumer for NatsGateway {
 mod tests {
     use super::*;
 
-    fn config(url: &str) -> NatsConfig {
-        NatsConfig::new(url.into(), "stream".into(), "consumer".into())
-    }
-
-    #[test]
-    fn every_server_url_must_parse() {
-        assert_eq!(
-            config("nats://a:4222, nats://b:4222")
-                .server_addrs()
-                .unwrap()
-                .len(),
-            2
+    #[tokio::test]
+    async fn a_gateway_from_the_connection_does_not_connect_while_wiring() {
+        let nats = Nats::new(
+            crate::connection::NatsConnectionConfig::new("nats://127.0.0.1:1"),
+            "notes",
         );
-        let err = config("nats://a:4222,nats://b:not-a-port")
-            .server_addrs()
-            .unwrap_err();
-        assert!(err.to_string().contains("nats://b:not-a-port"), "{err}");
-        assert!(config(" , ").server_addrs().is_err());
+        let gateway = nats.gateway("notes", "notes.>");
+        assert_eq!(gateway.stream(), "notes");
+        assert!(!format!("{nats:?}").contains("connected: true"));
+        // Nothing listens there: the first publish is what fails.
+        let err = gateway.ctx().await.unwrap_err();
+        assert!(err.to_string().contains("connecting to NATS"), "{err}");
     }
 
     #[test]

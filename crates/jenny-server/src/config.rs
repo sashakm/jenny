@@ -33,8 +33,13 @@
 //!   log_format: pretty
 //! messaging:
 //!   buffer_size: 64
-//!   nats:
-//!     url: nats://nats:4222   # key-value stores; JENNY__MESSAGING__NATS__URL
+//!   nats:                     # one connection: key-value stores and the gateway
+//!     url: tls://nats:4222    # JENNY__MESSAGING__NATS__URL
+//!     tls:                    # optional; see jenny_messaging::connection
+//!       cert: /etc/nats-tls/tls.crt
+//!       key: /etc/nats-tls/tls.key
+//!     auth:                   # optional: creds, nkey, user + password, or token
+//!       creds: /etc/nats/service.creds
 //! persistence:
 //!   postgres:
 //!     url: postgres://notes:secret@db/notes   # better: JENNY__PERSISTENCE__POSTGRES__URL
@@ -208,8 +213,10 @@ pub struct MessagingConfig {
     /// Prefix for every event topic, and for the NATS buckets of key-value stores.
     /// Defaults to `telemetry.service_name`.
     pub namespace: Option<String>,
-    /// The NATS servers key-value stores use, comma-separated (`messaging.nats.url`).
-    pub nats: NatsSection,
+    /// The service's NATS connection, which the key-value stores and the gateway share:
+    /// its servers, TLS and credentials (ADR-031). With the `messaging` feature.
+    #[cfg(feature = "messaging")]
+    pub nats: jenny_messaging::NatsConnectionConfig,
 }
 
 impl Default for MessagingConfig {
@@ -217,18 +224,10 @@ impl Default for MessagingConfig {
         Self {
             buffer_size: DEFAULT_EVENT_BUFFER,
             namespace: None,
-            nats: NatsSection::default(),
+            #[cfg(feature = "messaging")]
+            nats: jenny_messaging::NatsConnectionConfig::default(),
         }
     }
-}
-
-/// The `messaging.nats` section.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct NatsSection {
-    /// Without one there is no NATS, and [`JennyServer::nats`](crate::JennyServer::nats)
-    /// is `None`.
-    pub url: Option<String>,
 }
 
 /// The `persistence` section. Applies with the `persistence` feature.
@@ -294,6 +293,13 @@ impl ConfigSource {
     /// Deserialise [`ServerConfig`] and apply the CLI overrides on top.
     pub fn server_config(&self, args: &ServerArgs) -> anyhow::Result<ServerConfig> {
         let mut config: ServerConfig = self.0.clone().try_deserialize()?;
+        // Before anything starts, rather than when the connection is first made.
+        #[cfg(feature = "messaging")]
+        config
+            .messaging
+            .nats
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid `messaging.nats` configuration: {e}"))?;
         if let Some(address) = &args.address {
             config.server.address = address.clone();
         }
@@ -409,5 +415,119 @@ applications:
                 .section::<MyNotesConfig>("applications.unknown")
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "messaging")]
+    #[test]
+    fn the_nats_section_takes_its_secrets_from_the_environment() {
+        let file = write_yaml(
+            r#"
+messaging:
+  nats:
+    url: tls://nats:4222
+    refresh_interval: 5
+    tls:
+      ca: /etc/nats-tls/ca.crt
+      cert: /etc/nats-tls/tls.crt
+      key: /etc/nats-tls/tls.key
+    auth:
+      user: notes
+"#,
+        );
+        let prefix = "JENNY_TEST_NATS_SECRETS";
+        // SAFETY: the variable name is unique to this test.
+        unsafe {
+            std::env::set_var(
+                format!("{prefix}__MESSAGING__NATS__AUTH__PASSWORD"),
+                "s3cret",
+            )
+        };
+        let args = ServerArgs {
+            config_path: Some(file.path().to_string_lossy().into_owned()),
+            env_prefix: Some(prefix.into()),
+            ..Default::default()
+        };
+        let config = ConfigSource::load(&args)
+            .unwrap()
+            .server_config(&args)
+            .unwrap();
+        unsafe { std::env::remove_var(format!("{prefix}__MESSAGING__NATS__AUTH__PASSWORD")) };
+
+        let nats = &config.messaging.nats;
+        assert_eq!(nats.url.as_deref(), Some("tls://nats:4222"));
+        assert_eq!(nats.refresh_interval, 5);
+        let tls = nats.tls.as_ref().unwrap();
+        assert_eq!(
+            tls.cert.as_deref(),
+            Some(std::path::Path::new("/etc/nats-tls/tls.crt"))
+        );
+        assert_eq!(nats.auth.password.as_deref(), Some("s3cret"));
+        assert!(
+            !format!("{config:?}").contains("s3cret"),
+            "the dump is redacted"
+        );
+    }
+
+    #[cfg(feature = "messaging")]
+    #[test]
+    fn a_bare_tls_key_in_yaml_asks_for_tls() {
+        let file = write_yaml(
+            r#"
+messaging:
+  nats:
+    url: nats://nats:4222
+    tls:
+      # ca: /etc/nats-tls/ca.crt
+"#,
+        );
+        let args = ServerArgs {
+            config_path: Some(file.path().to_string_lossy().into_owned()),
+            env_prefix: Some("JENNY_TEST_NATS_BARE_TLS".into()),
+            ..Default::default()
+        };
+        let config = ConfigSource::load(&args)
+            .unwrap()
+            .server_config(&args)
+            .unwrap();
+        assert!(
+            config.messaging.nats.tls.is_some(),
+            "{:?}",
+            config.messaging.nats
+        );
+    }
+
+    #[cfg(feature = "messaging")]
+    #[test]
+    fn an_invalid_nats_section_stops_the_service_naming_the_keys() {
+        let file = write_yaml(
+            r#"
+messaging:
+  nats:
+    url: tls://nats:4222
+    tls:
+      cert: /etc/nats-tls/tls.crt
+    auth:
+      token: t
+      creds: /etc/nats/service.creds
+"#,
+        );
+        let args = ServerArgs {
+            config_path: Some(file.path().to_string_lossy().into_owned()),
+            env_prefix: Some("JENNY_TEST_NATS_INVALID".into()),
+            ..Default::default()
+        };
+        let err = ConfigSource::load(&args)
+            .unwrap()
+            .server_config(&args)
+            .unwrap_err()
+            .to_string();
+        for key in [
+            "`messaging.nats`",
+            "`tls.key`",
+            "`auth.creds`",
+            "`auth.token`",
+        ] {
+            assert!(err.contains(key), "{key} in {err}");
+        }
     }
 }

@@ -1,6 +1,6 @@
 # ADR-017: The NATS Key-Value Store
 
-**Status:** Accepted — implemented
+**Status:** Accepted — implemented; `Nats::new` takes a `NatsConnectionConfig` (the whole `messaging.nats` section, with TLS and credentials) rather than a URL, the gateway shares the connection, and `bind` connects whenever `messaging.nats.url` is set, not only when a bucket was registered (ADR-031)
 **Date:** 2026-11-18
 
 ## Context
@@ -100,5 +100,3 @@ same container in a step, because a service container cannot be given the `-js` 
 
 - Watching a bucket (`watch`) as a source of change events for other services.
 - Time-to-live per key, which JetStream supports and sessions would want.
-- Credentials for the connection: TLS, client certificates, `.creds`, NKeys (ADR-031,
-  proposed).

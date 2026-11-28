@@ -11,11 +11,11 @@ changes are fine, and removing a low-value feature beats adapting it.
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
 | `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Blobs`, `Events`, outbound ports, `Memory` + `Queryable`, `MemoryBlobs`, tasks |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
-| `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsGateway`, `Nats` + `NatsKv` key-value store, `MessagingAdapter` (declaration only) |
+| `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsConnectionConfig` (`messaging.nats`: TLS, credentials), `Nats` (the one connection, its credential-file watcher) + `NatsKv` key-value store, `NatsGateway` (from `Nats::gateway` or a client of your own), `MessagingAdapter` (declaration only) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck`; Apache AGE `Graph` + `Cypher` (feature `graph`) |
 | `crates/jenny-objects` | driven adapter | `object_store`: `ObjectBlobs` (the `Blobs` port over S3 and compatibles, files, memory), `ObjectsConfig`, `ObjectsCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
-| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection (`messaging`), the object store (`objects`), hosting, graceful shutdown |
+| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection and its `nats_options` hook (`messaging`), the object store (`objects`), hosting, graceful shutdown |
 | `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
@@ -60,7 +60,7 @@ just test               # what CI runs: doc tests + all tests under llvm-cov
 just test-cli           # scaffold a default project; it must build, test and lint clean
 just test-cli-features  # the same once per optional feature (slow; shared target dir)
 just test-postgres      # database tests + the example against a disposable Postgres 18 (docker)
-just test-nats          # key-value tests + the example against a disposable NATS (docker)
+just test-nats          # key-value and TLS tests + the example against two disposable NATS (docker)
 just test-objects       # object-storage tests + the example against a disposable S3 (RustFS, docker)
 just test-age           # graph tests + the example against Postgres with Apache AGE, preloaded and not (docker)
 just msrv               # cargo +1.94 check, the declared rust-version
@@ -103,12 +103,22 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   cloned request again appends to `MatchedPath` and duplicates the private `UrlParams`.
   `Routes` keeps layered copies of each GET and PUT for this; a new way of adding or
   layering routes must keep them in step (ADR-014).
-- **Backend tests read `JENNY_TEST_POSTGRES_URL` / `JENNY_TEST_NATS_URL` /
+- **Backend tests read `JENNY_TEST_POSTGRES_URL` / `JENNY_TEST_NATS_URL` (and
+  `JENNY_TEST_NATS_TLS_*`) /
   `JENNY_TEST_S3_URL` / `JENNY_TEST_AGE_URL`** (S3 with the standard `AWS_*` variables):
   unset, they print "skipping" and pass; unset under `CI`, they fail. So `just test-all`
   passing says nothing about them — run `just test-postgres` / `just test-nats` /
   `just test-objects` / `just test-age` for any change in a store or its runtime wiring.
   Each test uses a table, bucket, key prefix or graph of its own and removes it.
+- **The TLS tests need a second NATS.** `JENNY_TEST_NATS_TLS_URL` (`tls://127.0.0.1:<port>`)
+  and `JENNY_TEST_NATS_TLS_DIR` (the certificates) follow the same skip/fail-under-`CI`
+  rule. `just test-nats` writes the certificates with `scripts/nats-test-certs.sh` into
+  `target/`, because the sandbox's docker can only mount from under `/workspace`, and
+  starts `nats:2-alpine -js -c /certs/nats.conf` (mTLS, `verify_and_map`, no anonymous
+  access). CI puts them under `$RUNNER_TEMP`, since the Rust cache restores `target/`
+  after they are written. The watcher's unit tests run the same script into a temporary
+  directory, so they need `openssl`. A refused client fails with a TLS alert
+  (`CertificateRequired`, `UnknownCA`), not an `-ERR`.
 - **AGE needs `ag_catalog` on the search path** for edges and even `create_graph`
   ("operator does not exist: graphid = graphid"). `Graph` prepends it per transaction
   with `set_config(…, true)`, so `fetch_all_in` takes a `Transaction`: outside one the
@@ -130,8 +140,9 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
 - **`/tmp` has a per-user quota** that a few scaffolded target dirs fill. Run the slow
   gates with `TMPDIR=$PWD/target/tmp` when they fail with "Disk quota exceeded".
 - **The outbox delivers at least once**, in order per relay, a moment after the request.
-  The relay starts in `bind`, stops after the HTTP drain and before the broker, and the
-  pool closes last; keep that order. Outbox tests each use their own schema
+  The relay starts in `bind`, stops after the HTTP drain and before the broker, the NATS
+  connection (and its credential watcher) closes after the broker, and the pool closes
+  last; keep that order. Outbox tests each use their own schema
   (`search_path`), because every outbox table is `jenny_outbox`.
 - **JSON Patch needs two conventions from a resource**: its PUT accepts the GET
   representation (no `deny_unknown_fields`), and reads it through `jenny_rest::Json`,
@@ -158,11 +169,11 @@ check publishability. Details: `RELEASING.md`.
 
 ## Known gaps (not yet built, recorded in ADRs)
 
-Planned features are ADR stubs with status `Proposed` (ADR-020 to ADR-032), indexed in
+Planned features are ADR stubs with status `Proposed` (ADR-020 to ADR-030, and ADR-032), indexed in
 the README's Roadmap with the order agreed. Gaps in what is built:
 
 Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
 trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
 the OpenAPI document (ADR-014), events raised with a `remove` and `LISTEN/NOTIFY` for relays (ADR-016), a `migrations/`
-directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs, signed URLs with conditions, conditional blob writes jenny provides itself whatever the backend (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), `cargo jenny new --manifest`,
+directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs, signed URLs with conditions, conditional blob writes jenny provides itself whatever the backend (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), rotating NATS secrets set as values and files a `nats_options` hook reads (ADR-031), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.

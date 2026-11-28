@@ -18,12 +18,16 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 jenny-core = { workspace = true }
+# Signing the server's nonce with the seed of a `.creds` file, read again at each connect.
+nkeys = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# `OnceCell`, for a NATS connection that is made on first use.
+# `OnceCell`, for a NATS connection that is made on first use; `fs` and `time` (in the
+# workspace's set) for the watcher that reconnects when credential files rotate.
 tokio = { workspace = true, features = ["sync"] }
 topmesys = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 uuid = { workspace = true }

@@ -33,6 +33,8 @@ url = { workspace = true }
 
 # Optional: the in-process event bus and messaging adapters.
 jenny-messaging = { workspace = true, optional = true }
+# Optional: `ConnectOptions`, which `JennyServer::nats_options` takes and returns.
+async-nats = { workspace = true, optional = true }
 # Optional: a Postgres pool from `persistence.postgres`, prepared before serving.
 jenny-persistence = { workspace = true, optional = true }
 # Optional: an object store from `objects`.
@@ -53,7 +55,7 @@ utoipa-swagger-ui = { workspace = true, optional = true }
 [features]
 default = []
 # The in-process event bus, started and stopped by the runtime.
-messaging = ["dep:jenny-messaging", "dep:topmesys"]
+messaging = ["dep:jenny-messaging", "dep:topmesys", "dep:async-nats"]
 # A Postgres pool built from `persistence.postgres`: migrated, its document tables (and,
 # with jenny's `graph`, its AGE graphs) created and its readiness checked by the runtime.
 persistence = ["dep:jenny-persistence"]

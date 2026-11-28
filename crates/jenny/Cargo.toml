@@ -27,8 +27,8 @@ default = []
 rest = ["dep:jenny-rest"]
 # The jenny server runtime (implies the REST adapter).
 server = ["dep:jenny-server", "rest"]
-# The event bus, the NATS gateway and the NATS key-value store; with `server`, a NATS
-# connection from `messaging.nats`.
+# The event bus, the NATS gateway and the NATS key-value store; with `server`, one NATS
+# connection from `messaging.nats`, with TLS and credentials.
 messaging = ["dep:jenny-messaging", "jenny-server?/messaging"]
 # Postgres stores and helpers (driven adapter); with `server`, a pool from
 # `persistence.postgres` that the runtime prepares before serving.

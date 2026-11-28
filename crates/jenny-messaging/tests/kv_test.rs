@@ -8,6 +8,7 @@
 use jenny_core::domain::{Aggregate, Criteria, DomainError, DomainResult, Page, ValueKind};
 use jenny_core::port::{Context, Events, Store, StoreExt, Version};
 use jenny_core::testing::RecordedEvents;
+use jenny_messaging::NatsConnectionConfig;
 use jenny_messaging::kv::{Nats, NatsKv};
 use serde::{Deserialize, Serialize};
 
@@ -85,7 +86,7 @@ impl Fixture {
     async fn new() -> Option<Self> {
         let url = nats_url()?;
         let prefix = format!("kvtest-{}", uuid::Uuid::new_v4().simple());
-        let nats = Nats::new(url.clone(), prefix.clone());
+        let nats = Nats::new(NatsConnectionConfig::new(url.clone()), prefix.clone());
         let sessions = nats.kv::<Session>().queryable([
             ("user", ValueKind::Text),
             ("visits", ValueKind::Integer),
