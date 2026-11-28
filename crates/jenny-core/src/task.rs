@@ -458,8 +458,10 @@ mod tests {
     }
 
     /// Keeps the context of every run.
+    /// Request id, principal, labels and whether an authorizer was attached, per run.
+    type Run = (uuid::Uuid, Option<Principal>, Vec<Label>, bool);
     #[derive(Default)]
-    struct Witness(std::sync::Mutex<Vec<(uuid::Uuid, Option<Principal>, Vec<Label>, bool)>>);
+    struct Witness(std::sync::Mutex<Vec<Run>>);
 
     #[async_trait]
     impl Task for Arc<Witness> {

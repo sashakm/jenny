@@ -171,6 +171,9 @@ pub struct ServerParts {
     /// The NATS connection, closed once the broker's listeners are done with it.
     #[cfg(feature = "messaging")]
     nats: Option<jenny_messaging::kv::Nats>,
+    /// The JetStream consumers, which stop fetching as soon as shutdown begins.
+    #[cfg(feature = "messaging")]
+    consumers: Vec<tokio::task::JoinHandle<()>>,
     /// The Postgres pool, closed once requests and listeners are done with it.
     #[cfg(feature = "persistence")]
     postgres: Option<jenny_persistence::Postgres>,
@@ -205,6 +208,8 @@ impl ServerParts {
             broker,
             #[cfg(feature = "messaging")]
             nats,
+            #[cfg(feature = "messaging")]
+            consumers,
             #[cfg(feature = "persistence")]
             postgres,
             #[cfg(feature = "persistence")]
@@ -232,9 +237,17 @@ impl ServerParts {
             .with_graceful_shutdown(close_listener)
             .into_future();
         let abort_scheduler = scheduler.as_ref().map(|handle| handle.abort_handle());
-        // In-flight requests and scheduled runs in progress share one deadline.
+        #[cfg(feature = "messaging")]
+        let abort_consumers: Vec<_> = consumers.iter().map(|c| c.abort_handle()).collect();
+        // The consumers stopped fetching when shutdown began; the messages they hold are
+        // finished and settled while the HTTP server drains beside them.
+        #[cfg(feature = "messaging")]
+        let consumed = futures::future::join_all(consumers);
+        #[cfg(not(feature = "messaging"))]
+        let consumed = std::future::ready(());
+        // In-flight requests, messages and scheduled runs in progress share one deadline.
         let drain = async move {
-            let result = serving.await;
+            let (result, _) = tokio::join!(serving, consumed);
             if let Some(handle) = scheduler {
                 let _ = handle.await;
             }
@@ -248,6 +261,10 @@ impl ServerParts {
                     "in-flight work did not finish in time; stopping without it"
                 );
                 if let Some(abort) = abort_scheduler {
+                    abort.abort();
+                }
+                #[cfg(feature = "messaging")]
+                for abort in abort_consumers {
                     abort.abort();
                 }
                 Ok(())
@@ -481,6 +498,55 @@ impl JennyServer {
             .expect("broker was just started")
             .add_topic_consumer(listener)?;
         info!(consumer, "subscribed event listener");
+        Ok(self)
+    }
+
+    /// Handle events of the in-process bus whose topic matches `pattern`
+    /// (`"my-notes.note.*"`) with a typed handler: a
+    /// [`Handler`](jenny_messaging::inbound::Handler), or a closure taking the message and
+    /// its [`Context`](jenny_core::port::Context) by value.
+    ///
+    /// The payload is decoded as JSON into the handler's type. The handler runs as
+    /// `System[<service_name>/events]`, or as the event's caller under
+    /// `principal: envelope` (in `messaging.inbound`, or in its `subscriptions` entry whose
+    /// `subject` is `pattern`); bus headers are always trusted. Its context carries the
+    /// event's correlation id as request id, the [authorizer](Self::with_authorizer), and
+    /// an [`InboundEvent`](jenny_core::port::InboundEvent). A failure or an undecodable
+    /// payload is logged with the event id and name, and not retried.
+    ///
+    /// ```no_run
+    /// # use jenny_core::domain::DomainError;
+    /// # use jenny_core::port::Context;
+    /// # use jenny_server::JennyServer;
+    /// # #[derive(serde::Deserialize)] struct NoteArchived { id: String }
+    /// # fn wire(mut server: JennyServer) -> anyhow::Result<()> {
+    /// server.handle("my-notes.note.archived", |event: NoteArchived, cx: Context| async move {
+    ///     tracing::info!(note = event.id, by = %cx.require_principal()?, "archived");
+    ///     Ok::<(), DomainError>(())
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// The raw [`subscribe`](Self::subscribe) stays for listeners that want the message
+    /// itself.
+    #[cfg(feature = "messaging")]
+    pub fn handle<M, K>(
+        &mut self,
+        pattern: &str,
+        handler: impl jenny_messaging::inbound::IntoHandler<M, K>,
+    ) -> anyhow::Result<&mut Self> {
+        use jenny_messaging::inbound::{BusHandler, Dispatch, Dispatcher};
+        self.ensure_broker()?;
+        let dispatcher = Dispatcher::new(self.system_principal("events"), true)
+            .with_authorizer(self.authorizer.clone())
+            .with_policy(self.config.messaging.inbound.principal(pattern))?;
+        let handler = BusHandler::new(pattern, Dispatch::new(handler), dispatcher);
+        self.broker
+            .as_ref()
+            .expect("broker was just started")
+            .add_topic_consumer(handler)?;
+        self.handlers_registered = true;
+        info!(pattern, "registered bus event handler");
         Ok(self)
     }
 
@@ -793,7 +859,7 @@ impl JennyServer {
             scheduler: _,
             #[allow(unused_mut)]
             mut checks,
-            authorizer: _,
+            authorizer,
             handlers_registered: _,
             #[cfg(feature = "messaging")]
             events,
@@ -808,6 +874,10 @@ impl JennyServer {
             #[cfg(feature = "objects")]
                 objects: _,
         } = self;
+
+        // Only scheduled runs (above) and inbound consumers (below) need it.
+        #[cfg(not(feature = "messaging"))]
+        let _ = authorizer;
 
         // Buckets too: a store whose bucket cannot be opened fails here, not later.
         #[cfg(feature = "messaging")]
@@ -849,11 +919,54 @@ impl JennyServer {
                     "declared messaging subject"
                 );
             }
-            warn!(
-                adapter = adapter.name(),
-                "messaging dispatch is not implemented yet; subjects are declared only"
-            );
         }
+
+        // Created before serving, so a missing stream or a refused consumer stops the
+        // service now; they consume from here on, and stop as soon as shutdown begins.
+        let (shutdown, _) = watch::channel(false);
+        #[cfg(feature = "messaging")]
+        let mut consumer_status = Vec::new();
+        #[cfg(feature = "messaging")]
+        let consumers = {
+            let mut handles = Vec::new();
+            for adapter in &messaging_adapters {
+                if adapter.handlers().is_empty() {
+                    continue;
+                }
+                let Some(nats) = nats.as_ref() else {
+                    anyhow::bail!(
+                        "messaging adapter `{}` consumes from JetStream, but `messaging.nats.url` \
+                         is not set",
+                        adapter.name()
+                    );
+                };
+                let consumer = jenny_messaging::consumer::JetStreamConsumer::bind(
+                    nats,
+                    &service.name,
+                    adapter,
+                    &config.messaging.inbound,
+                    jenny_core::domain::Principal::system(&service.name, "events")
+                        .with_roles(config.system.roles.iter().cloned()),
+                    authorizer.clone(),
+                )
+                .await?
+                .expect("the adapter has handlers");
+                let status = consumer.status();
+                consumer_status.push(Arc::new(move || {
+                    let status = status.clone();
+                    Box::pin(async move { status.report().await })
+                        as futures::future::BoxFuture<'static, serde_json::Value>
+                }) as crate::health::StatusProbe);
+                let mut requested = shutdown.subscribe();
+                let (stop, stopping) = watch::channel(false);
+                tokio::spawn(async move {
+                    let _ = requested.wait_for(|stopping| *stopping).await;
+                    let _ = stop.send(true);
+                });
+                handles.push(consumer.spawn(stopping));
+            }
+            handles
+        };
 
         // Adapters that did not choose a path in code take the configured one.
         for adapter in &mut rest_adapters {
@@ -901,6 +1014,10 @@ impl JennyServer {
             service: service.name.clone(),
             service_version: service.version.clone(),
             framework_version: crate::health::FRAMEWORK_VERSION,
+            #[cfg(feature = "messaging")]
+            consumers: consumer_status,
+            #[cfg(not(feature = "messaging"))]
+            consumers: Vec::new(),
             adapters: {
                 #[allow(unused_mut)]
                 let mut adapters: Vec<AdapterSummary> = rest_adapters
@@ -979,7 +1096,6 @@ impl JennyServer {
             .layer(RequestIdLayer);
 
         let listener = TcpListener::bind(&config.server.address).await?;
-        let (shutdown, _) = watch::channel(false);
 
         let scheduler_handle = (!scheduler.is_empty()).then(|| {
             let mut requested = shutdown.subscribe();
@@ -1004,6 +1120,8 @@ impl JennyServer {
             broker,
             #[cfg(feature = "messaging")]
             nats,
+            #[cfg(feature = "messaging")]
+            consumers,
             #[cfg(feature = "persistence")]
             postgres,
             #[cfg(feature = "persistence")]
@@ -1331,7 +1449,9 @@ mod tests {
         use jenny_core::task::Task;
         use std::sync::Mutex;
 
-        struct Seen(Arc<Mutex<Vec<(String, Vec<String>, bool)>>>);
+        /// The principal, its roles, and whether an authorizer was attached, per run.
+        type Runs = Vec<(String, Vec<String>, bool)>;
+        struct Seen(Arc<Mutex<Runs>>);
 
         #[async_trait::async_trait]
         impl Task for Seen {
@@ -1342,19 +1462,6 @@ mod tests {
                     principal.roles(),
                     cx.authorizer().is_some(),
                 ));
-                Ok(())
-            }
-        }
-
-        struct AllowAll;
-
-        #[async_trait::async_trait]
-        impl jenny_core::port::outbound::Authorizer for AllowAll {
-            async fn authorize(
-                &self,
-                _: &jenny_core::domain::Principal,
-                _: &jenny_core::port::AccessRequest,
-            ) -> Result<(), jenny_core::domain::AuthorizationError> {
                 Ok(())
             }
         }
@@ -1582,6 +1689,174 @@ mod tests {
         assert_eq!(headers["source-service"], "test-service");
         assert_eq!(headers["source-version"], "9.9.9");
         assert_eq!(headers["ran-after"], "u-7");
+    }
+
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn a_bus_handler_runs_as_the_service_with_the_events_context() {
+        use jenny_core::domain::{DomainError, Principal};
+        use jenny_core::port::{Context, EventCaller, InboundEvent};
+        use std::sync::Mutex;
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct NoteArchived {
+            id: u32,
+        }
+        impl jenny_core::domain::DomainEvent for NoteArchived {
+            fn name(&self) -> &str {
+                "note.archived"
+            }
+        }
+
+        type Seen = Vec<(u32, String, uuid::Uuid, String, Option<EventCaller>, bool)>;
+        let seen: Arc<Mutex<Seen>> = Arc::default();
+        let record = seen.clone();
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.events.headers.caller = true;
+        server.config.system.roles = vec!["Maintenance".into()];
+        server
+            .handle(
+                "test-service.note.*",
+                move |event: NoteArchived, cx: Context| {
+                    let record = record.clone();
+                    async move {
+                        let principal = cx.require_principal()?;
+                        assert!(principal.has_role("Maintenance"));
+                        record.lock().unwrap().push((
+                            event.id,
+                            principal.to_string(),
+                            cx.request_id(),
+                            cx.get::<InboundEvent>().unwrap().name.clone(),
+                            cx.get::<EventCaller>().cloned(),
+                            cx.authorizer().is_some(),
+                        ));
+                        Ok::<(), DomainError>(())
+                    }
+                },
+            )
+            .unwrap();
+        let err = server
+            .with_authorizer(Arc::new(AllowAll))
+            .err()
+            .expect("the handler was built without it");
+        assert!(err.to_string().contains("before handle()"), "{err}");
+
+        let cx = Context::new().with_principal(Principal::builder("u-7").build());
+        server
+            .events()
+            .unwrap()
+            .publish(&NoteArchived { id: 7 }, &cx)
+            .await;
+        for _ in 0..200 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let (id, principal, request_id, name, caller, authorized) = &seen[0];
+        assert_eq!(*id, 7);
+        assert_eq!(principal, "System[test-service/events]");
+        assert_eq!(*request_id, cx.request_id(), "correlated with the request");
+        assert_eq!(name, "note.archived");
+        assert_eq!(caller.as_ref().unwrap().subject, "u-7");
+        assert!(!authorized);
+    }
+
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn the_envelope_policy_restores_the_caller_on_the_bus() {
+        use jenny_core::domain::{DomainError, Principal};
+        use jenny_core::port::{Context, RestoredCaller};
+        use std::sync::Mutex;
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct NoteArchived {
+            id: u32,
+        }
+        impl jenny_core::domain::DomainEvent for NoteArchived {
+            fn name(&self) -> &str {
+                "note.archived"
+            }
+        }
+
+        let seen: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
+        let record = seen.clone();
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.events.headers.caller = true;
+        server.config.messaging.inbound = serde_json::from_value(serde_json::json!({
+            "subscriptions": [{ "subject": "test-service.note.*", "principal": "envelope" }]
+        }))
+        .unwrap();
+        server
+            .handle(
+                "test-service.note.*",
+                move |_: NoteArchived, cx: Context| {
+                    let record = record.clone();
+                    async move {
+                        record.lock().unwrap().push((
+                            cx.require_principal()?.subject(),
+                            cx.get::<RestoredCaller>().is_some(),
+                        ));
+                        Ok::<(), DomainError>(())
+                    }
+                },
+            )
+            .unwrap();
+
+        let cx = Context::new().with_principal(Principal::builder("u-7").build());
+        server
+            .events()
+            .unwrap()
+            .publish(&NoteArchived { id: 7 }, &cx)
+            .await;
+        for _ in 0..200 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(seen.lock().unwrap().as_slice(), [("u-7".to_string(), true)]);
+    }
+
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn a_jetstream_adapter_without_a_nats_url_stops_the_service() {
+        use jenny_core::domain::DomainError;
+        use jenny_messaging::{MessagingAdapter, SubjectBinding};
+
+        let adapter = MessagingAdapter::new("orders", "shop")
+            .unwrap()
+            .stream("SHOP")
+            .on(
+                SubjectBinding::new("orders.created"),
+                |_: serde_json::Value, _: jenny_core::port::Context| async {
+                    Ok::<(), DomainError>(())
+                },
+            );
+        let Err(err) = server_with("127.0.0.1:0")
+            .register_messaging(adapter)
+            .bind()
+            .await
+        else {
+            panic!("there is no NATS to consume from");
+        };
+        assert!(err.to_string().contains("`messaging.nats.url`"), "{err}");
+    }
+
+    /// Allows everything, to tell an attached authorizer from none.
+    struct AllowAll;
+
+    #[async_trait::async_trait]
+    impl jenny_core::port::outbound::Authorizer for AllowAll {
+        async fn authorize(
+            &self,
+            _: &jenny_core::domain::Principal,
+            _: &jenny_core::port::AccessRequest,
+        ) -> Result<(), jenny_core::domain::AuthorizationError> {
+            Ok(())
+        }
     }
 
     /// A bus listener that keeps the headers of every message it gets.
@@ -1942,7 +2217,7 @@ mod tests {
     #[cfg(all(feature = "persistence", feature = "messaging"))]
     #[tokio::test]
     async fn with_the_outbox_a_committed_event_reaches_the_bus_through_the_relay() {
-        use jenny_core::port::{Context, Events, StoreExt};
+        use jenny_core::port::{Context, StoreExt};
         use std::sync::Mutex;
         use topmesys::{Delivery, EventConsumer, HandlerError, Subscriptions};
 

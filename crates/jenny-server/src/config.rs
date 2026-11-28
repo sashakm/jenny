@@ -46,6 +46,14 @@
 //!       key: /etc/nats-tls/tls.key
 //!     auth:                   # optional: creds, nkey, user + password, or token
 //!       creds: /etc/nats/service.creds
+//!   inbound:                  # event handlers, on the bus and on JetStream
+//!     principal: system       # or envelope: run as the event's caller
+//!     max_deliver: 5
+//!     backoff: [1, 5, 30]
+//!     # dead_letter: SHOP.dead
+//!     subscriptions:
+//!       - subject: shop.orders.created
+//!         max_deliver: 10
 //! persistence:
 //!   postgres:
 //!     url: postgres://notes:secret@db/notes   # better: JENNY__PERSISTENCE__POSTGRES__URL
@@ -218,6 +226,10 @@ pub struct MessagingConfig {
     pub namespace: Option<String>,
     /// What the events the service raises carry.
     pub events: EventsConfig,
+    /// How inbound handlers run, on the bus and on JetStream, and what becomes of a
+    /// message that fails: principal policy, retries, dead letters. With `messaging`.
+    #[cfg(feature = "messaging")]
+    pub inbound: jenny_messaging::consumer::InboundConfig,
     /// The service's NATS connection, which the key-value stores and the gateway share:
     /// its servers, TLS and credentials (ADR-031). With the `messaging` feature.
     #[cfg(feature = "messaging")]
@@ -230,6 +242,8 @@ impl Default for MessagingConfig {
             buffer_size: DEFAULT_EVENT_BUFFER,
             namespace: None,
             events: EventsConfig::default(),
+            #[cfg(feature = "messaging")]
+            inbound: jenny_messaging::consumer::InboundConfig::default(),
             #[cfg(feature = "messaging")]
             nats: jenny_messaging::NatsConnectionConfig::default(),
         }
@@ -381,6 +395,12 @@ impl ConfigSource {
             .nats
             .validate()
             .map_err(|e| anyhow::anyhow!("invalid `messaging.nats` configuration: {e}"))?;
+        #[cfg(feature = "messaging")]
+        config
+            .messaging
+            .inbound
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid `messaging.inbound` configuration: {e}"))?;
         if let Some(address) = &args.address {
             config.server.address = address.clone();
         }

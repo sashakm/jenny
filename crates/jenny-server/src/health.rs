@@ -227,6 +227,11 @@ struct HealthReport {
     checks: Vec<CheckReport>,
 }
 
+/// Something `/health/status` asks for a report each time, such as a JetStream
+/// consumer's pending count.
+pub(crate) type StatusProbe =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, serde_json::Value> + Send + Sync>;
+
 /// What `/health/status` reports about the running service.
 #[derive(Clone, Serialize)]
 pub(crate) struct StatusInfo {
@@ -234,6 +239,8 @@ pub(crate) struct StatusInfo {
     pub service_version: String,
     pub framework_version: &'static str,
     pub adapters: Vec<AdapterSummary>,
+    #[serde(skip)]
+    pub consumers: Vec<StatusProbe>,
 }
 
 #[derive(Clone, Serialize)]
@@ -251,6 +258,9 @@ struct StatusReport {
     framework_version: &'static str,
     uptime_seconds: u64,
     adapters: Vec<AdapterSummary>,
+    /// JetStream consumers: name, stream, filter subjects, pending count.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    consumers: Vec<serde_json::Value>,
     checks: Vec<CheckReport>,
 }
 
@@ -296,12 +306,14 @@ async fn status_report(
     State(HealthEndpointState(registry, status)): State<HealthEndpointState>,
 ) -> impl IntoResponse {
     let checks = registry.run_checks().await;
+    let consumers = futures::future::join_all(status.consumers.iter().map(|probe| probe())).await;
     Json(StatusReport {
         service: status.service.clone(),
         service_version: status.service_version.clone(),
         framework_version: status.framework_version,
         uptime_seconds: registry.uptime().as_secs(),
         adapters: status.adapters.clone(),
+        consumers,
         checks,
     })
 }
@@ -358,6 +370,7 @@ mod tests {
                 path: "/api".to_string(),
                 resources: vec!["urn:my-notes:notes".to_string()],
             }],
+            consumers: Vec::new(),
         }
     }
 
