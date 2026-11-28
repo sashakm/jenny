@@ -23,17 +23,28 @@ server:
   # shutdown_delay_seconds: 5
   # Then wait at most this long for in-flight requests and scheduled runs.
   # shutdown_timeout_seconds: 30
-  # metrics:
-  #   auth:
-  #     username: prometheus
-  #     password: change-me
+  # A second port for health, metrics and OpenAPI, at the same paths. The API port
+  # then answers /j/... with 404, so no ingress can publish them by accident. Off
+  # here, so `cargo run` keeps one port.
+  # management:
+  #   address: "[::]:8081"
+  # Each group of the framework's endpoints (probes, status, metrics, openapi,
+  # swagger, public_status): enabled, listener (api | management), path, log_requests.
+  # Probes, status and metrics are not access-logged unless log_requests is true.
+  # endpoints:
+  #   swagger: { enabled: false }
+  #   # {"status": "up" | "degraded" | "down"}, nothing else: fit for the public.
+  #   public_status: { enabled: true, listener: api, path: /status }
+  #   metrics:
+  #     auth:
+  #       username: prometheus
+  #       password: change-me
 
 telemetry:
   # service_name and service_version default to the ones above; set them here to
   # rename the service in telemetry only.
   log_format: pretty
   # otlp_endpoint: "http://localhost:4317"
-  # prometheus_port: 9090
 {{#if messaging}}
 
 messaging:

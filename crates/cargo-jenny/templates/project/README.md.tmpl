@@ -44,6 +44,9 @@ just test
 | `GET /j/health/status` | what is mounted, and both versions |
 | `GET /api/{{resource_plural}}` | the API |
 
+With `server.management.address` set (see `config.yaml`), the `/j/…` endpoints move to
+that port, at the same paths, and the API's port answers them with 404.
+
 Listings accept `?page=`, `?page_size=`, repeatable `?sort=` (`field`, `-field`,
 `field:desc`) and repeatable `?filter=` (`field:check:value`, checks `eq`, `begins`,
 `ends`, `contains`, `gt`, `st`).
