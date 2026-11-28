@@ -16,7 +16,14 @@
 //! - **Health** — `<framework_path>/health/live`, `…/ready`, `…/status`
 //!   ([`HealthCheck`]); `framework_path` defaults to `/j`.
 //! - **Metrics** — `<framework_path>/metrics`, with the `telemetry-prometheus` feature.
-//! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the background.
+//! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the
+//!   background, each run as `System[<service_name>/tasks]` with the
+//!   [authorizer](JennyServer::with_authorizer) (ADR-033).
+//! - **Inbound events** — with `messaging`, typed handlers on the bus
+//!   ([`JennyServer::handle`]) and on JetStream (a `MessagingAdapter` with `.on(…)`, given
+//!   to [`JennyServer::register_messaging`]: one durable consumer per adapter, ack, nak
+//!   with backoff, term and dead letters from `messaging.inbound`), run as
+//!   `System[<service_name>/events]` unless configured to run as the event's caller.
 //! - **Postgres** — with the `persistence` feature, a pool from `persistence.postgres`
 //!   ([`JennyServer::postgres`]), migrated, its document tables (and, with jenny's
 //!   `graph` feature, its AGE graphs) created and its readiness checked before the

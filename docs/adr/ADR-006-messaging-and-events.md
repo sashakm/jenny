@@ -56,10 +56,9 @@ before anything is served — so the broker starts on first use rather than at `
 Stopping it on shutdown waits for listeners still handling an event, so a graceful
 shutdown does not drop side effects that were already in flight.
 
-The namespace defaults to `messaging.namespace`, then `telemetry.service_name`, then
-`"jenny"`. That last fallback is not decoration: topics may not contain empty segments,
-so an unset service name would otherwise produce `.note.created` and make every publish
-fail at runtime. A test covers it.
+The namespace is `messaging.namespace` (a blank one counts as unset), else the service
+name (ADR-033), which cannot be empty: topics may not contain empty segments, so an empty
+namespace would produce `.note.created` and make every publish fail at runtime.
 
 `topmesys` is re-exported from `jenny-messaging`, because subscribing a listener means
 implementing its `EventConsumer` trait — that makes it part of this crate's public
@@ -104,7 +103,9 @@ name, and not redelivered: the bus is in memory, and a retry belongs to a broker
 **JetStream.** `MessagingAdapter::stream("SHOP")` names the stream and `.on(binding,
 handler)` binds a subject; `.subscribe(binding)` still only declares one. At `bind`, the
 runtime creates or updates one durable pull consumer per adapter, named
-`<service_name>-<adapter>`, with the handled subjects as filter subjects, over the shared
+`<service_name>-<adapter>` (so neither may contain whitespace, `.`, `*`, `>`, `/` or `\`,
+which a consumer name cannot; `bind` says so), with the handled subjects as filter
+subjects, over the shared
 NATS connection (ADR-031). It never creates the stream; a missing one is a startup error
 naming it. What becomes of a message is configurable under `messaging.inbound`, with
 overrides per full subject in `messaging.inbound.subscriptions` (a list, since keys cannot
@@ -173,6 +174,6 @@ that port instead, is a change in the composition root.
 - Listeners are independently testable and independently addable.
 - Events are not durable across a crash between the state change and the publish; ADR-004
   records the outbox upgrade path.
-- A service cannot yet be *driven* by messages. `MessagingAdapter` declares intent and
-  the runtime warns at startup that dispatch is not running, so this is loud rather than
-  silent.
+- A service is driven by messages through typed handlers, on the bus and on JetStream.
+  Delivery from JetStream is at least once, so a handler whose effect is not idempotent
+  deduplicates on the `InboundEvent` id.

@@ -119,7 +119,8 @@ ends the batch there: the rows from that one on stay, still in order, for the ne
 ### The runtime runs it from configuration
 
 `persistence.postgres.outbox: true` makes `JennyServer::postgres()` enable the outbox
-with the in-process bus from `events()`. The bus is where listeners, and through the
+with the raw in-process bus, not the enriched `Events` that `events()` returns: what the
+relay replays was enriched when it was raised (ADR-032). The bus is where listeners, and through the
 NATS gateway other services, already receive events. Without the `messaging` feature
 there is no bus, and the setting is a wiring error at startup, not a silent no-op; a
 service with its own publisher calls `with_outbox` itself.

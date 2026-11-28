@@ -46,7 +46,7 @@ crate depends on another (ADR-002).
 `messaging.nats` changes from a single URL into the connection's own section. The runtime
 builds one client from it, and the key-value stores and the gateway share that client.
 `NatsConfig` is removed. Its `stream` belongs to the gateway, and its `consumer` to
-inbound dispatch, which is not built (ADR-006). Before this, a service that used both
+inbound dispatch, configured under `messaging.inbound` (ADR-006). Before this, a service that used both
 opened two connections, and only one of them came from configuration.
 
 The gateway is built from the `Nats` handle that `JennyServer::nats()` returns:

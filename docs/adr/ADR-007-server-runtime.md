@@ -1,6 +1,6 @@
 # ADR-007: The Server Runtime and Composition Root
 
-**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `server`, `telemetry`, `messaging`, `persistence` and `objects`
+**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `service_name`, `service_version` and `system` (ADR-033), `server`, `telemetry`, `messaging`, `persistence` and `objects`; with `messaging`, it also runs bus handlers and JetStream consumers, which drain with requests at shutdown (ADR-006)
 **Date:** 2026-08-24
 
 ## Context
@@ -62,7 +62,9 @@ config.yaml  →  JENNY__SERVER__ADDRESS  →  --address
 That order is the deployment order: a file for defaults you commit, environment variables
 for what differs per environment, flags for what differs per run.
 
-The framework interprets exactly three sections — `server`, `telemetry` and `messaging`.
+The framework interprets the top-level `service_name`, `service_version` and `system`
+(ADR-033), and the sections `server`, `telemetry`, `messaging`, `persistence` and
+`objects`.
 Everything else passes through untyped — an adapter deserialises its own `applications.<name>` section
 into whatever type it likes. **The framework imposes no schema on service configuration**,
 because it cannot know one and a wrong guess would be in the way forever.
@@ -95,8 +97,9 @@ On a signal or `ServerHandle::shutdown`:
    Kubernetes the pod leaves the load balancer *while* it is told to stop, not before,
    so a few seconds of delay (around five) keeps late requests from being refused.
 3. The listener closes; in-flight requests finish. The scheduler starts no more runs and
-   waits for those in progress.
-4. Both are bounded together by `server.shutdown_timeout_seconds` (default `30`, what
+   waits for those in progress. JetStream consumers stopped fetching when shutdown
+   began; they finish the messages they are handling, beside the requests (ADR-006).
+4. All of them are bounded together by `server.shutdown_timeout_seconds` (default `30`, what
    Kubernetes waits before `SIGKILL`); what is still running then is abandoned.
 5. The broker stops (draining its listeners) and telemetry flushes.
 
@@ -126,10 +129,11 @@ registered, ready means started. Checks run **concurrently**: they are independe
 and six two-second timeouts in series would make a readiness probe take twelve seconds to
 fail.
 
-`/j/health/status` also reports the framework's version and the service's own. The
-framework cannot read the latter for you — `env!` expands where it is written, which for
-framework code is the framework's manifest — so `jenny::service_version!()` is a macro
-that expands in *your* binary.
+`/j/health/status` also reports the framework's version and the service's name and
+version. The framework cannot read the latter for you — `env!` expands where it is
+written, which for framework code is the framework's manifest — so `jenny::service!()` is
+a macro that expands in *your* binary and goes to `from_args`; `service_name` and
+`service_version` override it (ADR-033).
 
 ### What checks itself, and what you register
 

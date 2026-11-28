@@ -11,9 +11,9 @@
 //! | Path | Ring | Contents |
 //! |---|---|---|
 //! | [`jenny::domain`](domain) | the hexagon | [`Aggregate`], [`DomainError`], [`DomainEvent`], [`Changes`], [`Validate`], [`Principal`], [`Urn`] |
-//! | [`jenny::port`](port) | the boundary | [`Store`], [`Blobs`](port::Blobs), [`Events`], [`Context`], [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
+//! | [`jenny::port`](port) | the boundary | [`Store`], [`Blobs`](port::Blobs), [`Events`] with [`Headers`](port::Headers)/[`Enrich`](port::Enrich) ([`Caller`](port::Caller), [`Source`](port::Source)), [`Context`] and its inbound extensions ([`InboundEvent`](port::InboundEvent), [`EventCaller`](port::EventCaller)), [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
-//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` (driving), `kv::Nats` connection (TLS, credentials) with its `kv::NatsKv` store and `NatsGateway` |
+//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` with `inbound` handlers and `consumer::JetStreamConsumer` (driving), `kv::Nats` connection (TLS, credentials) with its `kv::NatsKv` store and `NatsGateway` |
 //! | `jenny::objects` | driven adapter | `ObjectBlobs` over S3 and compatibles, files or memory; `ObjectsConfig` |
 //! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck`; with `graph`, Apache AGE's `Graph` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |

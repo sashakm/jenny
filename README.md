@@ -55,7 +55,7 @@ src/
     port/           the outbound traits the domain owns
   application/      use cases; load, change, save through Store, publish what was raised
   adapter/
-    inbound/        driving: rest · grpc · messaging · task
+    inbound/        driving: rest · grpc · events · tasks
     outbound/       driven: persistence · storage · eventbus · telemetry · security
   main.rs           composition root: hand-wired, no DI container
 ```
@@ -384,7 +384,8 @@ worth reading top to bottom.
 mounts every registered adapter on one axum server, drives scheduled tasks, and shuts
 down gracefully on `SIGTERM` or `SIGINT`: readiness turns 503 first, the listener stays
 open for `server.shutdown_delay_seconds` so a load balancer can catch up, then in-flight
-requests and scheduled runs get `server.shutdown_timeout_seconds` to finish.
+requests, scheduled runs and messages being handled get `server.shutdown_timeout_seconds`
+to finish.
 
 Its own endpoints live under `server.framework_path` (`/j`), namespaced away from
 `server.api_path` (`/api`) so the framework can never collide with a route you wanted:
@@ -414,7 +415,8 @@ an operator moving the convention should not silently relocate a path a develope
 specifically.
 
 Configuration is layered file → env (`JENNY__SERVER__ADDRESS`) → flags. The framework
-reads only `server`, `telemetry`, `messaging`, `persistence` and `objects`; your
+reads only `service_name`, `service_version`, `system`, `server`, `telemetry`,
+`messaging`, `persistence` and `objects`; your
 `applications.<name>` section passes through untyped, so no schema is imposed on it.
 
 Failures are [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem documents —
@@ -473,13 +475,13 @@ reads every key to list; see above.)
 | Crate | Ring | Role |
 |---|---|---|
 | `jenny` | — | facade: feature-gated re-exports |
-| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Blobs`, `Events`, the outbound ports, `Memory`, `MemoryBlobs`, tasks |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal` + `PrincipalKind`, `Urn`, `Context`, `Store`, `Blobs`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), the inbound extensions (`InboundEvent`, `EventCaller`, `RestoredCaller`), the outbound ports, `Memory`, `MemoryBlobs`, tasks, `service!()` |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` + `JetStreamConsumer` and the inbound `Handler` dispatch (driving), the `Nats` connection (`NatsConnectionConfig`: TLS, credentials), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL, Apache AGE graphs (`graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
-| `jenny-server` | composition root | runtime, config, health, hosting; the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
+| `jenny-server` | composition root | runtime, the service identity, config, health, hosting; `events()` with configured headers, bus handlers (`handle`), JetStream consumers, tasks and handlers as system principals (`with_authorizer`); the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 

@@ -811,8 +811,13 @@ impl JennyServer {
 
     /// Register a messaging driving adapter.
     ///
-    /// **Declaration only for now**: the subjects are recorded and logged at startup,
-    /// but no dispatch path runs yet.
+    /// Every subject bound with [`MessagingAdapter::on`] is consumed: at `bind` the
+    /// runtime creates or updates a durable pull consumer, `<service_name>-<adapter>`, on
+    /// the adapter's [`stream`](MessagingAdapter::stream), over the shared NATS connection,
+    /// and runs it until shutdown, configured by `messaging.inbound`. `bind` fails when
+    /// such an adapter has no stream, the stream does not exist, or `messaging.nats.url` is
+    /// unset. Subjects given to [`subscribe`](MessagingAdapter::subscribe) are only
+    /// declared, and listed in `/health/status`.
     #[cfg(feature = "messaging")]
     pub fn register_messaging(mut self, adapter: MessagingAdapter) -> Self {
         self.messaging_adapters.push(adapter);
