@@ -59,6 +59,8 @@ pub struct JennyServer {
     #[cfg(feature = "messaging")]
     messaging_adapters: Vec<MessagingAdapter>,
     scheduler: TaskScheduler,
+    /// The `tasks.lease` backend, once `lease()` built it.
+    lease: Option<Arc<dyn jenny_core::port::Lease>>,
     checks: Vec<Arc<dyn HealthCheck>>,
     authorizer: Option<Arc<dyn jenny_core::port::outbound::Authorizer>>,
     /// Whether `handle` has built a dispatcher, which took the authorizer as it was.
@@ -390,6 +392,7 @@ impl JennyServer {
             #[cfg(feature = "messaging")]
             messaging_adapters: Vec::new(),
             scheduler: TaskScheduler::default(),
+            lease: None,
             checks: Vec::new(),
             authorizer: None,
             handlers_registered: false,
@@ -876,9 +879,89 @@ impl JennyServer {
     /// Every run gets a fresh [`Context`](jenny_core::port::Context) as the system
     /// principal `System[<service_name>/tasks]`, with `system.roles`, the
     /// [authorizer](Self::with_authorizer) when there is one, and the label `task=<name>`.
+    ///
+    /// With `tasks.lease` configured, each slot runs on one replica only and the run's
+    /// context carries a [`TaskLease`](jenny_core::port::TaskLease) with its fencing
+    /// token, unless the task is [`per_replica`](ScheduledTask::per_replica) (ADR-029).
     pub fn schedule(mut self, task: ScheduledTask) -> Self {
         self.scheduler = self.scheduler.with_task(task);
         self
+    }
+
+    /// The lease configured under `tasks.lease`, built the first time: what makes each
+    /// slot of a scheduled task run on one replica (ADR-029), and a
+    /// [`Lease`](jenny_core::port::Lease) for leader election of your own.
+    ///
+    /// `memory` is a [`MemoryLease`](jenny_core::memory::MemoryLease); `postgres` the
+    /// table `jenny_leases` through [`postgres`](Self::postgres); `nats` the bucket
+    /// `jenny_leases` through [`nats`](Self::nats), its `max_age` the `ttl`. `None`
+    /// without `tasks.lease`. Fails, naming the key, when `ttl` is 0 or the backend is
+    /// not available: its feature is off, or its connection is not configured. `bind`
+    /// calls it too, so a misconfigured lease stops the service at startup.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use jenny_server::JennyServer;
+    /// # async fn wire(mut server: JennyServer) -> anyhow::Result<()> {
+    /// if let Some(lease) = server.lease()? {
+    ///     let me = format!("my-notes/{}", jenny_core::task::instance());
+    ///     let leading = lease.acquire("my-notes/leader", &me, Duration::from_secs(30)).await?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn lease(&mut self) -> anyhow::Result<Option<Arc<dyn jenny_core::port::Lease>>> {
+        if self.lease.is_none()
+            && let Some(config) = self.config.tasks.lease.clone()
+        {
+            anyhow::ensure!(
+                config.ttl > 0,
+                "`tasks.lease.ttl` is 0: a lease must last at least a second (default {})",
+                crate::config::DEFAULT_LEASE_TTL_SECONDS
+            );
+            let ttl = Duration::from_secs(config.ttl);
+            let lease: Arc<dyn jenny_core::port::Lease> = match config.backend {
+                crate::config::LeaseBackend::Memory => {
+                    Arc::new(jenny_core::memory::MemoryLease::new())
+                }
+                crate::config::LeaseBackend::Postgres => self.postgres_lease()?,
+                crate::config::LeaseBackend::Nats => self.nats_lease(ttl)?,
+            };
+            info!(backend = ?config.backend, ttl = config.ttl, "task leases configured");
+            self.lease = Some(lease);
+        }
+        Ok(self.lease.clone())
+    }
+
+    #[cfg(feature = "persistence")]
+    fn postgres_lease(&mut self) -> anyhow::Result<Arc<dyn jenny_core::port::Lease>> {
+        match self.postgres()? {
+            Some(postgres) => Ok(Arc::new(postgres.lease())),
+            None => anyhow::bail!(
+                "`tasks.lease.backend: postgres` needs `persistence.postgres.url` \
+                 (JENNY__PERSISTENCE__POSTGRES__URL)"
+            ),
+        }
+    }
+
+    #[cfg(not(feature = "persistence"))]
+    fn postgres_lease(&mut self) -> anyhow::Result<Arc<dyn jenny_core::port::Lease>> {
+        anyhow::bail!("`tasks.lease.backend: postgres` needs jenny's `persistence` feature")
+    }
+
+    #[cfg(feature = "messaging")]
+    fn nats_lease(&mut self, ttl: Duration) -> anyhow::Result<Arc<dyn jenny_core::port::Lease>> {
+        match self.nats() {
+            Some(nats) => Ok(Arc::new(nats.lease(ttl))),
+            None => anyhow::bail!(
+                "`tasks.lease.backend: nats` needs `messaging.nats.url` \
+                 (JENNY__MESSAGING__NATS__URL)"
+            ),
+        }
+    }
+
+    #[cfg(not(feature = "messaging"))]
+    fn nats_lease(&mut self, _: Duration) -> anyhow::Result<Arc<dyn jenny_core::port::Lease>> {
+        anyhow::bail!("`tasks.lease.backend: nats` needs jenny's `messaging` feature")
     }
 
     /// Assemble the router and bind the socket, without serving yet.
@@ -887,9 +970,17 @@ impl JennyServer {
         // server that refuses it should stop the service now, not at its first event.
         #[cfg(feature = "messaging")]
         self.nats();
+        // Before the stores are prepared, so they create the lease table or bucket.
+        let lease = self.lease()?;
         // Every run as the service itself, checked by the same policies as a request.
         let scheduler =
             std::mem::take(&mut self.scheduler).running_as(self.system_principal("tasks"));
+        let scheduler = match (lease, self.config.tasks.lease.as_ref()) {
+            (Some(lease), Some(config)) => {
+                scheduler.with_lease(lease, Duration::from_secs(config.ttl), &self.service.name)
+            }
+            _ => scheduler,
+        };
         let scheduler = match self.authorizer.clone() {
             Some(authorizer) => scheduler.with_authorizer(authorizer),
             None => scheduler,
@@ -903,6 +994,7 @@ impl JennyServer {
             #[cfg(feature = "messaging")]
             messaging_adapters,
             scheduler: _,
+            lease: _,
             #[allow(unused_mut)]
             mut checks,
             authorizer,
@@ -3075,5 +3167,183 @@ mod tests {
             call(parts.router.clone(), "/j/swagger/").await.0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    /// The lease every scheduled run carried.
+    #[derive(Default)]
+    struct LeasedRuns(std::sync::Mutex<Vec<Option<jenny_core::port::TaskLease>>>);
+
+    struct Witness(Arc<LeasedRuns>);
+
+    #[async_trait::async_trait]
+    impl jenny_core::task::Task for Witness {
+        async fn execute(&self, cx: &jenny_core::port::Context) -> anyhow::Result<()> {
+            self.0
+                .0
+                .lock()
+                .unwrap()
+                .push(cx.get::<jenny_core::port::TaskLease>().cloned());
+            Ok(())
+        }
+    }
+
+    fn leasing(backend: crate::config::LeaseBackend, ttl: u64) -> JennyServer {
+        let mut server = server_with("127.0.0.1:0");
+        server.config.tasks.lease = Some(crate::config::LeaseConfig { backend, ttl });
+        server
+    }
+
+    /// Bind with a `*/1` task, let it fire, and return what its runs carried.
+    async fn leased_runs(server: JennyServer) -> Vec<Option<jenny_core::port::TaskLease>> {
+        let runs = Arc::new(LeasedRuns::default());
+        let task = ScheduledTask::new("tick", Witness(runs.clone()), "*/1 * * * * * *").unwrap();
+        let parts = server.schedule(task).bind().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(2_200)).await;
+        parts.scheduler.as_ref().unwrap().abort();
+        std::mem::take(&mut *runs.0.lock().unwrap())
+    }
+
+    #[test]
+    fn without_tasks_lease_there_is_no_lease() {
+        assert!(server_with("127.0.0.1:0").lease().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_memory_lease_is_built_once_and_handed_out() {
+        let mut server = leasing(crate::config::LeaseBackend::Memory, 30);
+        let first = server.lease().unwrap().expect("configured");
+        let second = server.lease().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "the same lease every time");
+    }
+
+    #[tokio::test]
+    async fn a_lease_ttl_of_zero_stops_the_service() {
+        let mut server = leasing(crate::config::LeaseBackend::Memory, 0);
+        let err = server
+            .lease()
+            .err()
+            .expect("a misconfigured lease is refused")
+            .to_string();
+        assert!(err.contains("tasks.lease.ttl"), "{err}");
+        let Err(err) = leasing(crate::config::LeaseBackend::Memory, 0).bind().await else {
+            panic!("bind should refuse a ttl of 0");
+        };
+        assert!(err.to_string().contains("tasks.lease.ttl"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn with_a_memory_lease_scheduled_runs_carry_their_slot() {
+        let runs = leased_runs(leasing(crate::config::LeaseBackend::Memory, 30)).await;
+        assert!(!runs.is_empty());
+        for run in runs {
+            let lease = run.expect("a leased run carries its TaskLease");
+            assert!(
+                lease.key.starts_with("test-service/tasks/tick/"),
+                "{}",
+                lease.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_postgres_lease_needs_a_postgres() {
+        let err = leasing(crate::config::LeaseBackend::Postgres, 30)
+            .lease()
+            .err()
+            .expect("a misconfigured lease is refused")
+            .to_string();
+        assert!(err.contains("tasks.lease.backend: postgres"), "{err}");
+        if cfg!(feature = "persistence") {
+            assert!(err.contains("persistence.postgres.url"), "{err}");
+        } else {
+            assert!(err.contains("`persistence` feature"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_nats_lease_needs_a_nats() {
+        let err = leasing(crate::config::LeaseBackend::Nats, 30)
+            .lease()
+            .err()
+            .expect("a misconfigured lease is refused")
+            .to_string();
+        assert!(err.contains("tasks.lease.backend: nats"), "{err}");
+        if cfg!(feature = "messaging") {
+            assert!(err.contains("messaging.nats.url"), "{err}");
+        } else {
+            assert!(err.contains("`messaging` feature"), "{err}");
+        }
+    }
+
+    /// Needs `JENNY_TEST_POSTGRES_URL`. In a schema of its own, as `jenny_leases` is one
+    /// table per database.
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn a_postgres_lease_table_is_created_at_bind_and_holds_each_slot() {
+        let url = match std::env::var("JENNY_TEST_POSTGRES_URL") {
+            Ok(url) => url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("JENNY_TEST_POSTGRES_URL must be set in CI")
+            }
+            Err(_) => return eprintln!("skipping: JENNY_TEST_POSTGRES_URL is not set"),
+        };
+        let schema = format!("server_lease_{}", uuid::Uuid::new_v4().simple());
+        let admin = jenny_persistence::sqlx::PgPool::connect(&url)
+            .await
+            .unwrap();
+        jenny_persistence::sqlx::query(jenny_persistence::sqlx::AssertSqlSafe(format!(
+            "CREATE SCHEMA \"{schema}\""
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
+        let separator = if url.contains('?') { '&' } else { '?' };
+
+        let mut server = leasing(crate::config::LeaseBackend::Postgres, 30);
+        server.config.persistence.postgres.url =
+            Some(format!("{url}{separator}options=-csearch_path%3D{schema}"));
+        let runs = leased_runs(server).await;
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(Option::is_some));
+
+        let held: i64 =
+            jenny_persistence::sqlx::query_scalar(jenny_persistence::sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM \"{schema}\".jenny_leases"
+            )))
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+        assert_eq!(held as usize, runs.len(), "a row per slot, none released");
+        jenny_persistence::sqlx::query(jenny_persistence::sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA \"{schema}\" CASCADE"
+        )))
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
+
+    /// Needs `JENNY_TEST_NATS_URL`. Uses the runtime's bucket, `jenny_leases`, and
+    /// deletes it.
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn a_nats_lease_bucket_is_created_at_bind_with_the_ttl_as_max_age() {
+        let Some(url) = nats_url() else { return };
+        let mut server = leasing(crate::config::LeaseBackend::Nats, 7);
+        server.config.messaging.nats.url = Some(url.clone());
+        let runs = leased_runs(server).await;
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(Option::is_some));
+
+        let jetstream = async_nats::jetstream::new(async_nats::connect(&url).await.unwrap());
+        let bucket = jetstream
+            .get_key_value(jenny_messaging::lease::LEASE_BUCKET)
+            .await
+            .expect("bind created the bucket");
+        let status = bucket.status().await.unwrap();
+        assert_eq!(status.info.config.max_age, Duration::from_secs(7));
+        jetstream
+            .delete_key_value(jenny_messaging::lease::LEASE_BUCKET)
+            .await
+            .unwrap();
     }
 }
