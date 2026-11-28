@@ -207,6 +207,14 @@ never yield the same slot twice, slots missed while the process was suspended ar
 skipped rather than fired in a burst, and a next slot computed a moment too late is due
 now instead of an error that used to end the whole scheduler.
 
+**Singleton tasks.** Without a lease every replica runs every task. With `tasks.lease`
+configured (ADR-029, step 1), each firing first acquires a key per slot from the `Lease`
+backend, `<service>/tasks/<task>/<slot>`, and only the replica that gets it runs the
+slot, renewing every `ttl / 3`; the key is never released, so a slot runs at most once
+across replicas while their clocks disagree by less than `ttl`. The run's `Context`
+carries a `TaskLease` with the fencing token. `ScheduledTask::per_replica()` keeps a
+task on every replica, and the local rule of one run per task at a time still applies.
+
 ## Consequences
 
 - Every jenny service has the same binary shape, and the example is a working template

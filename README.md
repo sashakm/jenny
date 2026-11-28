@@ -387,6 +387,12 @@ open for `server.shutdown_delay_seconds` so a load balancer can catch up, then i
 requests, scheduled runs and messages being handled get `server.shutdown_timeout_seconds`
 to finish.
 
+With several replicas, `tasks.lease` (`backend: memory | postgres | nats`, `ttl: 30`)
+makes each slot of a scheduled task run on one replica only, the one that acquires its
+lease; the run's `Context` carries a `TaskLease` with a fencing token, and
+`ScheduledTask::per_replica()` keeps a task on every replica. `JennyServer::lease()`
+hands the same `Lease` to services for leader election of their own (ADR-029).
+
 Its own endpoints live under `server.framework_path` (`/j`), namespaced away from
 `server.api_path` (`/api`) so the framework can never collide with a route you wanted.
 They come in groups, each configured under `server.endpoints.<group>`:
@@ -497,13 +503,13 @@ reads every key to list; see above.)
 | Crate | Ring | Role |
 |---|---|---|
 | `jenny` | — | facade: feature-gated re-exports |
-| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal` + `PrincipalKind`, `Urn`, `Context`, `Store`, `Blobs`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), the inbound extensions (`InboundEvent`, `EventCaller`, `RestoredCaller`), the outbound ports, `Memory`, `MemoryBlobs`, tasks, `service!()` |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal` + `PrincipalKind`, `Urn`, `Context`, `Store`, `Blobs`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), the inbound extensions (`InboundEvent`, `EventCaller`, `RestoredCaller`), the outbound ports, `Lease` + `HeldLease` + `TaskLease`, `Memory`, `MemoryBlobs`, `MemoryLease`, tasks (`per_replica`, `with_lease`), `service!()` |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
 | `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` + `JetStreamConsumer` and the inbound `Handler` dispatch (driving), the `Nats` connection (`NatsConnectionConfig`: TLS, credentials), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL, Apache AGE graphs (`graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
-| `jenny-server` | composition root | runtime, the service identity, config, the framework's endpoint groups (`server.endpoints`) on the API or a management listener (`server.management`), hosting; `events()` with configured headers, bus handlers (`handle`), JetStream consumers, tasks and handlers as system principals (`with_authorizer`); the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
+| `jenny-server` | composition root | runtime, the service identity, config, the framework's endpoint groups (`server.endpoints`) on the API or a management listener (`server.management`), hosting; `events()` with configured headers, bus handlers (`handle`), JetStream consumers, tasks and handlers as system principals (`with_authorizer`), task leases (`tasks.lease`, `lease()`); the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 
@@ -606,7 +612,6 @@ design is open for discussion, and each one lists its open questions.
 | [ADR-025](docs/adr/ADR-025-scopes-and-delegated-policies.md) | resource scopes and delegated Cedar policies | ADR-011, ADR-024 |
 | [ADR-026](docs/adr/ADR-026-observability-day-two.md) | meters, framework instrumentation, log modes | ADR-008 |
 | [ADR-027](docs/adr/ADR-027-container-image-and-helm-chart.md) | a container image and Helm charts from the scaffold | ADR-009, ADR-020 |
-| [ADR-029](docs/adr/ADR-029-clustered-deployments.md), step 1 | leases, so a scheduled task runs once, not once per replica | ADR-007 |
 | **After day 2** | | |
 | [ADR-028](docs/adr/ADR-028-rust-frontends-with-dioxus.md) | Rust frontends with Dioxus, and a typed `jenny-client` | most of the above |
 | [ADR-030](docs/adr/ADR-030-server-side-wasm-components.md) | server-side WebAssembly components | ADR-023, ADR-025 |
@@ -614,8 +619,8 @@ design is open for discussion, and each one lists its open questions.
 | [ADR-029](docs/adr/ADR-029-clustered-deployments.md) | clustered deployments: Raft-replicated state, then several services | everything |
 
 The day-2 work goes in this order (ADR-031, authenticating to NATS, ADR-032, enriched
-event headers, and ADR-020, the management listener, are built): ADR-026 with ADR-029's
-leases, then
+event headers, ADR-020, the management listener, and ADR-029's step 1, leases so a
+scheduled task runs once per slot rather than once per replica, are built): ADR-026, then
 ADR-023 (its key-algorithm policy first), then ADR-027, ADR-024 and ADR-025, and finally
 ADR-021 and ADR-022.
 
