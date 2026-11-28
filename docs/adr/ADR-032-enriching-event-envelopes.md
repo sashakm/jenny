@@ -1,7 +1,7 @@
 # ADR-032: Enriching Event Envelopes with Context
 
-**Status:** Proposed
-**Date:** 2026-11-25
+**Status:** Accepted — implemented
+**Date:** 2026-11-25 (accepted 2026-11-28)
 
 ## Context
 
@@ -32,7 +32,7 @@ between the use case and the write. After `insert_raising` or `save_raising` the
 is in the outbox, and the relay replays it later with no `Context`, keeping its id so
 that a consumer can recognise a duplicate (ADR-016).
 
-## Proposal
+## Decision
 
 ### Enrichers run where the envelope meets the `Context`
 
@@ -45,13 +45,16 @@ that a consumer can recognise a duplicate (ADR-016).
 
 An enricher is registered on `Events`, which every raising path already goes through:
 `change(…).raising(&events, cx)`, `add(…).raising(&events, cx)` and `Events::publish`.
-`Change` and `RaisingAdd` apply the enrichers between `envelopes(cx)` and the store's
-`*_raising` call. The outbox therefore stores the enriched envelope, and a replay
-carries the same headers as the first delivery.
+`RaisingChange` (with `announcing_changes`) and `RaisingAdd` apply the enrichers between
+`envelopes(cx)` and the store's `*_raising` call, in registration order. The outbox
+therefore stores the enriched envelope, and a replay carries the same headers, under the
+same id, as the first delivery. `Events::deliver`, which hands on what a store returns
+unsent, does not enrich: those envelopes were enriched when they were encoded.
 
 `JennyServer::events()` returns that `Events`, carrying the enrichers turned on in
-configuration (below), instead of the bare `Arc<dyn EventPublisher>`. `main` adds its
-own:
+configuration (below), instead of the bare `Arc<dyn EventPublisher>`; the outbox relay
+keeps the raw bus, so a replay is never enriched twice. `main` adds its own after the
+configured ones:
 
 ```rust,ignore
 let events = server.events()?             // with what `messaging.events.headers` turns on
@@ -99,11 +102,12 @@ one on whose behalf a call is made. The **actor** (the `act` claim) is the party
 making it, when that is someone else: a backend for frontend, or a service calling
 another with a token exchanged for the user's. The built-in `Caller` enricher writes both:
 
-- `caller-subject`: the principal's id (`Principal::id`). That is a token's `sub`, an
-  API key's owner, or the id a client certificate maps to.
-- `caller-actor`: `act.sub` from the principal's `act` attribute, only when there is
-  one. Without `act` the subject acted itself, and RFC 8693 reads an absent `act` the
-  same way.
+- `caller-subject`: `Principal::subject`. For a user that is its id: a token's `sub`, an
+  API key's owner, or the id a client certificate maps to. For the service itself, a
+  system principal (ADR-033), it is `System[<service>/<component>]`.
+- `caller-actor`: `act.sub` from the principal's `act` attribute, only when `act` is an
+  object with a string `sub`. Without `act` the subject acted itself, and RFC 8693 reads
+  an absent `act` the same way.
 
 Only the outermost `act` is carried. RFC 8693 treats nested `act` claims, the earlier
 actors in a chain, as informational, and says they must not be used for access control.
@@ -117,10 +121,10 @@ schema, `act` is a record attribute like any other, and has to be declared to re
 The names have a `caller-` prefix because a NATS message already has a subject: its
 routing address. A bare `subject` header next to it would be misread.
 
-`Caller` writes nothing when there is no principal. That covers an unauthenticated
-request, a scheduled task (whose `Context` has none), and an event raised during
-inbound dispatch of an unauthenticated message (below). The headers only ever describe
-an authenticated caller.
+`Caller` writes nothing when there is no principal, as for an unauthenticated request.
+Scheduled tasks and inbound handlers do have one now, the service itself (ADR-033), so
+what they raise names `System[<service>/tasks]` or `System[<service>/events]`, or the
+restored caller under the `envelope` policy (below).
 
 ### Off until configured
 
@@ -139,9 +143,9 @@ messaging:
       source: true    # source-service, source-version
 ```
 
-- `Source` writes the service name and version. The runtime knows both, but
-  `with_version` usually comes after `events()` in `main`, so `Source` reads them when an
-  event is raised, not when it is built.
+- `Source` writes the service name and version, which it reads when it is built:
+  `jenny::service!()` gives the runtime both before anything is wired (ADR-033), so no
+  lazy lookup is needed. A value that is empty is left out.
 - ADR-026's trace context becomes one more entry, writing `traceparent` and
   `tracestate`, instead of a mechanism of its own.
 
@@ -151,18 +155,44 @@ The built-ins are also public types (`Caller`, `Source`), for a service that wir
 The header names are constants in `jenny_core::port`, so a consumer written against
 jenny does not spell them. They are a contract, like the payload.
 
-### Inbound: restored only over an authenticated connection
+### Inbound: who a handler runs as
 
-When inbound dispatch lands (ADR-006), it builds the consumer's `Context` from the
-message, and the correlation id from `correlation-id`. It restores `caller-subject` and
-`caller-actor` only when the consumer's NATS connection is authenticated (ADR-031). Over
-an anonymous connection anyone could have published the message, so the headers are
-dropped and the `Context` has no caller.
+Inbound dispatch (ADR-006) builds the consumer's `Context` from the message: the request
+id from `correlation-id` when it is a UUID, an `InboundEvent` (id, name, occurred-at,
+delivery attempt) for idempotency, and the server's authorizer.
+
+**The caller headers are trusted only over a trusted transport.** The in-process bus is
+always trusted: only this process writes to it. A JetStream consumer trusts them when the
+NATS server required the service to authenticate (`auth_required` in its `INFO`,
+`Nats::is_authenticated`), because it then requires every publisher to authenticate too.
+Over an anonymous connection anyone could have published the message, so the headers are
+dropped. A trusted caller is attached as an `EventCaller { subject, actor }` extension.
 
 An authenticated connection still says less than an authenticated request. NATS knows
 who published, and the consumer only knows that NATS let them. The headers are therefore
 as trustworthy as the NATS permissions on the subject, and an operator who relies on them
 restricts who may publish there.
+
+**The open question, answered.** Whether a restored caller becomes the consumer's
+`Principal` is a per-subscription policy, `messaging.inbound.principal` (and its
+`subscriptions` overrides):
+
+- `system`, the default: the handler runs as the service itself,
+  `System[<service>/events]` (ADR-033). The caller is only a value in the context
+  (`EventCaller`), so a header is never mistaken for a verified credential.
+- `envelope`: the handler runs as a `User` with the id in `caller-subject`, and
+  `act: { sub: caller-actor }` when there is one, so the consumer's policies apply to the
+  user the event was raised for, and what it raises carries the same subject and actor
+  on: a delegated chain survives a hop. It carries no other attributes and no roles, so
+  role-based policies deny it, and a `RestoredCaller` marker in the context stands in for
+  ADR-024's provenance until that exists. It falls back to the system principal when
+  there is no `caller-subject`, or when the subject has the system form `System[…]`: the
+  service itself is never restored from a header. `envelope` on a JetStream subscription
+  over an anonymous connection is a startup error naming the subscription.
+
+A restored principal is a thin user plus a marker rather than a third `PrincipalKind`,
+because the kind is about who the principal is, and provenance (how much we believe it)
+is ADR-024's question.
 
 ### Alternatives considered
 
@@ -179,19 +209,13 @@ restricts who may publish there.
   it has no `Context`, and events committed through the outbox arrive there long after
   the request.
 
-## Open questions
-
-- Does a restored caller become the consumer's `Principal`, so that the consumer's Cedar
-  policies apply to the user the event was raised for? Or is it a value of its own in
-  the `Context`, so that a header is never mistaken for a verified credential? The answer
-  meets ADR-024's provenance: a principal restored from a header would be a third kind,
-  next to credentials and claims.
-
 ## Consequences
 
 - Who triggered an event, and on whose behalf, reaches every listener and every consumer
   of the stream without changing a domain event or a use case.
 - ADR-026's trace context and ADR-024's attributes get a place to go.
+- A consumer can run under the policies of the user an event was raised for, opt-in, and
+  never as a system principal named in a header.
 - `JennyServer::events()` returns `Events` instead of `Arc<dyn EventPublisher>`:
   breaking. The scaffold and the example drop their `Events::new(…)`.
 - Header names become part of a service's event contract, and need the same care for

@@ -9,13 +9,13 @@ changes are fine, and removing a low-value feature beats adapting it.
 | Crate | Ring | Holds |
 |---|---|---|
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
-| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Store`/`StoreExt`, `Blobs`, `Events`, outbound ports, `Memory` + `Queryable`, `MemoryBlobs`, tasks |
+| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Principal` + `PrincipalKind` (users and `System[…]`), `Store`/`StoreExt`, `Blobs`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), the inbound extensions `InboundEvent`/`EventCaller`/`RestoredCaller`, outbound ports, `Memory` + `Queryable`, `MemoryBlobs`, tasks, `service!()` |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
-| `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsConnectionConfig` (`messaging.nats`: TLS, credentials), `Nats` (the one connection, its credential-file watcher) + `NatsKv` key-value store, `NatsGateway` (from `Nats::gateway` or a client of your own), `MessagingAdapter` (declaration only) |
+| `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsConnectionConfig` (`messaging.nats`: TLS, credentials), `Nats` (the one connection, its credential-file watcher) + `NatsKv` key-value store, `NatsGateway` (from `Nats::gateway` or a client of your own), `MessagingAdapter` (`.stream`, `.on`), the inbound dispatch core (`inbound::Handler`, `Dispatcher`, `BusHandler`) and `consumer::JetStreamConsumer` (ack/nak/term, dead letters, `InboundConfig`) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck`; Apache AGE `Graph` + `Cypher` (feature `graph`) |
 | `crates/jenny-objects` | driven adapter | `object_store`: `ObjectBlobs` (the `Blobs` port over S3 and compatibles, files, memory), `ObjectsConfig`, `ObjectsCheck` |
-| `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`) |
-| `crates/jenny-server` | composition root | `JennyServer`: config, telemetry, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection and its `nats_options` hook (`messaging`), the object store (`objects`), hosting, graceful shutdown |
+| `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`; system principals are `System::"…"`) |
+| `crates/jenny-server` | composition root | `JennyServer`: the service identity (`service_name`), config, telemetry, `events()` with the configured headers, bus handlers (`handle`), JetStream consumers, tasks as `System[…/tasks]`, `with_authorizer`, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection and its `nats_options` hook (`messaging`), the object store (`objects`), hosting, graceful shutdown |
 | `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
@@ -89,7 +89,15 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
   `/api/orders`; the authorization layer reads `OriginalUri` (there is a regression test).
 - **axum layers only wrap routes declared before them.** `Routes::layer` and
   `RestAdapter::layer` apply to what was mounted so far. Mount first, then layer.
-- **`service_version!()` must stay a macro**: `env!` expands where it is written.
+- **`service!()` and `service_version!()` must stay macros**: `env!` expands where it is
+  written. `from_args(jenny::service!())` is what names topics, buckets, consumers and
+  system principals.
+- **A system principal is a kind, never an id.** Only `Principal::system` makes one;
+  serde and every authenticator make users, so a `sub` of `System[…]` stays a user, and
+  inbound `envelope` never restores one. Keep it that way (ADR-033).
+- **Inbound caller headers are trusted only when the NATS server required
+  authentication** (`Nats::is_authenticated`). A closure handler takes `Context` by
+  value: stable Rust cannot prove a borrowing closure future `Send`.
 - **Generated projects are lib + bin**, because `#[path = "../src/main.rs"]` would re-root
   every `crate::` path in the included file.
 - **`#[use_cases]` wraps only `pub async fn`s** and finds the request id through a
@@ -169,11 +177,10 @@ check publishability. Details: `RELEASING.md`.
 
 ## Known gaps (not yet built, recorded in ADRs)
 
-Planned features are ADR stubs with status `Proposed` (ADR-020 to ADR-030, and ADR-032), indexed in
+Planned features are ADR stubs with status `Proposed` (ADR-020 to ADR-030), indexed in
 the README's Roadmap with the order agreed. Gaps in what is built:
 
-Messaging inbound dispatch (`MessagingAdapter` is declaration only), HTTP metrics, W3C
-trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
+HTTP metrics, W3C trace-context propagation (event headers can now carry it), JSON Merge Patch and PATCH in
 the OpenAPI document (ADR-014), events raised with a `remove` and `LISTEN/NOTIFY` for relays (ADR-016), a `migrations/`
 directory in the scaffold (ADR-015), MongoDB (deferred, ADR-013), graph writes committed with the outbox (ADR-019), Azure/GCS, streaming and multipart blobs, signed URLs with conditions, conditional blob writes jenny provides itself whatever the backend (ADR-018), watching a NATS bucket and per-key time-to-live (ADR-017), rotating NATS secrets set as values and files a `nats_options` hook reads (ADR-031), `cargo jenny new --manifest`,
 reloading Cedar policies without a restart, cursor pagination.
