@@ -79,27 +79,35 @@ impl NatsLease {
                 let failed = |what: &str, e: &dyn fmt::Display| {
                     DomainError::internal(format!("{what} NATS bucket `{}`: {e}", self.bucket))
                 };
-                match jetstream.get_key_value(&self.bucket).await {
-                    Ok(store) => {
-                        let status = store.status().await.map_err(|e| failed("reading", &e))?;
-                        if status.info.config.max_age == self.ttl {
-                            return Ok(store);
+                // The bucket's stream as it is, so only `max_age` is changed and whatever an
+                // operator set (replicas, storage, placement) stays.
+                match jetstream.get_stream(format!("KV_{}", self.bucket)).await {
+                    Ok(stream) => {
+                        let mut existing = stream.cached_info().config.clone();
+                        if existing.max_age != self.ttl {
+                            tracing::info!(
+                                bucket = self.bucket,
+                                from = ?existing.max_age,
+                                to = ?self.ttl,
+                                "setting the lease bucket's max_age to the lease ttl"
+                            );
+                            existing.max_age = self.ttl;
+                            jetstream
+                                .update_stream(&existing)
+                                .await
+                                .map_err(|e| failed("updating", &e))?;
                         }
-                        tracing::info!(
-                            bucket = self.bucket,
-                            from = ?status.info.config.max_age,
-                            to = ?self.ttl,
-                            "setting the lease bucket's max_age to the lease ttl"
-                        );
                         jetstream
-                            .update_key_value(config)
+                            .get_key_value(&self.bucket)
                             .await
-                            .map_err(|e| failed("updating", &e))
+                            .map_err(|e| failed("opening", &e))
                     }
-                    Err(_) => jetstream
+                    Err(e) if is_not_found(&e) => jetstream
                         .create_key_value(config)
                         .await
                         .map_err(|e| failed("creating", &e)),
+                    // Permissions, timeouts: reported as they are, not as a missing bucket.
+                    Err(e) => Err(failed("opening", &e)),
                 }
             })
             .await
@@ -114,6 +122,15 @@ impl NatsLease {
         }
         Ok(())
     }
+}
+
+/// Whether JetStream said the stream does not exist, rather than failing to say.
+fn is_not_found(error: &jetstream::context::GetStreamError) -> bool {
+    matches!(
+        error.kind(),
+        jetstream::context::GetStreamErrorKind::JetStream(e)
+            if e.error_code() == jetstream::ErrorCode::STREAM_NOT_FOUND
+    )
 }
 
 /// `key` as a NATS key: unreserved characters as they are, every other byte `=XX`.

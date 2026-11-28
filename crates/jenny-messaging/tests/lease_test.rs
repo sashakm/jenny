@@ -109,12 +109,27 @@ async fn nats_the_bucket_follows_the_ttl_and_refuses_longer_leases() {
         return;
     };
     let bucket = format!("leasetest_{}", uuid::Uuid::new_v4().simple());
-    let first = Fixture::in_bucket(&url, &bucket, Duration::from_secs(30)).await;
-    assert_eq!(first.max_age().await, Duration::from_secs(30));
-    first.nats.close().await;
+    // Made by an operator, with a setting of their own the lease must keep.
+    let jetstream = async_nats::jetstream::new(async_nats::connect(&url).await.unwrap());
+    jetstream
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: bucket.clone(),
+            history: 1,
+            max_age: Duration::from_secs(30),
+            storage: async_nats::jetstream::stream::StorageType::Memory,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
 
     let second = Fixture::in_bucket(&url, &bucket, TTL).await;
     assert_eq!(second.max_age().await, TTL, "max_age is updated to the ttl");
+    let stream = jetstream.get_stream(format!("KV_{bucket}")).await.unwrap();
+    assert_eq!(
+        stream.cached_info().config.storage,
+        async_nats::jetstream::stream::StorageType::Memory,
+        "nothing but max_age changes"
+    );
     let longer = second
         .lease
         .acquire("k", "one", Duration::from_secs(3))
