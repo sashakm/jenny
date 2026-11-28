@@ -1,6 +1,6 @@
 # ADR-031: Authenticating to NATS, mTLS First
 
-**Status:** Proposed
+**Status:** Accepted — implemented
 **Date:** 2026-11-25
 
 ## Context
@@ -39,16 +39,27 @@ jenny. This ADR covers jenny proving who it is to NATS. The two share no code: A
 lives in `jenny-security` and the runtime, this one in `jenny-messaging`, and no adapter
 crate depends on another (ADR-002).
 
-## Proposal
+## Decision
 
 ### One connection, configured once
 
 `messaging.nats` changes from a single URL into the connection's own section. The runtime
 builds one client from it, and the key-value stores and the gateway share that client.
 `NatsConfig` is removed. Its `stream` belongs to the gateway, and its `consumer` to
-inbound dispatch, which is not built (ADR-006). `NatsGateway::new` already takes a
-`Client`, and gets the one from `JennyServer::nats()`. Today a service that uses both
-opens two connections, and only one of them comes from configuration.
+inbound dispatch, which is not built (ADR-006). Before this, a service that used both
+opened two connections, and only one of them came from configuration.
+
+The gateway is built from the `Nats` handle that `JennyServer::nats()` returns:
+`nats.gateway(stream, subscription)`. Wiring is synchronous and the connection is
+opened in `bind`, so there is no connected `Client` to hand over while wiring; the
+gateway takes the shared client on its first publish. `NatsGateway::new(Client, …)`
+stays, for a service that brings a client of its own.
+
+The section is `NatsConnectionConfig` in `jenny-messaging`
+(`jenny_messaging::connection`), as `PostgresConfig` lives with its adapter, and
+`jenny-server`'s `messaging.nats` holds it. `NatsConnectionConfig::connect_options`
+turns it into `async_nats::ConnectOptions`, a pure function the tests check without a
+server.
 
 ```yaml
 messaging:
@@ -81,8 +92,17 @@ the common operator-mode setup. Validation at startup:
 - `cert` without `key`, or `key` without `cert`, is an error;
 - more than one entry under `auth` is an error, because a server uses only one, and a
   silently ignored secret is a bug that is hard to find;
+- `user` without `password`, or `password` without `user`, is an error; the two count
+  as one entry;
+- every URL in the list must parse, and there must be one;
+- `refresh_interval` is at least one second;
 - `tls` asks for TLS on every server in the list and on every reconnect, even when a URL
-  says `nats://`. async-nats does that when any TLS option is set.
+  says `nats://`. A `tls` section that is present but empty does too, for a server whose
+  certificate the system's roots already trust.
+
+`ConfigSource::server_config` validates the section when the configuration is loaded,
+and `Nats` again before it connects, for a configuration built in code. Every mistake is
+reported at once, naming the keys at fault.
 
 The secrets (`nkey`, `password`, `token`) are redacted in `Debug`, as
 `BasicAuthConfig`'s password is, because the configuration is logged at startup. They
@@ -100,12 +120,14 @@ An open connection keeps the credentials it was opened with until it reconnects,
 nothing makes it reconnect until a server restarts or the network fails. So jenny
 watches the files and calls `Client::force_reconnect` when they change:
 
-- It watches the way the API-key store already does (`ApiKeyAuthContextConfig`): it
+- It watches the way the API-key store already does (`ApiKeyAuthContextConfig`): a task
+  (`jenny_messaging::rotation`), started once the connection is made,
   polls each file's modification time and length on an interval
   (`messaging.nats.refresh_interval`, in seconds, as for API keys; default 30). The metadata follows
   symlinks, so it also sees Kubernetes swapping a secret mount's `..data` link.
 - It reconnects only when the new files are complete: the certificate and key parse and
-  belong together, and the `.creds` file holds a JWT and a seed. cert-manager writes the
+  belong together (rustls' `CertifiedKey`, already in the tree through async-nats), the
+  CA parses, and the `.creds` file holds a JWT and a seed. cert-manager writes the
   certificate and the key separately, and a reconnect between the two writes would fail
   its handshake. Files that do not pass are logged and checked again on the next poll,
   and the open connection stays as it is.
@@ -119,11 +141,11 @@ from somewhere else, such as Vault, a cloud secret manager or a sidecar's socket
 service can adjust the options itself:
 
 ```rust,ignore
-server.nats_options(|options: ConnectOptions| {
+server.nats_options(move |options: ConnectOptions| {
     ConnectOptions::with_auth_callback(|nonce| vault::nats_auth(nonce))
         .require_tls(true)
         .add_client_certificate(cert.clone(), key.clone())
-});
+})?;
 let nats = server.nats();
 ```
 
@@ -132,15 +154,32 @@ with. It may extend them or replace them. Replacing them is the only way to set 
 callback, because async-nats offers that only as a constructor. It must be called before
 `nats()`. Calling it afterwards is a wiring error, in the same way that
 `accept_json_patch()` must precede `mount()`. File watching applies only to files that
-the section names.
+the section names. The hook is an `Fn`, run again before each attempt at the first
+connection, because a failed attempt consumes the options it was given.
 
 ### Failures are loud
 
-Today the first connect happens in `bind`, and only when a bucket was registered
-(ADR-017). With one shared connection, `bind` connects whenever `messaging.nats` is
-configured. An authorisation failure stops the service there with the server's reason,
-rather than starting with a broker it cannot use. Later, the `nats` readiness check reports a
-connection that has lost its authorisation as not ready.
+The first connect used to happen in `bind`, and only when a bucket was registered
+(ADR-017). With one shared connection, `bind` connects whenever `messaging.nats.url` is
+set, even if `nats()` was never called, and registers the `nats` readiness check. An
+authentication or authorisation failure stops the service there with the server's
+reason (a TLS alert such as `CertificateRequired` or `UnknownCA`, or the server's
+`authorization violation`), rather than starting with a broker it cannot use. Later, the `nats` readiness
+check reports anything but `Connected` as not ready, which includes a connection that
+has lost its authorisation and is trying again.
+
+At shutdown, `Nats::close` stops the watcher and drains the connection after the broker
+has stopped, since its listeners (a gateway among them) may still be publishing; the
+order is HTTP drain, outbox relay, broker, NATS, Postgres pool.
+
+### The scaffold's development NATS stays plain
+
+The scaffold's `compose.yaml` (ADR-009) runs NATS without TLS, and a generated project
+gets no certificates: generating and trusting a CA is more than a first `just up`
+should ask for. Its `config.yaml` shows the `tls` and `auth` keys, commented out. TLS
+is exercised by jenny's own tests instead: `scripts/nats-test-certs.sh` writes a CA,
+a server certificate, two client certificates mapped to one user and one from another
+CA, and `just test-nats` and CI start a second NATS with `verify_and_map` from them.
 
 ### Alternatives considered
 
@@ -161,15 +200,12 @@ connection that has lost its authorisation as not ready.
   user with both sets of permissions is simpler. A service that really needs two accounts
   can build a client of its own and pass it to `NatsGateway::new`.
 
-## Open questions
-
-- Should the scaffold's development NATS (ADR-009) run with TLS, so that the path is
-  exercised from day one?
-
 ## Consequences
 
 - A service can reach a NATS that refuses anonymous clients.
-- `NatsConfig` is removed, and the gateway takes the runtime's client: breaking.
+- `NatsConfig` is removed, and the gateway takes the runtime's connection: breaking.
+  `Nats::new` takes a `NatsConnectionConfig` instead of a URL, and `NatsGateway::ctx`
+  is async, because a gateway from the `Nats` handle connects on first use.
 - `async_nats::ConnectOptions` becomes part of `jenny-server`'s public API through
   `nats_options`, as `async_nats::Client` already is of `jenny-messaging`'s, so a new
   async-nats major is a breaking change.
@@ -179,5 +215,13 @@ connection that has lost its authorisation as not ready.
   makes headers on its events as trustworthy as the account that publishes them, which
   ADR-032 relies on.
 - `just test-nats` needs a second NATS, with TLS and `verify_and_map`, and certificates
-  generated for the test; CI starts it the same way.
+  generated for the test (`JENNY_TEST_NATS_TLS_URL`, `JENNY_TEST_NATS_TLS_DIR`); CI
+  starts it the same way.
 - The scaffold's configuration template gains a commented `tls`/`auth` block.
+
+## Not built yet
+
+- Secrets set as values (`nkey`, `password`, `token`) come from the environment at
+  startup and change only with a restart; only files rotate.
+- Files a `nats_options` hook reads are not watched; a hook that needs rotation forces
+  its own reconnect.

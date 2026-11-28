@@ -22,9 +22,11 @@
 //!   `graph` feature, its AGE graphs) created and its readiness checked before the
 //!   socket is bound; with `outbox: true`, the relay that
 //!   forwards committed events to the bus, until shutdown.
-//! - **NATS key-value buckets** — with `messaging`, a connection from `messaging.nats.url`
-//!   ([`JennyServer::nats`]), its buckets opened and its readiness checked before the
-//!   socket is bound.
+//! - **NATS** — with `messaging`, one connection from `messaging.nats`
+//!   ([`JennyServer::nats`]): plain, TLS or mTLS, with `.creds`, an NKey, a user and
+//!   password or a token, adjusted by [`JennyServer::nats_options`]. Whenever a URL is
+//!   configured it connects before the socket is bound, opens the key-value buckets and
+//!   checks its readiness; a rotated certificate or `.creds` file reconnects it.
 //! - **An object store** — with `objects`, blobs from `objects.url`
 //!   ([`JennyServer::objects`]), its bucket's readiness checked.
 //! - **Hosting** — every registered adapter merged into one router, with graceful shutdown.
@@ -62,8 +64,8 @@ pub use config::PersistenceConfig;
 pub use config::{
     BasicAuthConfig, ConfigSource, DEFAULT_BODY_LIMIT, DEFAULT_CONFIG_PATH, DEFAULT_ENV_PREFIX,
     DEFAULT_EVENT_BUFFER, DEFAULT_EVENT_NAMESPACE, DEFAULT_FRAMEWORK_PATH,
-    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig, MessagingConfig, MetricsConfig, NatsSection,
-    ServerArgs, ServerConfig,
+    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, HttpConfig, MessagingConfig, MetricsConfig, ServerArgs,
+    ServerConfig,
 };
 pub use context::ServerContext;
 pub use health::{CheckReport, FRAMEWORK_VERSION, HealthCheck, HealthRegistry, Reachable};

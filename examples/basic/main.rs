@@ -32,6 +32,10 @@
 //!   --config-path examples/basic/config.yaml
 //! ```
 //!
+//! A NATS that wants a client certificate or credentials takes them under
+//! `messaging.nats.tls` and `messaging.nats.auth` (`JENNY__MESSAGING__NATS__TLS__CERT`, …);
+//! nothing in this file changes, as the runtime builds the connection.
+//!
 //! Attachments stay in memory too, unless the `objects` feature and an `objects.url` put
 //! them elsewhere — a directory is enough to try it, an S3 bucket in production:
 //!
@@ -127,7 +131,8 @@ const QUERYABLE: [(&str, ValueKind); 3] = [
 
 /// Where notes live, from configuration: Postgres when `persistence.postgres.url` is set
 /// (with the `persistence` feature), else a NATS key-value bucket when
-/// `messaging.nats.url` is (with `messaging`), else memory.
+/// `messaging.nats.url` is (with `messaging`; TLS and credentials come from the rest of
+/// `messaging.nats`), else memory.
 ///
 /// One line each, because a store needs nothing but the aggregate's serde derives and
 /// every store takes the same allowlist; the runtime prepares the table or the bucket

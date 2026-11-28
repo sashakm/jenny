@@ -1,6 +1,6 @@
 # ADR-007: The Server Runtime and Composition Root
 
-**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it prepares the NATS key-value buckets and checks the connection before binding (ADR-017); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `server`, `telemetry`, `messaging`, `persistence` and `objects`
+**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `server`, `telemetry`, `messaging`, `persistence` and `objects`
 **Date:** 2026-08-24
 
 ## Context

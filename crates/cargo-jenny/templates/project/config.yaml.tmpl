@@ -30,9 +30,23 @@ telemetry:
 
 messaging:
   buffer_size: 64
-  # A JetStream key-value store for aggregates (`server.nats()`); compose.yaml starts one.
+  # The service's NATS connection: key-value stores (`server.nats()`) and the gateway
+  # (`nats.gateway(…)`) share it. With `url` set the runtime connects at startup;
+  # compose.yaml starts a NATS.
   # nats:
   #   url: nats://localhost:4222
+  #   # A production NATS usually wants TLS and credentials. Paths are read again at
+  #   # each connect, and a rotated certificate or .creds file reconnects the service.
+  #   refresh_interval: 30            # seconds between looks at the files below
+  #   tls:                            # present, even empty: TLS on every server
+  #     ca: /etc/nats-tls/ca.crt      # default: the system's roots
+  #     cert: /etc/nats-tls/tls.crt   # client certificate, for mTLS
+  #     key: /etc/nats-tls/tls.key
+  #   auth:                           # at most one of:
+  #     creds: /etc/nats/service.creds  # user JWT + NKey seed
+  #     # nkey: …                     # JENNY__MESSAGING__NATS__AUTH__NKEY
+  #     # user: {{project_snake}}     # with JENNY__MESSAGING__NATS__AUTH__PASSWORD
+  #     # token: …                    # JENNY__MESSAGING__NATS__AUTH__TOKEN
 {{/if}}
 {{#if persistence}}
 

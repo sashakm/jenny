@@ -290,6 +290,38 @@ JetStream enabled (`nats-server -js`), `server.nats()` hands out a connection an
 server starts. Versions, conditional writes and listings behave exactly as in memory —
 listing reads every key, so it suits hundreds of aggregates, not millions.
 
+That connection is the service's only one: `nats.gateway("my-notes", "my-notes.>")`
+forwards events to JetStream over it, with the same credentials. `messaging.nats`
+secures it and says who the service is (ADR-031): a client certificate first, or a
+`.creds` file, an NKey, a user and password, or a token.
+
+```yaml
+messaging:
+  nats:
+    url: tls://nats-1:4222,tls://nats-2:4222
+    refresh_interval: 30              # seconds between looks at the files below
+    tls:                              # present, even empty: TLS on every server
+      ca: /etc/nats-tls/ca.crt        # default: the system's roots
+      cert: /etc/nats-tls/tls.crt     # mTLS; the server maps the subject to a user
+      key: /etc/nats-tls/tls.key
+      # handshake_first: true         # for a server with `handshake_first`
+      # server_name: nats.internal    # when the URL names an IP address
+    auth:                             # at most one of:
+      creds: /etc/nats/service.creds  # user JWT + NKey seed
+      # nkey: …                       # JENNY__MESSAGING__NATS__AUTH__NKEY
+      # user: notes                   # with password: JENNY__MESSAGING__NATS__AUTH__PASSWORD
+      # token: …                      # JENNY__MESSAGING__NATS__AUTH__TOKEN
+```
+
+Certificates, keys and `.creds` are paths, read again at each connect. The runtime
+looks at them every `refresh_interval` seconds and reconnects once a rotated set is
+complete — the key belongs to the certificate, the `.creds` file holds a seed — so
+cert-manager can renew them under a running service. Whenever `url` is set, the runtime
+connects before it binds, so a server that refuses the service stops it at startup with
+the server's reason. For credentials from elsewhere (Vault, a sidecar),
+`server.nats_options(|options| …)` adjusts or replaces the `ConnectOptions` before
+`server.nats()`.
+
 Files are not aggregates, so they have a port of their own: `Blobs` — put (also only
 if absent, or only if unchanged since an entity tag), get, list by path, delete, and
 signed URLs that let a browser upload or download directly. With the `objects` feature,
@@ -372,7 +404,7 @@ Its own endpoints live under `server.framework_path` (`/j`), namespaced away fro
 `/j/health/status` reports the framework version, your service's version (pass
 `jenny::service_version!()`), and a check per dependency. The runtime registers checks
 for what it owns — the OTLP endpoint, the in-process bus, the Postgres pool it built from
-`persistence.postgres`, the NATS connection from `messaging.nats.url`, the object store
+`persistence.postgres`, the NATS connection from `messaging.nats`, the object store
 from `objects.url`. A pool you build yourself is one line:
 
 ```rust,ignore
@@ -445,11 +477,11 @@ reads every key to list; see above.)
 | `jenny` | — | facade: feature-gated re-exports |
 | `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Validate`, `Principal`, `Urn`, `Context`, `Store`, `Blobs`, `Events`, the outbound ports, `Memory`, `MemoryBlobs`, tasks |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter`, `Routes`, `Problem`, auth layers |
-| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), NATS gateway, `NatsKv` store |
+| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter` (driving), the `Nats` connection (`NatsConnectionConfig`: TLS, credentials), NATS gateway, `NatsKv` store |
 | `jenny-persistence` | driven adapter | Postgres: `Postgres` pool, `PgDocuments` and `PgTable` stores, `OutboxRelay`, criteria to SQL, Apache AGE graphs (`graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: `Blobs` over S3 and compatibles, local files or memory |
 | `jenny-security` | driven adapter | JWT/API-key authentication, Cedar authorization |
-| `jenny-server` | composition root | runtime, config, health, hosting |
+| `jenny-server` | composition root | runtime, config, health, hosting; the Postgres pool, the NATS connection (`nats_options`) and the object store it builds |
 | `jenny-macros` | — | `Dto`, `QueryFormat`, `Aggregate`, `DomainEvent`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` scaffolding |
 
@@ -521,7 +553,6 @@ design is open for discussion, and each one lists its open questions.
 | ADR | What | Builds on |
 |---|---|---|
 | **Day 2** | | |
-| [ADR-031](docs/adr/ADR-031-authenticating-to-nats.md) | authenticating to NATS: mTLS first, then `.creds`, NKeys, passwords and tokens | ADR-006, ADR-017 |
 | [ADR-032](docs/adr/ADR-032-enriching-event-envelopes.md) | event headers filled from the request's `Context`, such as the caller's subject and actor (RFC 8693) | ADR-006, ADR-016 |
 | [ADR-020](docs/adr/ADR-020-management-interface.md) | `/j` on a management listener of its own; each endpoint group configurable | ADR-007 |
 | [ADR-021](docs/adr/ADR-021-protobuf-contracts.md) | Rust-first protobuf contracts from `#[derive(Dto)]`, over gRPC, binary HTTP and JSON | ADR-005, ADR-011 |
@@ -538,7 +569,8 @@ design is open for discussion, and each one lists its open questions.
 | **Milestone 3.0** | | |
 | [ADR-029](docs/adr/ADR-029-clustered-deployments.md) | clustered deployments: Raft-replicated state, then several services | everything |
 
-The day-2 work goes in this order: ADR-031 and ADR-032, then ADR-020, then ADR-026 with ADR-029's leases, then
+The day-2 work goes in this order: ADR-032 (ADR-031, authenticating to NATS, is built),
+then ADR-020, then ADR-026 with ADR-029's leases, then
 ADR-023 (its key-algorithm policy first), then ADR-027, ADR-024 and ADR-025, and finally
 ADR-021 and ADR-022.
 

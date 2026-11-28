@@ -3,7 +3,8 @@
 # `server`, `telemetry` and (with their features) `messaging`, `persistence` and
 # `objects` are the only sections the jenny runtime interprets. Notes are kept in memory unless
 # `persistence.postgres.url` is set — best through JENNY__PERSISTENCE__POSTGRES__URL,
-# since it carries the password — or `messaging.nats.url` (JENNY__MESSAGING__NATS__URL).
+# since it carries the password — or `messaging.nats.url` (JENNY__MESSAGING__NATS__URL;
+# `messaging.nats.tls` and `.auth` secure that connection, see ADR-031).
 # Attachments are kept in memory unless `objects.url` is set (with the `objects`
 # feature): `s3://bucket/prefix` with the standard AWS_* variables, or `file:///dir`.
 # Links between notes are kept in memory unless the `graph` feature is on and
