@@ -9,7 +9,7 @@
 //! | [`domain`] | the hexagon itself | `domain/`, `application/`, adapters, composition root |
 //! | [`port`] | the boundary — ports are traits | `domain/`, `application/`, adapters, composition root |
 //! | [`task`] | clock-driven inbound adapter | adapters, composition root |
-//! | [`memory`] | in-memory store and blob store, driven adapters, and `Queryable`, the criteria evaluator | tests, composition root, other stores |
+//! | [`memory`] | in-memory store, blob store and lease, driven adapters, and `Queryable`, the criteria evaluator | tests, composition root, other stores |
 //! | [`testing`] | test doubles for the shipped ports | tests |
 //!
 //! Nothing in [`domain`] or [`port`] pulls in a database driver, an HTTP or gRPC

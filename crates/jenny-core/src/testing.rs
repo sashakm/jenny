@@ -66,3 +66,97 @@ impl EventPublisher for RecordedEvents {
         Ok(())
     }
 }
+
+/// The contract every [`Lease`](crate::port::Lease) keeps, as one function each adapter's
+/// tests call against its backend. Not API: it panics on the first broken rule.
+#[doc(hidden)]
+pub mod lease {
+    use std::time::Duration;
+
+    use crate::port::Lease;
+
+    /// Check `lease` with leases of `ttl`, waiting `ttl + settle` for one to expire.
+    /// Every key starts with `prefix`, so runs against a shared backend do not meet.
+    ///
+    /// `settle` covers the backend's expiry granularity; with `tokio::time::pause` and
+    /// [`MemoryLease`](crate::memory::MemoryLease), zero will do.
+    pub async fn conformance(lease: &dyn Lease, ttl: Duration, settle: Duration, prefix: &str) {
+        let a = format!("{prefix}/a");
+        let b = format!("{prefix}/b");
+        let c = format!("{prefix}/c weird key: *>.");
+
+        // Acquire, and contention, from someone else and from the holder itself.
+        let held_a = lease
+            .acquire(&a, "one", ttl)
+            .await
+            .unwrap()
+            .expect("a free key is acquired");
+        assert_eq!(held_a.key(), a);
+        assert_eq!(held_a.holder(), "one");
+        assert!(lease.acquire(&a, "two", ttl).await.unwrap().is_none());
+        assert!(
+            lease.acquire(&a, "one", ttl).await.unwrap().is_none(),
+            "a held key is refused to its own holder too"
+        );
+
+        // Tokens increase across keys, and stay put across a renewal.
+        let held_b = lease.acquire(&b, "one", ttl).await.unwrap().unwrap();
+        assert!(
+            held_b.token() > held_a.token(),
+            "tokens increase across keys"
+        );
+        let token_a = held_a.token();
+        assert!(
+            lease.renew(&held_a, ttl).await.unwrap(),
+            "a held lease renews"
+        );
+        assert_eq!(held_a.token(), token_a);
+
+        // Release frees the key at once, for a larger token.
+        let token_b = held_b.token();
+        lease.release(held_b).await.unwrap();
+        let again_b = lease
+            .acquire(&b, "two", ttl)
+            .await
+            .unwrap()
+            .expect("a released key is free");
+        assert!(again_b.token() > token_b);
+
+        // Any key the backend is given works, whatever characters it has.
+        let held_c = lease
+            .acquire(&c, "one", ttl)
+            .await
+            .unwrap()
+            .expect("keys are free strings");
+
+        // Expiry: a takeover with a larger token, and the old holder told it lost.
+        tokio::time::sleep(ttl + settle).await;
+        let taken = lease
+            .acquire(&a, "two", ttl)
+            .await
+            .unwrap()
+            .expect("an expired lease can be taken over");
+        assert!(taken.token() > again_b.token());
+        assert!(
+            !lease.renew(&held_a, ttl).await.unwrap(),
+            "a lease taken over does not renew"
+        );
+        assert!(
+            !lease.renew(&held_c, ttl).await.unwrap(),
+            "an expired lease does not renew, even untaken"
+        );
+
+        // Releasing a lost lease leaves the new holder alone.
+        lease.release(held_a).await.unwrap();
+        assert!(
+            lease.acquire(&a, "three", ttl).await.unwrap().is_none(),
+            "the new holder still holds it"
+        );
+        assert!(lease.renew(&taken, ttl).await.unwrap());
+
+        // Leave nothing behind.
+        lease.release(taken).await.unwrap();
+        lease.release(again_b).await.unwrap();
+        lease.release(held_c).await.unwrap();
+    }
+}

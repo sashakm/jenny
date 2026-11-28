@@ -5,7 +5,7 @@
 //! - [`use_case`] — the **driving** side. The outside world calls in. A use case is a
 //!   method on a plain struct; a REST handler, a message consumer or a scheduled task
 //!   is a driving adapter that calls it.
-//! - [`store`], [`blobs`], [`events`] and [`outbound`] — the **driven** side. The application
+//! - [`store`], [`blobs`], [`events`], [`lease`] and [`outbound`] — the **driven** side. The application
 //!   calls out. A store, an event publisher, a token verifier: the trait is owned by
 //!   the inside, the implementation lives in a driven adapter.
 //!
@@ -34,6 +34,7 @@ pub mod context;
 pub mod events;
 pub mod headers;
 pub mod inbound;
+pub mod lease;
 pub mod outbound;
 pub mod store;
 pub mod use_case;
@@ -50,6 +51,8 @@ pub use headers::{
 };
 #[doc(inline)]
 pub use inbound::{EventCaller, InboundEvent, RestoredCaller};
+#[doc(inline)]
+pub use lease::{HeldLease, Lease, TaskLease};
 #[doc(inline)]
 pub use outbound::{
     AccessRequest, Authenticator, Authorizer, EventEnvelope, EventPublisher, HealthCheck,
