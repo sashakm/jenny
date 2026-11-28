@@ -144,7 +144,11 @@ struct Recording(Arc<Slots>);
 #[async_trait]
 impl Task for Recording {
     async fn execute(&self, cx: &Context) -> anyhow::Result<()> {
-        self.0.0.lock().unwrap().push(cx.get::<TaskLease>().cloned());
+        self.0
+            .0
+            .lock()
+            .unwrap()
+            .push(cx.get::<TaskLease>().cloned());
         Ok(())
     }
 }

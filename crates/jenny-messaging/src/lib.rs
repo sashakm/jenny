@@ -5,6 +5,7 @@
 //! | [`eventbus`] | driven | [`EventBus`] — the in-process bus behind the [`EventPublisher`] port |
 //! | [`connection`] | driven | [`NatsConnectionConfig`] — the `messaging.nats` section: servers, TLS, credentials |
 //! | [`kv`] | driven | [`Nats`](kv::Nats) — the one connection, shared — and [`NatsKv`](kv::NatsKv), a [`Store`](jenny_core::port::Store) over a JetStream key-value bucket |
+//! | [`lease`] | driven | [`NatsLease`](lease::NatsLease) — the [`Lease`](jenny_core::port::Lease) port over a key-value bucket, `jenny_leases` (ADR-029) |
 //! | [`nats`] | driven | [`NatsGateway`](nats::NatsGateway) — a bus listener that forwards events to JetStream |
 //! | [`subscription`] | driving | [`MessagingAdapter`] — the subjects this service consumes from JetStream, and their handlers |
 //! | [`inbound`] | driving | the dispatch core: a received event becomes a [`Context`](jenny_core::port::Context) and a typed [`Handler`](inbound::Handler) call |
@@ -54,6 +55,7 @@ pub mod eventbus;
 pub mod health;
 pub mod inbound;
 pub mod kv;
+pub mod lease;
 pub mod nats;
 mod rotation;
 
