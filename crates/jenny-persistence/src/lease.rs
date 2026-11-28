@@ -19,10 +19,15 @@ pub(crate) const TABLE: &str = "CREATE TABLE IF NOT EXISTS jenny_leases (
 )";
 
 /// Takes a free or expired key, sweeping what expired over a minute ago on the way so
-/// the table does not keep a row per slot forever. A conflict whose `WHERE` fails
-/// updates nothing and returns no row: the key is held.
+/// the table does not keep a row per slot forever. The sweep skips rows another
+/// transaction has locked, so two acquires never deadlock over it. A conflict whose
+/// `WHERE` fails updates nothing and returns no row: the key is held.
 const ACQUIRE: &str = "WITH swept AS (
-    DELETE FROM jenny_leases WHERE expires_at < now() - interval '1 minute' AND key <> $1
+    DELETE FROM jenny_leases WHERE key IN (
+        SELECT key FROM jenny_leases
+        WHERE expires_at < now() - interval '1 minute' AND key <> $1
+        FOR UPDATE SKIP LOCKED
+    )
 )
 INSERT INTO jenny_leases (key, holder, token, expires_at)
 VALUES ($1, $2, nextval('jenny_lease_tokens'), now() + make_interval(secs => $3))
