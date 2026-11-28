@@ -21,16 +21,16 @@ name and a shape.
 ```rust,ignore
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut server = JennyServer::from_args()?;                   // config + telemetry
+    let mut server = JennyServer::from_args(jenny::service!())?;  // config + telemetry
 
     let store = Arc::new(Memory::<Note>::new());                  // driven adapter
-    let events = Events::new(server.events()?);                   // the in-process bus
+    let events = server.events()?;                                // the in-process bus
     let notes = Notes::new(store.clone(), events);                // application
 
     let rest = RestAdapter::new("my-notes")?                      // driving adapter
         .mount(adapter::inbound::rest::routes(notes))?;
 
-    server.with_version(jenny::service_version!())
+    server
         .register(rest)?
         .register_health_check(DatabaseCheck::new("notes-db", pool))
         .run()

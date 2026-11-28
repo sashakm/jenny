@@ -168,6 +168,10 @@ NATS server required the service to authenticate (`auth_required` in its `INFO`,
 Over an anonymous connection anyone could have published the message, so the headers are
 dropped. A trusted caller is attached as an `EventCaller { subject, actor }` extension.
 
+A server with `no_auth_user` reports that it requires authentication but accepts
+anonymous clients as that user; give that user no publish permission where caller headers
+are trusted.
+
 An authenticated connection still says less than an authenticated request. NATS knows
 who published, and the consumer only knows that NATS let them. The headers are therefore
 as trustworthy as the NATS permissions on the subject, and an operator who relies on them
