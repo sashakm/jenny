@@ -2,6 +2,7 @@
 //! work that has to happen before a service serves.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ use crate::documents::PgDocuments;
 #[cfg(feature = "graph")]
 use crate::graph::Graph;
 use crate::health::DatabaseCheck;
+use crate::lease::{self, PgLease};
 use crate::outbox::{self, OutboxRelay, OutboxState};
 use crate::table::{PgTable, TableShape};
 
@@ -47,7 +49,7 @@ pub struct PostgresConfig {
     pub min_connections: u32,
     /// How long a query waits for a free connection before failing. Defaults to 5.
     pub acquire_timeout_seconds: u64,
-    /// Create the tables document stores need, and the outbox's, if they are missing,
+    /// Create the tables document stores need, the outbox's and the leases', if they are missing,
     /// before serving — and, with the `graph` feature, the AGE extension and every
     /// graph handed out. Defaults to `true`; turn it off where the schema is owned by
     /// migrations alone, and create them from [`PgDocuments::schema`],
@@ -117,6 +119,8 @@ struct Inner {
     shapes: Mutex<Vec<Arc<TableShape>>>,
     migrator: Mutex<Option<Arc<Migrator>>>,
     outbox: Arc<OutboxState>,
+    /// Whether a lease was handed out, so `jenny_leases` is created.
+    leases: AtomicBool,
     /// Every graph handed out, created or checked before serving.
     #[cfg(feature = "graph")]
     graphs: Mutex<Vec<Graph>>,
@@ -154,6 +158,7 @@ impl Postgres {
                 shapes: Mutex::new(Vec::new()),
                 migrator: Mutex::new(None),
                 outbox: Arc::default(),
+                leases: AtomicBool::new(false),
                 #[cfg(feature = "graph")]
                 graphs: Mutex::new(Vec::new()),
             }),
@@ -249,6 +254,21 @@ impl Postgres {
         outbox::SCHEMA
     }
 
+    /// Leases in the table `jenny_leases`, which [`prepare`](Self::prepare) creates, with
+    /// the sequence `jenny_lease_tokens`, when `create_tables` is on. The runtime uses it
+    /// for `tasks.lease.backend: postgres`; a service may use it for leader election of
+    /// its own. See [`PgLease`].
+    pub fn lease(&self) -> PgLease {
+        self.inner.leases.store(true, Ordering::Release);
+        PgLease::new(self.inner.pool.clone())
+    }
+
+    /// The `CREATE SEQUENCE` and `CREATE TABLE` for leases, for a migration of your own
+    /// when `create_tables` is off.
+    pub fn lease_schema() -> String {
+        format!("{};\n{};\n", lease::SEQUENCE, lease::TABLE)
+    }
+
     /// Run these migrations in [`prepare`](Self::prepare), before any table is created.
     ///
     /// Pass `sqlx::migrate!()`, which embeds the `migrations/` directory of the crate
@@ -317,6 +337,10 @@ impl Postgres {
             .clone();
         if self.has_outbox() {
             tables.push(outbox::SCHEMA.to_string());
+        }
+        if self.inner.leases.load(Ordering::Acquire) {
+            tables.push(lease::SEQUENCE.to_string());
+            tables.push(lease::TABLE.to_string());
         }
         if tables.is_empty() {
             return Ok(());
