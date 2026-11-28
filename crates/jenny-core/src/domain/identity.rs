@@ -60,22 +60,98 @@ impl Display for Credentials {
     }
 }
 
+/// Which kind of identity a [`Principal`] is.
+///
+/// The kind is not part of the id, because an id is a string any credential can carry:
+/// a JWT whose `sub` is `System[my-notes/tasks]` is still a user. Policy engines see the
+/// kind as a separate entity type (`User`, `System` in Cedar), which no token can forge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PrincipalKind {
+    /// Someone or something that authenticated: a token's subject, an API key's owner,
+    /// or a caller restored from an event. Every authenticator builds these.
+    #[default]
+    User,
+    /// The service itself, acting on its own: a scheduled task, an inbound event
+    /// handler. Only [`Principal::system`] builds one.
+    System,
+}
+
 /// An identity interacting with the service.
 ///
 /// Carries a stable `id` plus whatever else the authenticating adapter knew — JWT
 /// claims, API-key metadata, tenant assignments. Domain code reads attributes by name
 /// and type; nothing forces a shape on them.
+///
+/// It also has a [`kind`](Self::kind): a [`User`](PrincipalKind::User), as every
+/// authenticator and [`PrincipalBuilder`] builds, or the service itself
+/// ([`Principal::system`]). The kind is never serialised or deserialised, so a stored
+/// API-key record or a JWT always yields a user.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Principal {
     #[serde(alias = "sub")]
     #[serde(alias = "user_id")]
     #[serde(alias = "userId")]
     id: String,
+    #[serde(skip)]
+    kind: PrincipalKind,
     #[serde(default, flatten)]
     attributes: HashMap<String, Value>,
 }
 
 impl Principal {
+    /// The service acting on its own, as `component`: `"tasks"` for scheduled tasks,
+    /// `"events"` for inbound event handlers.
+    ///
+    /// Its [`id`](Self::id) is `<service>/<component>` and it displays as
+    /// `System[<service>/<component>]`, which is also what an event it raises carries as
+    /// `caller-subject`. Cedar addresses it as `System::"<service>/<component>"`.
+    ///
+    /// ```
+    /// use jenny_core::domain::{Principal, PrincipalKind};
+    ///
+    /// let tasks = Principal::system("my-notes", "tasks");
+    /// assert_eq!(tasks.kind(), PrincipalKind::System);
+    /// assert_eq!(tasks.id(), "my-notes/tasks");
+    /// assert_eq!(tasks.to_string(), "System[my-notes/tasks]");
+    /// ```
+    pub fn system(service: impl AsRef<str>, component: impl AsRef<str>) -> Self {
+        Self {
+            id: format!("{}/{}", service.as_ref(), component.as_ref()),
+            kind: PrincipalKind::System,
+            attributes: HashMap::new(),
+        }
+    }
+
+    /// Replace the principal's [`roles`](Self::roles). The runtime gives system
+    /// principals the roles configured under `system.roles`.
+    pub fn with_roles(mut self, roles: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let roles: Vec<String> = roles.into_iter().map(Into::into).collect();
+        self.attributes.remove("groups");
+        self.attributes
+            .insert("roles".to_string(), Value::from(roles));
+        self
+    }
+
+    /// Whether this is a user or the service itself.
+    pub fn kind(&self) -> PrincipalKind {
+        self.kind
+    }
+
+    /// `true` for the service acting on its own ([`Principal::system`]).
+    pub fn is_system(&self) -> bool {
+        self.kind == PrincipalKind::System
+    }
+
+    /// How the principal is named as the caller of something, such as in an event's
+    /// `caller-subject` header: the [`id`](Self::id) of a user, `System[<id>]` for the
+    /// service itself.
+    pub fn subject(&self) -> String {
+        match self.kind {
+            PrincipalKind::User => self.id.clone(),
+            PrincipalKind::System => format!("System[{}]", self.id),
+        }
+    }
+
     /// The (ideally unique) identifier of this identity.
     pub fn id(&self) -> &str {
         &self.id
@@ -130,6 +206,9 @@ impl Principal {
 
 impl Display for Principal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_system() {
+            return write!(f, "System[{}]", self.id);
+        }
         let name: String = self
             .attribute("name")
             .or_else(|| self.attribute("preferred_username"))
@@ -174,9 +253,12 @@ impl PrincipalBuilder {
         self
     }
 
+    /// Always a [`User`](PrincipalKind::User): only [`Principal::system`] makes the
+    /// service itself.
     pub fn build(self) -> Principal {
         Principal {
             id: self.id,
+            kind: PrincipalKind::User,
             attributes: self.attributes,
         }
     }
@@ -225,6 +307,46 @@ mod tests {
         assert_eq!(both.roles(), vec!["Admin".to_string()]);
 
         assert!(Principal::builder("d").build().roles().is_empty());
+    }
+
+    #[test]
+    fn a_system_principal_is_its_own_kind() {
+        let system = Principal::system("my-notes", "tasks");
+        assert!(system.is_system());
+        assert_eq!(system.id(), "my-notes/tasks");
+        assert_eq!(system.subject(), "System[my-notes/tasks]");
+        assert_eq!(system.to_string(), "System[my-notes/tasks]");
+        assert!(system.roles().is_empty());
+
+        let with_roles = system.with_roles(["Maintenance"]);
+        assert!(with_roles.has_role("Maintenance"));
+        assert!(with_roles.is_system());
+
+        // The same id, built as anything else, is a user.
+        let forged = Principal::builder("my-notes/tasks").build();
+        assert_eq!(forged.kind(), PrincipalKind::User);
+        assert_ne!(forged, Principal::system("my-notes", "tasks"));
+        assert_eq!(forged.subject(), "my-notes/tasks");
+    }
+
+    #[test]
+    fn deserialising_always_yields_a_user() {
+        // Whatever a token or a stored record claims.
+        let principal: Principal = serde_json::from_value(serde_json::json!({
+            "sub": "System[my-notes/tasks]",
+            "kind": "System",
+        }))
+        .unwrap();
+        assert_eq!(principal.kind(), PrincipalKind::User);
+        assert_eq!(principal.subject(), "System[my-notes/tasks]");
+        assert_eq!(
+            principal.raw_attribute("kind"),
+            Some(&serde_json::json!("System"))
+        );
+
+        // And a system principal serialises without its kind.
+        let json = serde_json::to_value(Principal::system("my-notes", "tasks")).unwrap();
+        assert_eq!(json, serde_json::json!({ "id": "my-notes/tasks" }));
     }
 
     #[test]

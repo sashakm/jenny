@@ -120,8 +120,8 @@ pub use jenny_core::testing;
 #[doc(no_inline)]
 pub use jenny_core::domain::{
     Aggregate, AuthenticationError, AuthorizationError, Changes, Credentials, Criteria,
-    DomainError, DomainEvent, DomainResult, Label, Principal, PrincipalBuilder, Urn, Validate,
-    ValidationErrors, ValidationIssue,
+    DomainError, DomainEvent, DomainResult, Label, Principal, PrincipalBuilder, PrincipalKind, Urn,
+    Validate, ValidationErrors, ValidationIssue,
 };
 #[doc(no_inline)]
 pub use jenny_core::port::{
