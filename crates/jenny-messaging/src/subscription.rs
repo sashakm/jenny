@@ -1,17 +1,19 @@
-//! Driving messaging adapter — **declaration only**.
+//! Driving messaging adapter: the subjects a service consumes from JetStream, and the
+//! handlers it consumes them with.
 //!
-//! [`MessagingAdapter`] is the messaging counterpart to `jenny-rest`'s `RestAdapter`:
-//! a named driving adapter that says which subjects this service consumes. Registering
-//! one with the runtime records and logs those subjects.
-//!
-//! The dispatch path — consume a message, build a [`Context`], convert the payload
-//! into a domain command, invoke a use case, ack or nack — is not implemented yet.
-//! When it is, it lands here without the shape below changing: the declaration is
-//! already the right thing to hang a handler off.
+//! [`MessagingAdapter`] is the messaging counterpart to `jenny-rest`'s `RestAdapter`: a
+//! named driving adapter. [`on`](MessagingAdapter::on) binds a subject to a
+//! [`Handler`](crate::inbound::Handler); registered with the runtime, the adapter gets a
+//! durable pull consumer on its [`stream`](MessagingAdapter::stream), and every message
+//! is turned into a [`Context`] and a call of the handler, then acked, nak'd or
+//! terminated ([`consumer`](crate::consumer)). [`subscribe`](MessagingAdapter::subscribe)
+//! only declares a subject, for `/health/status`.
 //!
 //! [`Context`]: jenny_core::port::Context
 
 use jenny_core::domain::Urn;
+
+use crate::inbound::{Dispatch, IntoHandler};
 
 /// One subject this service consumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,15 +43,28 @@ impl SubjectBinding {
 /// subject it declares.
 ///
 /// ```
+/// use jenny_core::domain::DomainError;
+/// use jenny_core::port::Context;
 /// use jenny_messaging::{MessagingAdapter, SubjectBinding};
+///
+/// #[derive(serde::Deserialize)]
+/// struct OrderCreated { id: u32 }
 ///
 /// let adapter = MessagingAdapter::new("my-shop", "shop")?
 ///     .describe("order lifecycle events")
-///     .subscribe(SubjectBinding::new("orders.created").with_description("a new order"))
-///     .subscribe(SubjectBinding::new("orders.cancelled"));
+///     .stream("SHOP")
+///     .on(
+///         SubjectBinding::new("orders.created").with_description("a new order"),
+///         |order: OrderCreated, cx: Context| async move {
+///             tracing::info!(order = order.id, request_id = %cx.request_id(), "order created");
+///             Ok::<(), DomainError>(())
+///         },
+///     )
+///     .subscribe(SubjectBinding::new("orders.cancelled")); // declared, not consumed
 ///
 /// assert_eq!(adapter.urn().to_string(), "urn:my-shop");
 /// assert_eq!(adapter.subjects()[0].subject, "shop.orders.created");
+/// assert_eq!(adapter.handlers().len(), 1);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 #[derive(Clone, Debug)]
@@ -57,7 +72,8 @@ pub struct MessagingAdapter {
     urn: Urn,
     prefix: String,
     description: Option<String>,
-    subjects: Vec<SubjectBinding>,
+    stream: Option<String>,
+    subjects: Vec<(SubjectBinding, Option<Dispatch>)>,
 }
 
 impl MessagingAdapter {
@@ -67,6 +83,7 @@ impl MessagingAdapter {
             urn: Urn::root(name)?,
             prefix: subject_prefix.into(),
             description: None,
+            stream: None,
             subjects: Vec::new(),
         })
     }
@@ -76,9 +93,25 @@ impl MessagingAdapter {
         self
     }
 
-    /// Declare a subject, which will be prefixed with this adapter's subject prefix.
+    /// The JetStream stream the adapter consumes from. It must exist: jenny creates the
+    /// consumer on it, never the stream.
+    pub fn stream(mut self, name: impl Into<String>) -> Self {
+        self.stream = Some(name.into());
+        self
+    }
+
+    /// Declare a subject without consuming it, prefixed with this adapter's subject
+    /// prefix. It is listed in `/health/status`.
     pub fn subscribe(mut self, binding: SubjectBinding) -> Self {
-        self.subjects.push(binding);
+        self.subjects.push((binding, None));
+        self
+    }
+
+    /// Consume a subject (prefixed, and NATS wildcards allowed) with `handler`: a
+    /// [`Handler`](crate::inbound::Handler) or a closure `Fn(M, Context) -> impl Future`.
+    /// The payload is decoded as JSON into `M`.
+    pub fn on<M, K>(mut self, binding: SubjectBinding, handler: impl IntoHandler<M, K>) -> Self {
+        self.subjects.push((binding, Some(Dispatch::new(handler))));
         self
     }
 
@@ -99,15 +132,40 @@ impl MessagingAdapter {
         &self.prefix
     }
 
-    /// Every declared subject, fully prefixed.
+    /// The stream given to [`stream`](Self::stream).
+    pub fn stream_name(&self) -> Option<&str> {
+        self.stream.as_deref()
+    }
+
+    /// Every declared or handled subject, fully prefixed.
     pub fn subjects(&self) -> Vec<SubjectBinding> {
         self.subjects
             .iter()
-            .map(|binding| SubjectBinding {
-                subject: format!("{}.{}", self.prefix, binding.subject),
+            .map(|(binding, _)| SubjectBinding {
+                subject: self.full(&binding.subject),
                 description: binding.description.clone(),
             })
             .collect()
+    }
+
+    /// Every handled subject, fully prefixed, with its handler.
+    pub fn handlers(&self) -> Vec<(String, Dispatch)> {
+        self.subjects
+            .iter()
+            .filter_map(|(binding, dispatch)| {
+                dispatch
+                    .clone()
+                    .map(|dispatch| (self.full(&binding.subject), dispatch))
+            })
+            .collect()
+    }
+
+    fn full(&self, subject: &str) -> String {
+        if self.prefix.is_empty() {
+            subject.to_string()
+        } else {
+            format!("{}.{subject}", self.prefix)
+        }
     }
 }
 
