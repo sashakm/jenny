@@ -2132,6 +2132,78 @@ mod tests {
     }
 
     #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn a_jetstream_handler_over_nats_consumes_and_is_listed_in_status() {
+        use jenny_core::domain::DomainError;
+        use jenny_core::port::Context;
+        use jenny_messaging::{MessagingAdapter, SubjectBinding};
+
+        let Some(url) = nats_url() else {
+            return;
+        };
+        let prefix = format!("srv{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+        let stream = prefix.to_uppercase();
+        let client = async_nats::connect(&url).await.unwrap();
+        let jetstream = async_nats::jetstream::new(client);
+        jetstream
+            .create_stream(async_nats::jetstream::stream::Config {
+                name: stream.clone(),
+                subjects: vec![format!("{prefix}.>")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = MessagingAdapter::new("orders", &prefix)
+            .unwrap()
+            .stream(&stream)
+            .on(
+                SubjectBinding::new("orders.created"),
+                move |order: serde_json::Value, cx: Context| {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx.send((order, cx.principal().map(ToString::to_string)));
+                        Ok::<(), DomainError>(())
+                    }
+                },
+            );
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.nats.url = Some(url);
+        let parts = server.register_messaging(adapter).bind().await.unwrap();
+        let router = parts.router.clone();
+        let handle = parts.handle();
+        let serving = tokio::spawn(parts.serve());
+
+        jetstream
+            .publish(format!("{prefix}.orders.created"), r#"{"id":1}"#.into())
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        let (order, principal) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(order, serde_json::json!({ "id": 1 }));
+        assert_eq!(principal.as_deref(), Some("System[test-service/events]"));
+
+        let (_, body) = call(router, "/j/health/status").await;
+        let consumer = &body["consumers"][0];
+        assert_eq!(consumer["name"], "test-service-orders");
+        assert_eq!(consumer["stream"], stream);
+        assert_eq!(
+            consumer["filter_subjects"][0],
+            format!("{prefix}.orders.created")
+        );
+        assert!(consumer["pending"].is_u64(), "{consumer}");
+
+        handle.shutdown();
+        serving.await.unwrap().unwrap();
+        jetstream.delete_stream(&stream).await.unwrap();
+    }
+
+    #[cfg(feature = "messaging")]
     fn nats_url() -> Option<String> {
         match std::env::var("JENNY_TEST_NATS_URL") {
             Ok(url) => Some(url),
