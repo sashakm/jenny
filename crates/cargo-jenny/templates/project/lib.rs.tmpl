@@ -16,7 +16,10 @@ pub mod domain;
 use std::sync::Arc;
 
 use anyhow::Result;
+{{#if messaging}}
+{{else}}
 use jenny::Events;
+{{/if}}
 use jenny::domain::ValueKind;
 use jenny::memory::Memory;
 {{#if objects}}
