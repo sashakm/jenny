@@ -41,6 +41,7 @@ pub use event::DomainEvent;
 #[doc(inline)]
 pub use identity::{
     AuthenticationError, AuthorizationError, Credentials, Principal, PrincipalBuilder,
+    PrincipalKind,
 };
 #[doc(inline)]
 pub use label::{Label, Urn};
