@@ -11,14 +11,14 @@
 //! | Path | Ring | Contents |
 //! |---|---|---|
 //! | [`jenny::domain`](domain) | the hexagon | [`Aggregate`], [`DomainError`], [`DomainEvent`], [`Changes`], [`Validate`], [`Principal`], [`Urn`] |
-//! | [`jenny::port`](port) | the boundary | [`Store`], [`Blobs`](port::Blobs), [`Events`] with [`Headers`](port::Headers)/[`Enrich`](port::Enrich) ([`Caller`](port::Caller), [`Source`](port::Source)), [`Context`] and its inbound extensions ([`InboundEvent`](port::InboundEvent), [`EventCaller`](port::EventCaller)), [`EventPublisher`], [`Authenticator`], [`Authorizer`] |
+//! | [`jenny::port`](port) | the boundary | [`Store`], [`Blobs`](port::Blobs), [`Events`] with [`Headers`](port::Headers)/[`Enrich`](port::Enrich) ([`Caller`](port::Caller), [`Source`](port::Source)), [`Context`] and its inbound extensions ([`InboundEvent`](port::InboundEvent), [`EventCaller`](port::EventCaller)), [`EventPublisher`], [`Authenticator`], [`Authorizer`], [`Lease`] with its [`TaskLease`] |
 //! | `jenny::rest` | driving adapter | `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Versioned`/`IfMatch` — axum/tower |
-//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` with `inbound` handlers and `consumer::JetStreamConsumer` (driving), `kv::Nats` connection (TLS, credentials) with its `kv::NatsKv` store and `NatsGateway` |
+//! | `jenny::messaging` | both sides | `EventBus` (driven), `MessagingAdapter` with `inbound` handlers and `consumer::JetStreamConsumer` (driving), `kv::Nats` connection (TLS, credentials) with its `kv::NatsKv` store, `lease::NatsLease` and `NatsGateway` |
 //! | `jenny::objects` | driven adapter | `ObjectBlobs` over S3 and compatibles, files or memory; `ObjectsConfig` |
-//! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck`; with `graph`, Apache AGE's `Graph` |
+//! | `jenny::persistence` | driven adapter | Postgres/sqlx: `Postgres`, `PgDocuments`, `PgTable`, `PgLease`, `OutboxRelay`, criteria to SQL, `QueryFormat`, `DatabaseCheck`; with `graph`, Apache AGE's `Graph` |
 //! | `jenny::security` | driven adapter | JWT/API-key authentication, Cedar authorization |
-//! | [`jenny::task`](task) | driving adapter | the clock: [`Task`](task::Task), [`ScheduledTask`](task::ScheduledTask) |
-//! | [`jenny::memory`](memory) | driven adapter | [`Memory`](memory::Memory), an in-memory [`Store`]; [`MemoryBlobs`](memory::MemoryBlobs), in-memory [`Blobs`](port::Blobs); and [`Queryable`](memory::Queryable), the criteria evaluator it shares with the NATS store |
+//! | [`jenny::task`](task) | driving adapter | the clock: [`Task`](task::Task), [`ScheduledTask`](task::ScheduledTask) (`per_replica`), [`TaskScheduler`](task::TaskScheduler) (`with_lease`) |
+//! | [`jenny::memory`](memory) | driven adapter | [`Memory`](memory::Memory), an in-memory [`Store`]; [`MemoryBlobs`](memory::MemoryBlobs), in-memory [`Blobs`](port::Blobs); [`MemoryLease`](memory::MemoryLease), an in-memory [`Lease`]; and [`Queryable`](memory::Queryable), the criteria evaluator it shares with the NATS store |
 //! | [`jenny::testing`](testing) | tests | [`RecordedEvents`](testing::RecordedEvents) |
 //! | `jenny::server` | composition root | the `JennyServer` runtime, and `jenny::server::telemetry` (logs, traces, metrics) |
 //!
@@ -126,7 +126,7 @@ pub use jenny_core::domain::{
 #[doc(no_inline)]
 pub use jenny_core::port::{
     AccessRequest, Authenticator, Authorizer, Changed, Context, EventEnvelope, EventPublisher,
-    Events, Loaded, PublishError, Resource, Store, StoreExt, Version,
+    Events, Lease, Loaded, PublishError, Resource, Store, StoreExt, TaskLease, Version,
 };
 
 // Adapters and the runtime, behind their features.
