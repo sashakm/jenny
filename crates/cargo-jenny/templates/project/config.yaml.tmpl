@@ -33,7 +33,7 @@ server:
   # swagger, public_status): enabled, listener (api | management), path, log_requests.
   # Probes, status and metrics are not access-logged unless log_requests is true.
   # endpoints:
-  #   swagger: { enabled: false }
+  #   swagger: { enabled: true }  # with the swagger-ui feature; off by default, goes where openapi is
   #   # {"status": "up" | "degraded" | "down"}, nothing else: fit for the public.
   #   public_status: { enabled: true, listener: api, path: /status }
   #   metrics:

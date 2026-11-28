@@ -169,7 +169,11 @@ pub(crate) fn resolve(
         if !config.enabled {
             continue;
         }
-        let listener = listener_of(group)?;
+        // Unset, Swagger UI goes where its document is.
+        let listener = match (group, config.listener) {
+            (Group::Swagger, None) => listener_of(Group::Openapi)?,
+            _ => listener_of(group)?,
+        };
         let path = match config.path.as_deref() {
             Some(path) => {
                 // axum reads these as parameters, or panics on them.
@@ -208,17 +212,20 @@ pub(crate) fn resolve(
         ));
     }
 
-    // Swagger UI loads the document from the `openapi` group, so it needs that group
-    // served, and served where the browser that loaded the UI can reach it.
+    // Swagger UI loads the document from the `openapi` group, so it follows that group:
+    // off when it is off, and where it is unless placed explicitly, which then has to
+    // be the same listener.
     if available.swagger
         && let Some((_, swagger)) = placements.iter().find(|(g, _)| *g == Group::Swagger)
     {
         match placements.iter().find(|(g, _)| *g == Group::Openapi) {
-            None => anyhow::bail!(
-                "`server.endpoints.swagger` is enabled but `server.endpoints.openapi` is not: \
-                 Swagger UI loads the document from it. Disable `swagger` too, or enable \
-                 `openapi`"
-            ),
+            None => {
+                tracing::warn!(
+                    "`server.endpoints.swagger` is enabled but `server.endpoints.openapi` is \
+                     not; Swagger UI is not served, as it loads the document from there"
+                );
+                placements.retain(|(g, _)| *g != Group::Swagger);
+            }
             Some((_, openapi)) if openapi.listener != swagger.listener => anyhow::bail!(
                 "`server.endpoints.swagger.listener` is `{}` but \
                  `server.endpoints.openapi.listener` is `{}`: Swagger UI loads the \
@@ -400,10 +407,7 @@ mod tests {
             layout.get(Group::Openapi),
             Some(&placed(Api, "/j/openapi.json", true))
         );
-        assert_eq!(
-            layout.get(Group::Swagger),
-            Some(&placed(Api, "/j/swagger", true))
-        );
+        assert_eq!(layout.get(Group::Swagger), None, "off by default");
         assert_eq!(layout.get(Group::PublicStatus), None, "off by default");
     }
 
@@ -498,7 +502,7 @@ mod tests {
 
     #[test]
     fn a_route_under_another_groups_prefix_is_refused() {
-        let mut server = HttpConfig::default();
+        let mut server = with_swagger(HttpConfig::default());
         server.endpoints.metrics.endpoint.path = Some("/j/swagger/metrics".into());
         let err = resolve(&server, EVERYTHING, &[]).unwrap_err().to_string();
         assert!(err.contains("`server.endpoints.metrics.path`"), "{err}");
@@ -545,18 +549,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn swagger_needs_the_openapi_group_beside_it() {
-        let mut server = HttpConfig::default();
-        server.endpoints.openapi.enabled = false;
-        let err = resolve(&server, EVERYTHING, &[]).unwrap_err().to_string();
-        assert!(err.contains("`server.endpoints.swagger`"), "{err}");
-        assert!(err.contains("`server.endpoints.openapi`"), "{err}");
-        server.endpoints.swagger.enabled = false;
-        assert!(resolve(&server, EVERYTHING, &[]).is_ok());
+    /// Every group's defaults, Swagger UI switched on.
+    fn with_swagger(mut server: HttpConfig) -> HttpConfig {
+        server.endpoints.swagger.enabled = true;
+        server
+    }
 
-        let mut server = managed();
+    #[test]
+    fn swagger_is_off_until_enabled() {
+        let layout = resolve(&HttpConfig::default(), EVERYTHING, &[]).unwrap();
+        assert!(layout.get(Group::Swagger).is_none());
+    }
+
+    #[test]
+    fn swagger_follows_the_openapi_group() {
+        // Off while `openapi` is off, without stopping the service.
+        let mut server = with_swagger(HttpConfig::default());
+        server.endpoints.openapi.enabled = false;
+        let layout = resolve(&server, EVERYTHING, &[]).unwrap();
+        assert!(layout.get(Group::Swagger).is_none());
+        assert!(layout.get(Group::Openapi).is_none());
+
+        // On `openapi`'s listener unless given one.
+        let mut server = with_swagger(managed());
         server.endpoints.openapi.listener = Some(Listener::Api);
+        let layout = resolve(&server, EVERYTHING, &[]).unwrap();
+        assert_eq!(layout.get(Group::Swagger).unwrap().listener, Listener::Api);
+        assert_eq!(
+            resolve(&with_swagger(managed()), EVERYTHING, &[])
+                .unwrap()
+                .get(Group::Swagger)
+                .unwrap()
+                .listener,
+            Listener::Management
+        );
+
+        // Given another one explicitly, it could not load the document.
+        server.endpoints.swagger.listener = Some(Listener::Management);
         let err = resolve(&server, EVERYTHING, &[]).unwrap_err().to_string();
         assert!(err.contains("`server.endpoints.swagger.listener`"), "{err}");
         assert!(
@@ -564,14 +593,17 @@ mod tests {
             "{err}"
         );
 
-        // Without `swagger-ui` compiled in there is no UI to configure.
-        let mut server = HttpConfig::default();
-        server.endpoints.openapi.enabled = false;
+        // Without `swagger-ui` compiled in there is no UI to place.
         let without_ui = Available {
             swagger: false,
             ..EVERYTHING
         };
-        assert!(resolve(&server, without_ui, &[]).is_ok());
+        assert!(
+            resolve(&server, without_ui, &[])
+                .unwrap()
+                .get(Group::Swagger)
+                .is_none()
+        );
     }
 
     #[test]
@@ -589,7 +621,7 @@ mod tests {
 
     #[test]
     fn swagger_cannot_take_the_root() {
-        let mut server = HttpConfig::default();
+        let mut server = with_swagger(HttpConfig::default());
         server.endpoints.swagger.path = Some("/".into());
         let err = resolve(&server, EVERYTHING, &[]).unwrap_err().to_string();
         assert!(

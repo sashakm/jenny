@@ -59,11 +59,12 @@ ends up broken in exactly one environment, and every tool takes a path.
 | `status` | `<fp>/health/status`: versions, every check, its timing and error | true | false |
 | `metrics` | `<fp>/metrics`, the Prometheus scrape | true (with `telemetry-prometheus`) | false |
 | `openapi` | `<fp>/openapi.json` | true (with `openapi`, when an adapter supplies a document) | true |
-| `swagger` | `<fp>/swagger`, Swagger UI | true (with `swagger-ui`) | true |
+| `swagger` | `<fp>/swagger`, Swagger UI | **false**; follows `openapi` (with `swagger-ui`) | true |
 | `public_status` | `<fp>/health/public`: `up`, `degraded` or `down` | **false** | false |
 
 `<fp>` is `server.framework_path`. Without `management` every group defaults to the API
-listener; with it, to the management listener.
+listener; with it, to the management listener. `swagger` is the exception: unset, it goes
+wherever `openapi` is.
 
 ```yaml
 server:
@@ -71,7 +72,7 @@ server:
     address: "[::]:8081"
   endpoints:
     openapi: { listener: api, path: /docs/openapi.json }
-    swagger: { enabled: false }
+    swagger: { enabled: true }   # beside the document, on the API listener
     public_status: { enabled: true, listener: api, path: /status }
     metrics:
       auth: { username: prometheus, password: change-me }
@@ -95,7 +96,7 @@ error naming the key at fault:
 - a group on `listener: management` while `server.management` is unset;
 - two routes clashing on one listener: two groups, or a group inside a REST adapter's
   mount (an adapter mounted at the root claims only its own routes);
-- `swagger` enabled while `openapi` is disabled, or the two on different listeners;
+- `swagger` placed explicitly on another listener than `openapi`;
 - a `path` with `{…}`, `*`, a `:` segment or `//`, which axum reads as a parameter or
   refuses, and `swagger` at `/`, which would claim every path.
 
@@ -109,8 +110,15 @@ configured elsewhere. Probes stay unauthenticated, as kubelet presents no creden
 
 Swagger UI is configured with the `openapi` group's URL only and no longer serves a copy
 of the document. Keeping its own copy would have meant that switching `openapi` off
-leaves the document online at a second path. Hence the startup errors above: without
-the group, or on another listener, the UI would load nothing.
+leaves the document online at a second path.
+
+So `swagger` follows `openapi`. It is off by default, even with the `swagger-ui` feature:
+a browsable UI is something a service asks for, not something it ships by accident.
+Enabled, it is served only while `openapi` is (with a warning at startup when it is not),
+and on `openapi`'s listener unless given one. An explicit listener that differs is a
+startup error, because the UI would load nothing there. Stopping the service whenever
+`openapi` is off and `swagger` is not was considered: it made switching the document off
+take two settings for no gain.
 
 ### No access log for probes and scrapes, by default
 
@@ -176,6 +184,8 @@ business. An old key is now an unknown key, ignored like any other.
 - Keeping `server.metrics.auth` where it was, and a compatibility error for removed keys:
   both keep a second place to look for one group's settings, for users who do not exist.
 - Swagger UI keeping its own document copy: the document would outlive `openapi: false`.
+- Swagger UI on by default with `swagger-ui`, and a startup error when `openapi` is off
+  but `swagger` is not: see above.
 - Splitting the listener and the per-group configuration into two changes: the second
   listener's defaults only make sense with the groups.
 
@@ -187,4 +197,5 @@ business. An old key is now an unknown key, ignored like any other.
 - A probe or scrape no longer floods the access log, at the cost of having to turn
   `log_requests` on to see them.
 - Breaking: `server.health`, `server.metrics` and `telemetry.prometheus_port` give way to
-  `server.endpoints`; Swagger UI no longer serves its own copy of the document.
+  `server.endpoints`; Swagger UI no longer serves its own copy of the document, and is
+  off until `server.endpoints.swagger.enabled` turns it on.

@@ -3,11 +3,12 @@
 //! | Group | Default path | Feature | |
 //! |---|---|---|---|
 //! | `openapi` | `<framework_path>/openapi.json` | `openapi` | the document |
-//! | `swagger` | `<framework_path>/swagger` | `swagger-ui` | a browsable UI over it |
+//! | `swagger` | `<framework_path>/swagger` | `swagger-ui`, off until enabled | a browsable UI over it |
 //!
 //! Swagger UI loads the document from the `openapi` group's URL and serves no copy of
-//! its own, so switching `openapi` off really takes the document offline. That is why
-//! `swagger` needs `openapi` enabled, and on the same listener.
+//! its own, so switching `openapi` off really takes the document offline. `swagger`
+//! therefore follows `openapi`: not served while it is off, and on its listener unless
+//! given one, which must then be the same.
 //!
 //! Swagger UI's assets are compiled into the binary rather than fetched from a CDN, so
 //! the docs page works on an air-gapped cluster and behind a restrictive CSP. That

@@ -3022,6 +3022,7 @@ mod tests {
         let mut server = server_with("127.0.0.1:0");
         let endpoints = &mut server.config.server.endpoints;
         endpoints.openapi.path = Some("/docs/openapi.json".into());
+        endpoints.swagger.enabled = true;
         endpoints.swagger.path = Some("/docs/ui".into());
         let parts = server
             .register(documented_notes())
@@ -3050,14 +3051,29 @@ mod tests {
             "no copy at the old place"
         );
 
+        // Off by default, and following `openapi` when that is off.
+        let parts = server_with("127.0.0.1:0")
+            .register(documented_notes())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        assert_eq!(
+            call(parts.router.clone(), "/j/swagger/").await.0,
+            StatusCode::NOT_FOUND
+        );
         let mut server = server_with("127.0.0.1:0");
+        server.config.server.endpoints.swagger.enabled = true;
         server.config.server.endpoints.openapi.enabled = false;
-        let Err(err) = server.register(documented_notes()).unwrap().bind().await else {
-            panic!("swagger without openapi");
-        };
-        assert!(
-            err.to_string().contains("`server.endpoints.openapi`"),
-            "{err}"
+        let parts = server
+            .register(documented_notes())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        assert_eq!(
+            call(parts.router.clone(), "/j/swagger/").await.0,
+            StatusCode::NOT_FOUND
         );
     }
 }

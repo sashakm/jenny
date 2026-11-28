@@ -34,7 +34,7 @@
 //!       auth:             # optional; omit to leave the scrape endpoint open
 //!         username: prometheus
 //!         password: s3cret
-//!     swagger: { enabled: false }
+//!     swagger: { enabled: true }   # off by default; follows `openapi`
 //!     public_status: { enabled: true, listener: api, path: /status }
 //! telemetry:
 //!   log_format: pretty          # service_name and service_version default to the above
@@ -263,12 +263,12 @@ pub struct MetricsEndpointConfig {
 /// | `status` | `<framework_path>/health/status` | yes | no |
 /// | `metrics` | `<framework_path>/metrics` | with `telemetry-prometheus` | no |
 /// | `openapi` | `<framework_path>/openapi.json` | with `openapi`, when an adapter supplies a document | yes |
-/// | `swagger` | `<framework_path>/swagger` | with `swagger-ui`, beside `openapi` | yes |
+/// | `swagger` | `<framework_path>/swagger` | no, until enabled (with `swagger-ui`); follows `openapi` | yes |
 /// | `public_status` | `<framework_path>/health/public` | no, until enabled | no |
 ///
 /// Every group can be switched off and moved to either listener. `swagger` loads the
-/// document from the `openapi` group, so it needs that group enabled and on the same
-/// listener. `public_status` answers `{"status": "up" | "degraded" | "down"}` and
+/// document from the `openapi` group, so it follows it: not served while `openapi` is
+/// off, and on `openapi`'s listener unless given one, which must then be the same. `public_status` answers `{"status": "up" | "degraded" | "down"}` and
 /// nothing else, for a page the public may see; `status` names every check and its
 /// error.
 #[derive(Clone, Debug, Deserialize)]
@@ -353,7 +353,7 @@ impl From<RawEndpoints> for EndpointsConfig {
                 auth,
             },
             openapi: raw.openapi.or(EndpointConfig::new(true, true)),
-            swagger: raw.swagger.or(EndpointConfig::new(true, true)),
+            swagger: raw.swagger.or(EndpointConfig::new(false, true)),
             public_status: raw.public_status.or(EndpointConfig::new(false, false)),
         }
     }
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(endpoints.metrics.endpoint, on(false));
         assert!(endpoints.metrics.auth.is_none());
         assert_eq!(endpoints.openapi, on(true));
-        assert_eq!(endpoints.swagger, on(true));
+        assert_eq!(endpoints.swagger, EndpointConfig::new(false, true));
         assert_eq!(endpoints.public_status, EndpointConfig::new(false, false));
 
         // A management listener changes no group's settings; it only changes where an
@@ -656,7 +656,7 @@ server:
   endpoints:
     public_status: { listener: api, path: /status }
     openapi: { listener: management, path: /docs/openapi.json }
-    swagger: { enabled: false }
+    swagger: { enabled: true }
     probes: { log_requests: true }
     metrics:
       path: /scrape
@@ -681,7 +681,7 @@ server:
             Some("/docs/openapi.json")
         );
         assert!(endpoints.openapi.log_requests);
-        assert!(!endpoints.swagger.enabled);
+        assert!(endpoints.swagger.enabled);
         assert!(endpoints.swagger.log_requests);
         assert!(endpoints.probes.enabled);
         assert!(endpoints.probes.log_requests);

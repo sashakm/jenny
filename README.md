@@ -398,7 +398,7 @@ They come in groups, each configured under `server.endpoints.<group>`:
 | `status` | `GET /j/health/status` | what is mounted, both versions, every dependency's state |
 | `metrics` | `GET /j/metrics` | Prometheus scrape (`telemetry-prometheus`), optionally behind Basic auth |
 | `openapi` | `GET /j/openapi.json` | the API description (`openapi`) |
-| `swagger` | `GET /j/swagger` | a browsable UI over that document, assets compiled in (`swagger-ui`) |
+| `swagger` | `GET /j/swagger` | a browsable UI over that document, assets compiled in (`swagger-ui`); off by default, follows `openapi` |
 | `public_status` | `GET /j/health/public` | `up`, `degraded` or `down` and nothing else; off by default |
 
 Every group has `enabled`, `listener` (`api` or `management`), `path` (replacing the
@@ -415,7 +415,7 @@ server:
     address: "[::]:8081"
   endpoints:
     openapi: { listener: api, path: /docs/openapi.json }
-    swagger: { enabled: false }
+    swagger: { enabled: true }
     public_status: { enabled: true, listener: api, path: /status }
     metrics:
       auth: { username: prometheus, password: change-me }
