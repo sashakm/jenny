@@ -121,7 +121,9 @@ that happens not to define a feature by that name.
 Health, metrics and OpenAPI live under `server.framework_path` (`/j`), away from
 `server.api_path`, so the framework can never take a route the service wanted.
 
-The metrics endpoint optionally requires HTTP Basic credentials from configuration.
+The metrics endpoint optionally requires HTTP Basic credentials from configuration
+(`server.endpoints.metrics.auth`), and with ADR-020 the whole namespace can move to a
+listener of its own.
 Metrics leak more than people expect — route names, tenant counts, error rates, deploy
 times — and "only reachable from inside the cluster" stops being true at some point in
 every cluster's life. Both halves are compared in constant time against SHA-256 digests,

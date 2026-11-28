@@ -96,5 +96,5 @@ some proxies and agents only pass HTTP.
 ## Consequences
 
 - Every metric above needs a cardinality review when it is added, not after the bill.
-- `telemetry.prometheus_port` goes with ADR-020, and the `telemetry` section changes
-  shape: breaking.
+- `telemetry.prometheus_port` went with ADR-020; the `telemetry` section changes shape
+  again here: breaking.

@@ -101,7 +101,9 @@ On a signal or `ServerHandle::shutdown`:
    began; they finish the messages they are handling, beside the requests (ADR-006).
 4. All of them are bounded together by `server.shutdown_timeout_seconds` (default `30`, what
    Kubernetes waits before `SIGKILL`); what is still running then is abandoned.
-5. The broker stops (draining its listeners) and telemetry flushes.
+5. The broker stops (draining its listeners). With `server.management`, the management
+   listener closes only now, so readiness reports `stopping` throughout (ADR-020). Then
+   telemetry flushes.
 
 ### The framework's endpoints get their own prefix
 
@@ -110,6 +112,10 @@ REST adapters mount under `server.api_path`, `/api`. Two namespaces rather than 
 the framework can never claim a route the service wanted — and so an operator can move
 either without touching code. `/j` is short because it appears in every probe URL in
 every manifest.
+
+ADR-020 builds on this: each group of endpoints (probes, status, metrics, OpenAPI,
+Swagger, a public status) can be switched off, given a path of its own, and moved to a
+second, management listener (`server.management`), where `/j` keeps the same paths.
 
 ### Health is three endpoints, not one
 
@@ -155,16 +161,19 @@ does not for anything else.
 
 ### The metrics endpoint can be locked
 
-`server.metrics.auth` adds HTTP Basic authentication to the scrape endpoint. Off by
+`server.endpoints.metrics.auth` (ADR-020) adds HTTP Basic authentication to the scrape
+endpoint. Off by
 default, because in most deployments the endpoint is only reachable from inside the
 cluster; available because that stops being true at some point in every cluster's life.
 See ADR-005 for the comparison and redaction details.
 
 ### Cross-cutting layers apply to everything
 
-Body limit, tracing and the problem-shaped 404/405 fallbacks are applied above every
-route, including the fallbacks themselves, so a 404 has the same shape as any other
-failure (ADR-005).
+The body limit and the problem-shaped 404/405 fallbacks are applied above every route of
+each listener, including the fallbacks themselves, so a 404 has the same shape as any
+other failure (ADR-005). Tracing wraps the REST adapters, the fallback and every
+framework group whose `log_requests` is on; probes, status and scrapes are not traced by
+default (ADR-020).
 
 Outermost of all is `RequestIdLayer`. It keeps an inbound `x-request-id` that is a UUID
 (so a gateway's correlation id survives the hop) and mints one otherwise, then puts that

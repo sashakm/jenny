@@ -15,7 +15,7 @@ changes are fine, and removing a low-value feature beats adapting it.
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck`; Apache AGE `Graph` + `Cypher` (feature `graph`) |
 | `crates/jenny-objects` | driven adapter | `object_store`: `ObjectBlobs` (the `Blobs` port over S3 and compatibles, files, memory), `ObjectsConfig`, `ObjectsCheck` |
 | `crates/jenny-security` | driven adapter | JWT/JWKS + hashed API keys (`AuthenticationConfig`), Cedar policies (`CedarAuthorizer`; system principals are `System::"…"`) |
-| `crates/jenny-server` | composition root | `JennyServer`: the service identity (`service_name`), config, telemetry, `events()` with the configured headers, bus handlers (`handle`), JetStream consumers, tasks as `System[…/tasks]`, `with_authorizer`, health, metrics, OpenAPI, request ids, the Postgres pool (`persistence`), the NATS connection and its `nats_options` hook (`messaging`), the object store (`objects`), hosting, graceful shutdown |
+| `crates/jenny-server` | composition root | `JennyServer`: the service identity (`service_name`), config, telemetry, `events()` with the configured headers, bus handlers (`handle`), JetStream consumers, tasks as `System[…/tasks]`, `with_authorizer`, the framework's endpoint groups (health, public status, metrics, OpenAPI, Swagger: `server.endpoints`) on the API or a management listener (`server.management`), request ids, the Postgres pool (`persistence`), the NATS connection and its `nats_options` hook (`messaging`), the object store (`objects`), hosting, graceful shutdown |
 | `crates/jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `crates/cargo-jenny` | — | `cargo jenny new` / `add resource`; text templates in `templates/` |
 
@@ -148,9 +148,10 @@ Which ones a change needs is in the `verify` skill. Run `cargo fmt --all` before
 - **`/tmp` has a per-user quota** that a few scaffolded target dirs fill. Run the slow
   gates with `TMPDIR=$PWD/target/tmp` when they fail with "Disk quota exceeded".
 - **The outbox delivers at least once**, in order per relay, a moment after the request.
-  The relay starts in `bind`, stops after the HTTP drain and before the broker, the NATS
-  connection (and its credential watcher) closes after the broker, and the pool closes
-  last; keep that order. Outbox tests each use their own schema
+  The relay starts in `bind`, stops after the API's HTTP drain and before the broker, the
+  NATS connection (and its credential watcher) closes after the broker, then the pool
+  closes, and the management listener (`server.management`) closes last, so readiness
+  answers `stopping` throughout; keep that order. Outbox tests each use their own schema
   (`search_path`), because every outbox table is `jenny_outbox`.
 - **JSON Patch needs two conventions from a resource**: its PUT accepts the GET
   representation (no `deny_unknown_fields`), and reads it through `jenny_rest::Json`,
