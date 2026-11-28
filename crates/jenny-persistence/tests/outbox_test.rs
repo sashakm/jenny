@@ -307,6 +307,63 @@ async fn an_event_the_bus_refused_waits_for_the_next_pass() {
     db.drop_schema().await;
 }
 
+/// Refuses the first publish, and keeps every envelope it was offered.
+#[derive(Default)]
+struct RefusesOnce {
+    offered: std::sync::Mutex<Vec<EventEnvelope>>,
+}
+
+#[async_trait]
+impl EventPublisher for RefusesOnce {
+    async fn publish(&self, event: EventEnvelope) -> Result<(), PublishError> {
+        let mut offered = self.offered.lock().unwrap();
+        offered.push(event);
+        if offered.len() == 1 {
+            return Err(PublishError::transport("bus is down"));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_replay_carries_the_headers_enriched_at_the_write_under_the_same_id() {
+    let bus = Arc::new(RefusesOnce::default());
+    let Some(db) = Fixture::with(bus.clone()).await else {
+        return;
+    };
+    let events = db
+        .events()
+        .enriched_with(jenny_core::port::Caller)
+        .enriched_with(jenny_core::port::Source::new("my-notes", "1.2.3"));
+    let cx = Context::new().with_principal(jenny_core::domain::Principal::builder("u-7").build());
+    db.notes
+        .add(
+            Note {
+                id: 1,
+                archived: false,
+            },
+            NoteCreated { id: 1 },
+        )
+        .raising(&events, &cx)
+        .await
+        .unwrap();
+
+    let relay = db.postgres.relay().unwrap();
+    assert_eq!(relay.drain().await, 0, "refused the first time");
+    assert_eq!(relay.drain().await, 1, "replayed the second");
+
+    let offered = bus.offered.lock().unwrap().clone();
+    assert_eq!(offered.len(), 2);
+    assert_eq!(offered[0].id(), offered[1].id(), "the replay keeps the id");
+    for envelope in &offered {
+        let headers = envelope.headers();
+        assert_eq!(headers["caller-subject"], "u-7");
+        assert_eq!(headers["source-service"], "my-notes");
+        assert_eq!(headers["source-version"], "1.2.3");
+    }
+    db.drop_schema().await;
+}
+
 /// Counts publishes and remembers every envelope id it saw.
 #[derive(Default)]
 struct Counting {

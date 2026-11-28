@@ -35,6 +35,10 @@
 //!   log_format: pretty          # service_name and service_version default to the above
 //! messaging:
 //!   buffer_size: 64
+//!   events:
+//!     headers:                # what `JennyServer::events()` writes into every event
+//!       caller: true          # caller-subject, and caller-actor when delegated
+//!       source: true          # source-service, source-version
 //!   nats:                     # one connection: key-value stores and the gateway
 //!     url: tls://nats:4222    # JENNY__MESSAGING__NATS__URL
 //!     tls:                    # optional; see jenny_messaging::connection
@@ -212,6 +216,8 @@ pub struct MessagingConfig {
     /// Prefix for every event topic, and for the NATS buckets of key-value stores.
     /// Defaults to the top-level `service_name`.
     pub namespace: Option<String>,
+    /// What the events the service raises carry.
+    pub events: EventsConfig,
     /// The service's NATS connection, which the key-value stores and the gateway share:
     /// its servers, TLS and credentials (ADR-031). With the `messaging` feature.
     #[cfg(feature = "messaging")]
@@ -223,10 +229,32 @@ impl Default for MessagingConfig {
         Self {
             buffer_size: DEFAULT_EVENT_BUFFER,
             namespace: None,
+            events: EventsConfig::default(),
             #[cfg(feature = "messaging")]
             nats: jenny_messaging::NatsConnectionConfig::default(),
         }
     }
+}
+
+/// `messaging.events`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct EventsConfig {
+    pub headers: EventHeadersConfig,
+}
+
+/// `messaging.events.headers`: the built-in enrichers `JennyServer::events()` adds
+/// (ADR-032). Both are off by default: a principal id is personal data, and a stream
+/// keeps it for as long as its retention says.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct EventHeadersConfig {
+    /// `caller-subject`, and `caller-actor` when someone acted on the subject's behalf
+    /// ([`Caller`](jenny_core::port::Caller)).
+    pub caller: bool,
+    /// `source-service` and `source-version`, the top-level service name and version
+    /// ([`Source`](jenny_core::port::Source)).
+    pub source: bool,
 }
 
 /// The `system` section: the service acting on its own.

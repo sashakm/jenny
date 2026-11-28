@@ -400,28 +400,51 @@ impl JennyServer {
         &self.config
     }
 
-    /// The in-process event bus, behind the
-    /// [`EventPublisher`](jenny_core::port::outbound::EventPublisher) port.
+    /// What use cases publish events through: [`Events`](jenny_core::port::Events) over
+    /// the in-process bus, with the enrichers `messaging.events.headers` turns on
+    /// (`caller`, `source`; both off by default).
     ///
     /// The broker starts on the first call and stops when the server does. Available
-    /// during wiring, which is the point — use cases need the publisher before anything
-    /// is served:
+    /// during wiring, which is the point — use cases need it before anything is served.
+    /// Add enrichers of your own after the configured ones:
     ///
     /// ```no_run
-    /// # use std::sync::Arc;
+    /// # use jenny_core::port::{Context, Headers};
     /// # use jenny_server::JennyServer;
-    /// # struct Notes; impl Notes { fn new(_: Arc<dyn jenny_core::port::outbound::EventPublisher>) -> Self { Notes } }
+    /// # struct Notes; impl Notes { fn new(_: jenny_core::port::Events) -> Self { Notes } }
     /// # fn wire(mut server: JennyServer) -> anyhow::Result<()> {
-    /// let notes = Arc::new(Notes::new(server.events()?));
+    /// let events = server.events()?.enriched_with(|cx: &Context, headers: &mut Headers| {
+    ///     headers.insert("region", "eu-1");
+    /// });
+    /// let notes = Notes::new(events);
     /// # Ok(())
     /// # }
     /// ```
     ///
+    /// Each call returns a new `Events` with the configured enrichers only. Use the same
+    /// one for every use case whose events should carry your own.
+    ///
     /// Fails only when there is no tokio runtime to run the broker's event loop on.
     #[cfg(feature = "messaging")]
-    pub fn events(
-        &mut self,
-    ) -> anyhow::Result<Arc<dyn jenny_core::port::outbound::EventPublisher>> {
+    pub fn events(&mut self) -> anyhow::Result<jenny_core::port::Events> {
+        let mut events = jenny_core::port::Events::new(self.publisher()?);
+        let headers = &self.config.messaging.events.headers;
+        if headers.caller {
+            events = events.enriched_with(jenny_core::port::Caller);
+        }
+        if headers.source {
+            events = events.enriched_with(jenny_core::port::Source::new(
+                &self.service.name,
+                &self.service.version,
+            ));
+        }
+        Ok(events)
+    }
+
+    /// The bus itself, unenriched: what the outbox relay forwards to, because what it
+    /// replays was enriched when it was raised.
+    #[cfg(feature = "messaging")]
+    fn publisher(&mut self) -> anyhow::Result<Arc<dyn jenny_core::port::outbound::EventPublisher>> {
         self.ensure_broker()?;
         Ok(self.events.clone().expect("broker was just started"))
     }
@@ -674,7 +697,7 @@ impl JennyServer {
                 jenny_persistence::Postgres::connect_lazy(&self.config.persistence.postgres)?;
             if self.config.persistence.postgres.outbox {
                 #[cfg(feature = "messaging")]
-                postgres.with_outbox(self.events()?);
+                postgres.with_outbox(self.publisher()?);
                 #[cfg(not(feature = "messaging"))]
                 anyhow::bail!(
                     "persistence.postgres.outbox forwards to the event bus, which needs the \
@@ -1495,6 +1518,7 @@ mod tests {
         let mut server = server_with("127.0.0.1:0");
         let events = server.events().unwrap();
         events
+            .publisher()
             .publish(EventEnvelope::new("note.created", b"{}".to_vec()))
             .await
             .unwrap();
@@ -1511,6 +1535,108 @@ mod tests {
             .expect("the runtime should register a check for the bus it started");
         assert_eq!(bus["kind"], "eventbus");
         assert_eq!(bus["status"], "up");
+    }
+
+    #[cfg(feature = "messaging")]
+    #[tokio::test]
+    async fn events_carry_the_configured_headers_first_then_those_main_adds() {
+        use jenny_core::port::{Context, Headers};
+
+        #[derive(serde::Serialize)]
+        struct Created;
+        impl jenny_core::domain::DomainEvent for Created {
+            fn name(&self) -> &str {
+                "note.created"
+            }
+        }
+        let cx =
+            Context::new().with_principal(jenny_core::domain::Principal::builder("u-7").build());
+
+        // Off by default.
+        let mut server = server_with("127.0.0.1:0");
+        let seen = HeaderRecorder::subscribe(&mut server);
+        server.events().unwrap().publish(&Created, &cx).await;
+        let headers = seen.next().await;
+        assert!(!headers.contains_key("caller-subject"), "{headers:?}");
+        assert!(!headers.contains_key("source-service"), "{headers:?}");
+
+        let mut server = server_with("127.0.0.1:0");
+        server.config.messaging.events.headers.caller = true;
+        server.config.messaging.events.headers.source = true;
+        let seen = HeaderRecorder::subscribe(&mut server);
+        let events =
+            server
+                .events()
+                .unwrap()
+                .enriched_with(|_: &Context, headers: &mut Headers| {
+                    // The configured ones have run already.
+                    let after = headers
+                        .get("caller-subject")
+                        .unwrap_or("not yet")
+                        .to_string();
+                    headers.insert("ran-after", after);
+                });
+        events.publish(&Created, &cx).await;
+        let headers = seen.next().await;
+        assert_eq!(headers["caller-subject"], "u-7");
+        assert_eq!(headers["source-service"], "test-service");
+        assert_eq!(headers["source-version"], "9.9.9");
+        assert_eq!(headers["ran-after"], "u-7");
+    }
+
+    /// A bus listener that keeps the headers of every message it gets.
+    #[cfg(feature = "messaging")]
+    #[derive(Clone, Debug, Default)]
+    struct HeaderRecorder(
+        Arc<
+            std::sync::Mutex<
+                std::collections::VecDeque<std::collections::BTreeMap<String, String>>,
+            >,
+        >,
+    );
+
+    #[cfg(feature = "messaging")]
+    impl HeaderRecorder {
+        fn subscribe(server: &mut JennyServer) -> Self {
+            let recorder = Self::default();
+            server.subscribe(recorder.clone()).unwrap();
+            recorder
+        }
+
+        async fn next(&self) -> std::collections::BTreeMap<String, String> {
+            for _ in 0..200 {
+                if let Some(headers) = self.0.lock().unwrap().pop_front() {
+                    return headers;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("no message reached the listener");
+        }
+    }
+
+    #[cfg(feature = "messaging")]
+    #[async_trait::async_trait]
+    impl topmesys::EventConsumer for HeaderRecorder {
+        type Topic = ();
+
+        fn subscriptions(&self) -> topmesys::Subscriptions<()> {
+            "test-service.note.*".into()
+        }
+
+        async fn handle_event(
+            &self,
+            _: &(),
+            delivery: &topmesys::Delivery,
+        ) -> Result<(), topmesys::HandlerError> {
+            let headers = delivery
+                .message()
+                .headers()
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            self.0.lock().unwrap().push_back(headers);
+            Ok(())
+        }
     }
 
     #[cfg(feature = "messaging")]
@@ -1548,6 +1674,7 @@ mod tests {
 
         let events = server.events().unwrap();
         events
+            .publisher()
             .publish(EventEnvelope::new("note.created", b"{}".to_vec()))
             .await
             .unwrap();
@@ -1879,7 +2006,7 @@ mod tests {
         assert!(postgres.has_outbox());
         let table = format!("server_outbox_{}", uuid::Uuid::new_v4().simple());
         let store = postgres.documents_in::<Note>(&table);
-        let events = Events::new(server.events().unwrap());
+        let events = server.events().unwrap();
 
         let parts = server.register(notes()).unwrap().bind().await.unwrap();
         let handle = parts.handle();

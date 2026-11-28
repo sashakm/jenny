@@ -198,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
         Some(postgres) => Arc::new(postgres.documents::<Note>().queryable(QUERYABLE)),
         None => Arc::new(Memory::<Note>::new().queryable(QUERYABLE)),
     };
-    let events = Events::new(server.events()?);       // the in-process bus (`messaging`)
+    let events = server.events()?;                    // the in-process bus (`messaging`)
     let notes = Notes::new(store, events);                            // application
 
     let rest = RestAdapter::new("my-notes")?                     // driving adapter
@@ -500,7 +500,7 @@ two calls in `main`:
 
 ```rust,ignore
 server.subscribe(AuditLogWriter::new(pool.clone()))?;   // one listener
-let events = server.events()?;                          // the port, for use cases
+let events = server.events()?;                          // `Events`, for use cases
 ```
 
 Saving and then publishing is two writes, and a crash between them loses the event.
