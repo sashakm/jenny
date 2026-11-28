@@ -15,9 +15,14 @@
 //! | `Internal`, `Stale`, `Conflict` | nak, redelivered after `backoff`, until `max_deliver`; then term |
 //!
 //! Before any term, a `dead_letter` subject, when configured, gets the original payload
-//! and headers, plus `dead-letter-reason`, `dead-letter-subject` and
-//! `dead-letter-deliveries`. If that publish fails, the message is nak'd instead, so it
-//! is never lost silently.
+//! and headers (without the `Nats-*` ones, so JetStream neither deduplicates the copy
+//! against the original nor checks its expectations), plus `dead-letter-reason`,
+//! `dead-letter-subject` and `dead-letter-deliveries`. The copy is published to
+//! JetStream and its acknowledgement awaited, so the subject must be captured by a
+//! stream; if that publish fails, the message is nak'd instead, and never lost silently.
+//!
+//! A handler that runs long tells JetStream it is still working (a progress ack every
+//! half `ack_wait`, default 30 seconds), so the message is not redelivered meanwhile.
 //!
 //! Delivery is at least once. A handler whose effect is not idempotent deduplicates on
 //! the [`InboundEvent`](jenny_core::port::InboundEvent)'s id; jenny keeps no dedup store.
@@ -32,18 +37,21 @@
 //! ### Trust
 //!
 //! The caller headers (`caller-subject`, `caller-actor`) are only trusted when the NATS
-//! server required the service to authenticate, which it then requires of every
-//! publisher too. Over an anonymous connection they are dropped, and `principal:
-//! envelope` is a startup error. Trusted headers are only as trustworthy as the NATS
-//! publish permissions on the subject: restrict who may publish there.
+//! server required the service to authenticate ([`Nats::is_authenticated`]), which it
+//! then requires of every publisher too. Over an anonymous connection they are dropped,
+//! and `principal: envelope` is a startup error. Trusted headers are only as trustworthy
+//! as the NATS publish permissions on the subject: restrict who may publish there. A
+//! server with `no_auth_user` reports that it requires authentication but accepts
+//! anonymous clients as that user, so give that user no publish permission on subjects
+//! whose caller headers a service trusts.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::jetstream::{self, AckKind, consumer::pull};
-use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use jenny_core::domain::Principal;
 use jenny_core::port::outbound::Authorizer;
 use serde::Deserialize;
@@ -63,6 +71,8 @@ pub const DEAD_LETTER_DELIVERIES: &str = "dead-letter-deliveries";
 
 /// Default for `messaging.inbound.max_deliver`.
 pub const DEFAULT_MAX_DELIVER: u32 = 5;
+/// Default for `messaging.inbound.ack_wait`, in seconds.
+pub const DEFAULT_ACK_WAIT_SECONDS: u64 = 30;
 /// Default for `messaging.inbound.backoff`, in seconds.
 pub const DEFAULT_BACKOFF_SECONDS: [u64; 3] = [1, 5, 30];
 
@@ -89,6 +99,9 @@ pub struct InboundConfig {
     pub backoff: Vec<u64>,
     pub dead_letter: Option<String>,
     pub max_in_flight: usize,
+    /// Seconds JetStream waits for an ack before redelivering (default 30). A running
+    /// handler sends a progress ack every half of it.
+    pub ack_wait: u64,
     /// Overrides for one subject each, matched on the full subject a handler was bound
     /// to (prefix included). In-process bus handlers match on their topic pattern; only
     /// `principal` applies to them.
@@ -103,6 +116,7 @@ impl Default for InboundConfig {
             backoff: DEFAULT_BACKOFF_SECONDS.to_vec(),
             dead_letter: None,
             max_in_flight: 1,
+            ack_wait: DEFAULT_ACK_WAIT_SECONDS,
             subscriptions: Vec::new(),
         }
     }
@@ -126,6 +140,13 @@ impl InboundConfig {
         if self.max_in_flight == 0 {
             problems.push("`max_in_flight` must be at least 1".to_string());
         }
+        if self.ack_wait < 2 {
+            problems.push("`ack_wait` must be at least 2 (seconds)".to_string());
+        }
+        let blank = |value: &Option<String>| value.as_deref().is_some_and(|v| v.trim().is_empty());
+        if blank(&self.dead_letter) {
+            problems.push("`dead_letter` is set but empty".to_string());
+        }
         let check = |problems: &mut Vec<String>,
                      key: &str,
                      max_deliver: Option<u32>,
@@ -147,6 +168,9 @@ impl InboundConfig {
             let key = format!("subscriptions[{index}].");
             if subscription.subject.trim().is_empty() {
                 problems.push(format!("`{key}subject` is empty"));
+            }
+            if blank(&subscription.dead_letter) {
+                problems.push(format!("`{key}dead_letter` is set but empty"));
             }
             check(
                 &mut problems,
@@ -233,15 +257,20 @@ impl FailurePolicy {
     }
 }
 
-/// The headers a dead-lettered copy carries: the original ones, plus why, where from
-/// and after how many deliveries.
+/// The headers a dead-lettered copy carries: the original ones except NATS's own
+/// (`Nats-Msg-Id` would make JetStream drop the copy as a duplicate of the original), plus
+/// why, where from and after how many deliveries.
 pub fn dead_letter_headers(
     original: &BTreeMap<String, String>,
     reason: &str,
     subject: &str,
     deliveries: u64,
 ) -> BTreeMap<String, String> {
-    let mut headers = original.clone();
+    let mut headers: BTreeMap<String, String> = original
+        .iter()
+        .filter(|(name, _)| !name.to_ascii_lowercase().starts_with("nats-"))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     headers.insert(DEAD_LETTER_REASON.to_string(), reason.to_string());
     headers.insert(DEAD_LETTER_SUBJECT.to_string(), subject.to_string());
     headers.insert(DEAD_LETTER_DELIVERIES.to_string(), deliveries.to_string());
@@ -284,7 +313,8 @@ pub struct JetStreamConsumer {
     stream: String,
     routes: Vec<Route>,
     max_in_flight: usize,
-    client: async_nats::Client,
+    ack_wait: Duration,
+    jetstream: jetstream::Context,
     consumer: jetstream::consumer::Consumer<pull::Config>,
 }
 
@@ -354,7 +384,7 @@ impl JetStreamConsumer {
         }
 
         let client = nats.client().await?;
-        let trusted = client.server_info().auth_required;
+        let trusted = nats.is_authenticated().await?;
         let mut routes = Vec::with_capacity(handled.len());
         for (subject, dispatch) in handled {
             let dispatcher = Dispatcher::new(system.clone(), trusted)
@@ -390,6 +420,7 @@ impl JetStreamConsumer {
         })?;
         let filter_subjects: Vec<String> = routes.iter().map(|r| r.subject.clone()).collect();
         let max_in_flight = config.max_in_flight.max(1);
+        let ack_wait = Duration::from_secs(config.ack_wait.max(2));
         let consumer = found
             .create_consumer(pull::Config {
                 durable_name: Some(name.clone()),
@@ -399,6 +430,7 @@ impl JetStreamConsumer {
                 // jenny counts deliveries itself, so a message is never dropped by the
                 // server without going through the dead-letter path.
                 max_deliver: -1,
+                ack_wait,
                 max_ack_pending: i64::try_from(max_in_flight).unwrap_or(i64::MAX),
                 ..Default::default()
             })
@@ -412,7 +444,8 @@ impl JetStreamConsumer {
             stream: stream.to_string(),
             routes,
             max_in_flight,
-            client,
+            ack_wait,
+            jetstream,
             consumer,
         }))
     }
@@ -461,10 +494,14 @@ impl JetStreamConsumer {
                 }
             };
             let mut running = FuturesUnordered::new();
+            let mut stopping = false;
             loop {
                 tokio::select! {
                     biased;
-                    () = stopped(&mut stop) => break,
+                    () = stopped(&mut stop) => {
+                        stopping = true;
+                        break;
+                    }
                     next = batch.next() => match next {
                         Some(Ok(message)) if this.max_in_flight == 1 => {
                             this.process(message).await;
@@ -481,6 +518,12 @@ impl JetStreamConsumer {
             }
             // Whatever was taken is finished, and acked or nak'd, before stopping.
             while running.next().await.is_some() {}
+            if stopping {
+                // Pulled but never started: back to JetStream at once, for the next one.
+                while let Some(Some(Ok(message))) = batch.next().now_or_never() {
+                    this.settle(&message, AckKind::Nak(None)).await;
+                }
+            }
         }
         tracing::info!(consumer = this.name, "jetstream consumer stopped");
     }
@@ -525,7 +568,19 @@ impl JetStreamConsumer {
             self.settle(&message, AckKind::Term).await;
             return;
         };
-        let outcome = route.dispatcher.dispatch(&route.dispatch, &received).await;
+        let outcome = {
+            // Tell JetStream the handler is still at it, so it does not redeliver meanwhile.
+            let handling = route.dispatcher.dispatch(&route.dispatch, &received);
+            tokio::pin!(handling);
+            let mut progress = tokio::time::interval(self.ack_wait / 2);
+            progress.tick().await;
+            loop {
+                tokio::select! {
+                    outcome = &mut handling => break outcome,
+                    _ = progress.tick() => self.settle(&message, AckKind::Progress).await,
+                }
+            }
+        };
         let event_id = received.headers.get(crate::headers::EVENT_ID).cloned();
         let event = received.headers.get(crate::headers::EVENT_NAME).cloned();
         match route.failures.decide(&outcome, delivered) {
@@ -584,14 +639,16 @@ impl JetStreamConsumer {
         {
             headers.insert(name.as_str(), value.as_str());
         }
-        self.client
+        // Through JetStream, awaiting its ack: a subject no stream captures fails here,
+        // and the original is redelivered rather than lost.
+        self.jetstream
             .publish_with_headers(
                 subject.to_string(),
                 headers,
                 received.payload.clone().into(),
             )
+            .await?
             .await?;
-        self.client.flush().await?;
         Ok(())
     }
 
@@ -659,6 +716,8 @@ mod tests {
     fn mistakes_are_named() {
         let config: InboundConfig = serde_json::from_value(serde_json::json!({
             "max_in_flight": 0,
+            "ack_wait": 1,
+            "dead_letter": " ",
             "backoff": [],
             "subscriptions": [{ "subject": "", "max_deliver": 0 }]
         }))
@@ -669,6 +728,8 @@ mod tests {
             "`backoff`",
             "`subscriptions[0].subject`",
             "`subscriptions[0].max_deliver`",
+            "`dead_letter`",
+            "`ack_wait`",
         ] {
             assert!(err.contains(key), "{key} in {err}");
         }
@@ -724,6 +785,8 @@ mod tests {
     #[test]
     fn a_dead_letter_keeps_the_original_headers_and_says_why() {
         let original = BTreeMap::from([
+            ("Nats-Msg-Id".to_string(), "e-1".to_string()),
+            ("Nats-Expected-Stream".to_string(), "SHOP".to_string()),
             ("event-id".to_string(), "e-1".to_string()),
             ("caller-subject".to_string(), "u-7".to_string()),
         ]);
@@ -734,5 +797,10 @@ mod tests {
         assert_eq!(headers[DEAD_LETTER_REASON], "invalid: zero");
         assert_eq!(headers[DEAD_LETTER_SUBJECT], "SHOP.shop.orders.created");
         assert_eq!(headers[DEAD_LETTER_DELIVERIES], "5");
+        assert!(
+            !headers.contains_key("Nats-Msg-Id"),
+            "or JetStream drops it as a duplicate"
+        );
+        assert!(!headers.contains_key("Nats-Expected-Stream"));
     }
 }

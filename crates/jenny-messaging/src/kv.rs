@@ -161,7 +161,9 @@ impl Nats {
     ///
     /// This is what decides whether inbound caller headers are trusted: it holds however
     /// the credentials were given (`messaging.nats.auth`, a client certificate the server
-    /// maps to a user, a `nats_options` hook).
+    /// maps to a user, a `nats_options` hook). A server with `no_auth_user` reports it too,
+    /// yet admits anonymous clients as that user: give that user no publish permission
+    /// where caller headers are trusted.
     pub async fn is_authenticated(&self) -> anyhow::Result<bool> {
         Ok(self.inner.client().await?.server_info().auth_required)
     }
