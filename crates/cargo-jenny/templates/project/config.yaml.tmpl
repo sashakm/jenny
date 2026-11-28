@@ -1,10 +1,17 @@
 # Configuration for {{project_kebab}}.
 #
-# The runtime reads `server`, `telemetry`, `messaging`, `persistence` and `objects`.
+# The runtime reads `service_name`, `server`, `telemetry`, `messaging`, `persistence` and
+# `objects`.
 # Everything under `applications.<name>` is yours, passed through untouched.
 #
 # Any value can be overridden by an environment variable
 # (JENNY__SERVER__ADDRESS=[::]:9000) or a CLI flag (--address).
+
+# Who the service is: names event topics, NATS buckets and consumers, and the system
+# principal its scheduled tasks and event handlers run as. Defaults to the package name;
+# `service_version` (default: the package version) works the same way.
+service_name: {{project_kebab}}
+
 server:
   address: "[::]:8000"
   # Where REST adapters mount unless one chose a path in code.
@@ -22,7 +29,8 @@ server:
   #     password: change-me
 
 telemetry:
-  service_name: {{project_kebab}}
+  # service_name and service_version default to the ones above; set them here to
+  # rename the service in telemetry only.
   log_format: pretty
   # otlp_endpoint: "http://localhost:4317"
   # prometheus_port: 9090

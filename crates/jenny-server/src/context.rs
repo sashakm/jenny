@@ -24,7 +24,7 @@ use crate::config::ConfigSource;
 /// # #[derive(Clone)] struct Pool;
 /// # fn connect() -> Pool { Pool }
 /// # fn main() -> anyhow::Result<()> {
-/// let mut server = JennyServer::from_args()?;
+/// let mut server = JennyServer::from_args(jenny_core::service!())?;
 ///
 /// let config: MyConfig = server.context().app_section("my-notes")?;
 /// let pool = Arc::new(connect());

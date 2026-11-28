@@ -136,7 +136,5 @@ pub fn build(server: JennyServer) -> Result<JennyServer> {
     );
 {{/if}}
 
-    server
-        .with_version(jenny::service_version!())
-        .register(rest)
+    server.register(rest)
 }

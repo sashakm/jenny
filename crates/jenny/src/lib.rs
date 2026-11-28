@@ -98,6 +98,17 @@ pub use jenny_macros::use_cases;
 #[doc(inline)]
 pub use jenny_core::service_version;
 
+/// Your crate's name and version, expanded where you write it.
+///
+/// ```
+/// // A doc test is a crate of its own, built from this package: `jenny`, not `jenny-core`.
+/// let service = jenny::service!();
+/// assert_eq!(service.name, env!("CARGO_PKG_NAME"));
+/// assert_eq!(service.name, "jenny");
+/// ```
+#[doc(inline)]
+pub use jenny_core::{Service, service};
+
 // The rings, as modules.
 pub use jenny_core::domain;
 pub use jenny_core::memory;

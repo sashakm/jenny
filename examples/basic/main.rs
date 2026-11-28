@@ -220,12 +220,12 @@ fn build(mut server: JennyServer) -> anyhow::Result<JennyServer> {
         .accept_json_patch()?
         .mount(adapter::inbound::rest::routes(notes))?;
 
-    server
-        .with_version(jenny::service_version!())
-        .register(rest)
+    server.register(rest)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    build(JennyServer::from_args()?)?.run().await
+    build(JennyServer::from_args(jenny::service!())?)?
+        .run()
+        .await
 }

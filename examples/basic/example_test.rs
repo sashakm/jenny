@@ -467,7 +467,7 @@ async fn the_example_service_works_end_to_end() {
         ..Default::default()
     };
 
-    let parts = crate::build(JennyServer::from_parsed_args(args).unwrap())
+    let parts = crate::build(JennyServer::from_parsed_args(args, jenny::service!()).unwrap())
         .unwrap()
         .bind()
         .await

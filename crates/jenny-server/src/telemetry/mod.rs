@@ -41,7 +41,7 @@
 //!
 //! ```yaml
 //! telemetry:
-//!   service_name: my-service
+//!   service_name: my-service   # optional: defaults to the top-level `service_name`
 //!   log_format: json
 //!   debug: false
 //!   otlp_endpoint: "http://otel-collector:4317"   # requires telemetry-otlp feature
@@ -78,16 +78,14 @@ pub enum LogFormat {
 pub struct TelemetryConfig {
     /// Name identifying this service in traces, metrics labels, and structured log fields.
     /// Becomes the `service.name` OTel resource attribute.
-    #[serde(default)]
-    pub service_name: String,
-
-    /// Version of the service, reported by `/health/status` and as the
-    /// `service.version` OTel resource attribute.
     ///
-    /// Usually your crate's version. The framework cannot read it for you — `env!`
-    /// expands where it is written, which for framework code is the framework's own
-    /// manifest — so pass [`service_version!`](jenny_core::service_version) from your
-    /// binary, or set it here.
+    /// Under the runtime it defaults to the top-level `service_name`; set here, it
+    /// renames the service in telemetry only.
+    #[serde(default)]
+    pub service_name: Option<String>,
+
+    /// Version of the service in telemetry. Under the runtime it defaults to the
+    /// top-level `service_version`; set here, it applies to telemetry only.
     #[serde(default)]
     pub service_version: Option<String>,
 
@@ -137,7 +135,7 @@ pub struct TelemetryConfig {
 impl TelemetryConfig {
     pub fn new(service_name: impl Into<String>) -> Self {
         Self {
-            service_name: service_name.into(),
+            service_name: Some(service_name.into()),
             ..Default::default()
         }
     }
