@@ -15,7 +15,8 @@ around requests that end:
 - authorization is decided once per request, and a stream outlives the decision;
 - the in-process bus delivers in one replica, and a client is connected to one replica,
   usually not the one that handled the write;
-- consuming events is inbound dispatch, which is declared but not built (ADR-006).
+- consuming events is inbound dispatch (ADR-006), whose handlers so far call use cases,
+  not connections.
 
 ## Proposal
 
@@ -35,9 +36,9 @@ gRPC server streaming (ADR-021) shares the same source.
 
 ### The source is inbound dispatch
 
-A stream subscribes to events, which is the inbound dispatch ADR-006 declared and did not
-build. That gets built first, and a stream is then a subscription whose handler writes to
-a connection. With the in-process bus a client sees only the events of the replica it is
+A stream subscribes to events through the inbound dispatch ADR-006 built: a stream is a
+subscription (`JennyServer::handle`, a `BusHandler`) whose handler writes to a
+connection. With the in-process bus a client sees only the events of the replica it is
 connected to. With NATS subjects every replica sees every event. Proposal: streams work
 on the in-process bus for one replica and development, and multi-replica streaming
 requires NATS. Both are documented where streams are configured, because a stream that

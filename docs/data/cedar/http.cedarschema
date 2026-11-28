@@ -14,6 +14,13 @@ entity User in [Role] {
   email?: String,
 };
 
+// The service itself: scheduled tasks are `System::"<service>/tasks"`, inbound event
+// handlers `System::"<service>/events"` (ADR-033). Without this declaration, every
+// request a system principal makes is denied. They hold the roles in `system.roles`.
+entity System in [Role] {
+  id: String,
+};
+
 // `RestAdapter::new("shop")` is `Adapter::"urn:shop"`, `Routes::new("orders")` mounted
 // on it is `Resource::"urn:shop:orders"`, and each route template in it, including the
 // mount path, is a `Route`, e.g. `Route::"/api/orders/{id}"`.

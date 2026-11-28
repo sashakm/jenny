@@ -5,6 +5,8 @@
 //! application/     use cases — orchestration, and nothing else
 //! adapter/
 //!   inbound/rest   HTTP in: DTOs, TryFrom, status codes
+//!   inbound/events events in, from the bus and JetStream, as System[basic-example/events]
+//!   inbound/tasks  the clock in: a scheduled task, as System[basic-example/tasks]
 //!   outbound/      the driven side: an event publisher and the links between notes
 //!                  (the note and attachment stores are jenny's)
 //! main.rs          the composition root — the only file that knows every layer
