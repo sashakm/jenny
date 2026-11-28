@@ -3313,7 +3313,8 @@ mod tests {
             .fetch_one(&admin)
             .await
             .unwrap();
-        assert_eq!(held as usize, runs.len(), "a row per slot, none released");
+        // An abort can land between a slot's row and its run, never the other way.
+        assert!(held as usize >= runs.len(), "a row per slot, none released");
         jenny_persistence::sqlx::query(jenny_persistence::sqlx::AssertSqlSafe(format!(
             "DROP SCHEMA \"{schema}\" CASCADE"
         )))
