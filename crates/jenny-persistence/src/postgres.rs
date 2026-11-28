@@ -49,11 +49,11 @@ pub struct PostgresConfig {
     pub min_connections: u32,
     /// How long a query waits for a free connection before failing. Defaults to 5.
     pub acquire_timeout_seconds: u64,
-    /// Create the tables document stores need, the outbox's and the leases', if they are missing,
-    /// before serving — and, with the `graph` feature, the AGE extension and every
-    /// graph handed out. Defaults to `true`; turn it off where the schema is owned by
-    /// migrations alone, and create them from [`PgDocuments::schema`],
-    /// [`Postgres::outbox_schema`] and `Graph::schema`.
+    /// Create the tables document stores need, the outbox's and the leases', if they are
+    /// missing, before serving — and, with the `graph` feature, the AGE extension and
+    /// every graph handed out. Defaults to `true`; turn it off where the schema is owned
+    /// by migrations alone, and create them from [`PgDocuments::schema`],
+    /// [`Postgres::outbox_schema`], [`Postgres::lease_schema`] and `Graph::schema`.
     pub create_tables: bool,
     /// Commit the events a change raises in the same transaction as the change, and
     /// have the runtime forward them to the event bus (ADR-016). Defaults to `false`;

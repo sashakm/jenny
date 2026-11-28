@@ -10,8 +10,9 @@
 //! That order is the deployment order: a file for defaults you commit, environment
 //! variables for what differs per environment, flags for what differs per run.
 //!
-//! The framework reads the sections it owns — `server`, `telemetry`, and `messaging`,
-//! `persistence` and `objects` when those features are on. Everything else passes
+//! The framework reads the sections it owns — `service_name`, `service_version`,
+//! `system`, `tasks`, `server`, `telemetry`, and `messaging`, `persistence` and
+//! `objects` when those features are on. Everything else passes
 //! through untyped, so it imposes no schema on your configuration: an adapter
 //! deserialises its own `applications.<name>` section into whatever type it likes, via
 //! [`ServerContext::app_section`](crate::ServerContext::app_section).

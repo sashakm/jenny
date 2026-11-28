@@ -9,7 +9,7 @@ changes are fine, and removing a low-value feature beats adapting it.
 | Crate | Ring | Holds |
 |---|---|---|
 | `crates/jenny` | facade | feature-gated re-exports; the only crate services depend on |
-| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Principal` + `PrincipalKind` (users and `System[…]`), `Store`/`StoreExt`, `Blobs`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), the inbound extensions `InboundEvent`/`EventCaller`/`RestoredCaller`, outbound ports, `Lease`/`HeldLease`/`TaskLease`, `Memory` + `Queryable`, `MemoryBlobs`, `MemoryLease`, tasks (`ScheduledTask::per_replica`, `TaskScheduler::with_lease`), the lease conformance suite (`testing::lease`), `service!()` |
+| `crates/jenny-core` | domain + ports | `Aggregate`, `DomainError`, `Changes`, `Criteria`, `Context`, `Principal` + `PrincipalKind` (users and `System[…]`), `Store`/`StoreExt`, `Blobs`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), the inbound extensions `InboundEvent`/`EventCaller`/`RestoredCaller`, outbound ports, `Lease`/`HeldLease`/`TaskLease`, `Memory` + `Queryable`, `MemoryBlobs`, `MemoryLease`, tasks (`ScheduledTask::per_replica`, `TaskScheduler::with_lease`, `task::instance`), the lease conformance suite (`testing::lease`), `service!()` |
 | `crates/jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Listing`, `Versioned`/`IfMatch`, auth/CORS layers |
 | `crates/jenny-messaging` | both | `EventBus` (driven, on topmesys), `NatsConnectionConfig` (`messaging.nats`: TLS, credentials), `Nats` (the one connection, its credential-file watcher) + `NatsKv` key-value store + `NatsLease` (bucket `jenny_leases`), `NatsGateway` (from `Nats::gateway` or a client of your own), `MessagingAdapter` (`.stream`, `.on`), the inbound dispatch core (`inbound::Handler`, `Dispatcher`, `BusHandler`) and `consumer::JetStreamConsumer` (ack/nak/term, dead letters, `InboundConfig`) |
 | `crates/jenny-persistence` | driven adapter | sqlx/Postgres: `Postgres` pool + `PostgresConfig`, `PgDocuments` and `PgTable` stores, `PgLease` (`jenny_leases`), the outbox + `OutboxRelay`, `SqlCriteria` + `Columns` allowlist, `QueryFormat`, `DatabaseCheck`; Apache AGE `Graph` + `Cypher` (feature `graph`) |
@@ -60,7 +60,7 @@ just test               # what CI runs: doc tests + all tests under llvm-cov
 just test-cli           # scaffold a default project; it must build, test and lint clean
 just test-cli-features  # the same once per optional feature (slow; shared target dir)
 just test-postgres      # database tests + the example against a disposable Postgres 18 (docker)
-just test-nats          # key-value and TLS tests + the example against two disposable NATS (docker)
+just test-nats          # key-value, TLS, inbound and lease tests + the example against two disposable NATS (docker)
 just test-objects       # object-storage tests + the example against a disposable S3 (RustFS, docker)
 just test-age           # graph tests + the example against Postgres with Apache AGE, preloaded and not (docker)
 just msrv               # cargo +1.94 check, the declared rust-version

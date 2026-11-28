@@ -23,7 +23,9 @@
 //!   ([`EndpointsConfig`]); probes and scrapes are not access-logged by default (ADR-020).
 //! - **Scheduling** — [`ScheduledTask`](jenny_core::task::ScheduledTask)s driven in the
 //!   background, each run as `System[<service_name>/tasks]` with the
-//!   [authorizer](JennyServer::with_authorizer) (ADR-033).
+//!   [authorizer](JennyServer::with_authorizer) (ADR-033); with `tasks.lease`, each slot
+//!   on one replica only (a memory, Postgres or NATS lease), and
+//!   [`JennyServer::lease`] for leader election of your own (ADR-029).
 //! - **Inbound events** — with `messaging`, typed handlers on the bus
 //!   ([`JennyServer::handle`]) and on JetStream (a `MessagingAdapter` with `.on(…)`, given
 //!   to [`JennyServer::register_messaging`]: one durable consumer per adapter, ack, nak

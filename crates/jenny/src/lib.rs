@@ -67,8 +67,8 @@
 //! |---|---|
 //! | `rest` | the axum driving adapter |
 //! | `server` | the runtime and composition root (implies `rest`) |
-//! | `messaging` | the event bus, the NATS gateway and the NATS key-value store; with `server`, one connection from `messaging.nats` (TLS, mTLS, `.creds`, NKey, password or token) |
-//! | `persistence` | Postgres: document and table stores, the outbox, criteria to SQL; with `server`, a pool from `persistence.postgres` |
+//! | `messaging` | the event bus, the NATS gateway, the NATS key-value store and the NATS lease; with `server`, one connection from `messaging.nats` (TLS, mTLS, `.creds`, NKey, password or token) |
+//! | `persistence` | Postgres: document and table stores, the outbox, the lease, criteria to SQL; with `server`, a pool from `persistence.postgres` |
 //! | `graph` | Apache AGE graphs in that Postgres, queried in Cypher, created before serving (implies `persistence`) |
 //! | `objects` | blob storage — S3 and compatibles, local files, memory — behind [`Blobs`](port::Blobs); with `server`, a store from `objects` |
 //! | `security` | authentication and Cedar authorization |

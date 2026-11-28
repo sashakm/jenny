@@ -1,6 +1,6 @@
 # ADR-007: The Server Runtime and Composition Root
 
-**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `service_name`, `service_version` and `system` (ADR-033), `server`, `telemetry`, `messaging`, `persistence` and `objects`; with `messaging`, it also runs bus handlers and JetStream consumers, which drain with requests at shutdown (ADR-006); the framework's endpoints are configurable groups that can move to a management listener, which closes last (ADR-020)
+**Status:** Accepted — with `persistence`, the runtime also builds, prepares and checks a Postgres pool (ADR-015), and stops the outbox relay after the HTTP drain and before the broker, closing the pool last (ADR-016); with `messaging` and `messaging.nats.url`, it connects to NATS, prepares the key-value buckets and checks the connection before binding (ADR-017), with the TLS and credentials `messaging.nats` configures, closing the connection after the broker (ADR-031); with `objects`, it builds an object store from `objects.url` and checks its bucket (ADR-018); the sections it interprets are therefore `service_name`, `service_version` and `system` (ADR-033), `tasks` (`tasks.lease`, ADR-029), `server`, `telemetry`, `messaging`, `persistence` and `objects`; with `messaging`, it also runs bus handlers and JetStream consumers, which drain with requests at shutdown (ADR-006); the framework's endpoints are configurable groups that can move to a management listener, which closes last (ADR-020)
 **Date:** 2026-08-24
 
 ## Context
@@ -214,6 +214,9 @@ slot, renewing every `ttl / 3`; the key is never released, so a slot runs at mos
 across replicas while their clocks disagree by less than `ttl`. The run's `Context`
 carries a `TaskLease` with the fencing token. `ScheduledTask::per_replica()` keeps a
 task on every replica, and the local rule of one run per task at a time still applies.
+That rule is per replica: the lease keeps one slot from running twice, not two slots
+apart, so a run that outlasts its interval can overlap the next slot's run on another
+replica. The fencing token is what keeps their writes apart.
 
 ## Consequences
 

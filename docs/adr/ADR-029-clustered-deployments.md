@@ -76,7 +76,8 @@ attacker inside an instance.
    (`acquire`, `renew`, `release`) with three adapters: `MemoryLease` (one process),
    `PgLease` (a `jenny_leases` table, tokens from the sequence `jenny_lease_tokens`, every
    time the database's `now()`) and `NatsLease` (a `jenny_leases` key-value bucket whose
-   `max_age` is the lease's `ttl`, so per-key TTL was not needed). Every acquisition
+   `max_age` is the lease's `ttl`, so per-key TTL was not needed; shared by every service
+   on the NATS account, which must therefore agree on the `ttl`). Every acquisition
    carries a **fencing token**, strictly increasing across all keys of a backend, for
    whatever the holder writes to. Session advisory locks were rejected: they tie the
    lease to one pooled connection, break under PgBouncer's transaction pooling, give no
@@ -91,7 +92,10 @@ attacker inside an instance.
    only left to expire, so a slot runs **at most once**: one key per task released after
    a fast run would let a replica whose clock is a few seconds behind take it and run the
    same slot again. That holds as long as **`ttl` exceeds the clock skew between
-   replicas**. A replica that crashes holding a slot loses that slot. `ScheduledTask::
+   replicas**. A replica that crashes holding a slot loses that slot. The lease keeps one
+   slot from running twice, not two slots apart: one run per task at a time is a rule
+   per replica, so a run that outlasts its interval can overlap the next slot's run on
+   another replica, and the fencing token is what keeps their writes apart. `ScheduledTask::
    per_replica()` opts a task out, and `JennyServer::lease()` hands the lease to services
    for leader election of their own.
 2. **Change notification across replicas**: `LISTEN/NOTIFY` (an ADR-016 gap) or NATS

@@ -19,13 +19,13 @@ rather than along topics.
 
 | Crate | Ring | Contains |
 |---|---|---|
-| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), `Context` and its inbound extensions, `PrincipalKind`, `EventPublisher`, `Authenticator`, `Authorizer`; `Memory`, `Queryable`, `Blobs`, `MemoryBlobs`; tasks; `service!()` |
+| `jenny-core` | domain + ports | `Aggregate`, `DomainError`, `DomainEvent`, `Changes`, `Validate`, `Principal`, `Credentials`, `Urn`, `Label`, `Criteria`; `Store`/`StoreExt`, `Events` with `Headers`/`Enrich` (`Caller`, `Source`), `Context` and its inbound extensions, `PrincipalKind`, `EventPublisher`, `Authenticator`, `Authorizer`, `Lease`/`HeldLease`/`TaskLease`; `Memory`, `Queryable`, `Blobs`, `MemoryBlobs`, `MemoryLease`; tasks; `service!()` |
 | `jenny-rest` | driving adapter | axum/tower: `RestAdapter` (plain or JSON Patch mode), `Routes`, `Problem`, `Ctx`, `Versioned`/`IfMatch`, auth and CORS layers |
-| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter`, the `inbound` dispatch core and `consumer::JetStreamConsumer` (driving), NATS gateway, `NatsKv` store |
-| `jenny-persistence` | driven adapter | Postgres: the pool, `PgDocuments` and `PgTable` stores, the outbox and its relay, criteria to SQL, Apache AGE graphs (feature `graph`) |
+| `jenny-messaging` | both | `EventBus` (driven), `MessagingAdapter`, the `inbound` dispatch core and `consumer::JetStreamConsumer` (driving), NATS gateway, `NatsKv` store, `NatsLease` |
+| `jenny-persistence` | driven adapter | Postgres: the pool, `PgDocuments` and `PgTable` stores, `PgLease`, the outbox and its relay, criteria to SQL, Apache AGE graphs (feature `graph`) |
 | `jenny-objects` | driven adapter | `ObjectBlobs`: the `Blobs` port over `object_store` (S3 and compatibles, files, memory) |
 | `jenny-security` | driven adapter | JWT/JWKS and API-key authentication, Cedar authorization |
-| `jenny-server` | composition root | runtime, the service identity, configuration, telemetry, the framework's endpoint groups (`server.endpoints`) on the API or a management listener (`server.management`), hosting; bus handlers, JetStream consumers, system principals for tasks and handlers |
+| `jenny-server` | composition root | runtime, the service identity, configuration, telemetry, the framework's endpoint groups (`server.endpoints`) on the API or a management listener (`server.management`), hosting; bus handlers, JetStream consumers, system principals for tasks and handlers, task leases (`tasks.lease`, `lease()`) |
 | `jenny-macros` | — | `#[derive(Dto)]`, `#[derive(QueryFormat)]`, `#[derive(Aggregate)]`, `#[derive(DomainEvent)]`, `#[use_cases]` |
 | `cargo-jenny` | — | `cargo jenny` — scaffolding (ADR-009) |
 | `jenny` | — | facade of feature-gated re-exports |
