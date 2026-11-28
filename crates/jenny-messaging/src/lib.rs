@@ -6,7 +6,9 @@
 //! | [`connection`] | driven | [`NatsConnectionConfig`] — the `messaging.nats` section: servers, TLS, credentials |
 //! | [`kv`] | driven | [`Nats`](kv::Nats) — the one connection, shared — and [`NatsKv`](kv::NatsKv), a [`Store`](jenny_core::port::Store) over a JetStream key-value bucket |
 //! | [`nats`] | driven | [`NatsGateway`](nats::NatsGateway) — a bus listener that forwards events to JetStream |
-//! | [`subscription`] | driving | [`MessagingAdapter`] — declares the subjects this service consumes |
+//! | [`subscription`] | driving | [`MessagingAdapter`] — the subjects this service consumes from JetStream, and their handlers |
+//! | [`inbound`] | driving | the dispatch core: a received event becomes a [`Context`](jenny_core::port::Context) and a typed [`Handler`](inbound::Handler) call |
+//! | [`consumer`] | driving | [`JetStreamConsumer`](consumer::JetStreamConsumer) — one durable pull consumer per adapter: ack, nak with backoff, term, dead letters |
 //!
 //! ### One publish, many effects
 //!
@@ -34,18 +36,23 @@
 //! gateway ([`Nats::gateway`](kv::Nats::gateway)) share it. Certificates and `.creds` are
 //! read again at each connect, and a watcher forces a reconnect when they rotate.
 //!
-//! ### Inbound is declaration-only for now
+//! ### Inbound
 //!
-//! [`MessagingAdapter`] records which subjects a service means to consume, and the
-//! runtime logs them at startup. The dispatch path — message in, use case invoked,
-//! ack or nack out — is not implemented yet; see the messaging ADR for the design it
-//! is being built against.
+//! A service consumes events through typed handlers, from two sources that share one
+//! dispatch core ([`inbound`]): its own in-process bus (`JennyServer::handle`), and
+//! JetStream, through a [`MessagingAdapter`] whose handlers get a durable pull consumer
+//! ([`consumer`]). Either way a handler gets the payload decoded into its DTO and a
+//! [`Context`](jenny_core::port::Context) whose request id is the event's correlation id,
+//! and runs as the service itself, `System[<service>/events]`, unless configured to run
+//! as the event's caller (ADR-032, ADR-033).
 //!
 //! [`EventPublisher`]: jenny_core::port::outbound::EventPublisher
 
 pub mod connection;
+pub mod consumer;
 pub mod eventbus;
 pub mod health;
+pub mod inbound;
 pub mod kv;
 pub mod nats;
 mod rotation;

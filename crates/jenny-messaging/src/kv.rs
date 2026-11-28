@@ -156,6 +156,16 @@ impl Nats {
         self.inner.client().await.cloned()
     }
 
+    /// Whether the server required this connection to authenticate, which it then
+    /// requires of every client, publishers included. Connects the first time.
+    ///
+    /// This is what decides whether inbound caller headers are trusted: it holds however
+    /// the credentials were given (`messaging.nats.auth`, a client certificate the server
+    /// maps to a user, a `nats_options` hook).
+    pub async fn is_authenticated(&self) -> anyhow::Result<bool> {
+        Ok(self.inner.client().await?.server_info().auth_required)
+    }
+
     /// Connect, and open or create the bucket of every store handed out.
     pub async fn prepare(&self) -> anyhow::Result<()> {
         self.inner.client().await?;
