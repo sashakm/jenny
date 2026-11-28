@@ -96,7 +96,8 @@ error naming the key at fault:
 - two routes clashing on one listener: two groups, or a group inside a REST adapter's
   mount (an adapter mounted at the root claims only its own routes);
 - `swagger` enabled while `openapi` is disabled, or the two on different listeners;
-- a `path` with `{…}` or `*`, which axum would read as a parameter.
+- a `path` with `{…}`, `*`, a `:` segment or `//`, which axum reads as a parameter or
+  refuses, and `swagger` at `/`, which would claim every path.
 
 ### `metrics.auth` moves under `endpoints`
 
@@ -115,8 +116,11 @@ the group, or on another listener, the UI would load nothing.
 
 `probes`, `status`, `public_status` and `metrics` produce no request span and no
 access-log line; `log_requests: true` restores both. They still pass through
-`RequestIdLayer`, so the response carries an `x-request-id`, and a handler that logs (the
-scrape, when encoding fails) puts that id in the line itself. The REST adapters, the
+`RequestIdLayer`, so the response carries an `x-request-id`, and the framework's own
+handlers that log (the scrape, when encoding fails) put that id in the line themselves.
+A `HealthCheck` a service registers runs inside a probe without a span, so its own log
+lines carry no request id unless `probes` (or `status`) logs requests; making the log
+formatter read the request id without a span is left to ADR-026. The REST adapters, the
 documentation groups and the 404 fallback are traced as before.
 
 ### `public_status` reports readiness, coarsened
