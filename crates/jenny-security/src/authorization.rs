@@ -6,7 +6,7 @@
 //!
 //! | Cedar | Built from |
 //! |---|---|
-//! | `principal` | `User::"<Principal::id>"`, a member of `Role::"<name>"` for each of [`Principal::roles`]. Its attributes are the principal's claims plus `id`. |
+//! | `principal` | `User::"<Principal::id>"`, or `System::"<service>/<component>"` for a [system principal](Principal::system), a member of `Role::"<name>"` for each of [`Principal::roles`]. Its attributes are the principal's claims plus `id`. |
 //! | `action` | `Action::"<AccessRequest::action>"`: the HTTP method for the REST gate, a verb such as `"archive"` for a use case |
 //! | `resource` | `<Resource::kind>::"<Resource::id>"`, a member of each of its parents, with its attributes |
 //! | `context` | [`AccessRequest::context`] |
@@ -26,6 +26,22 @@
 //!   resource == Route::"/api/orders/{id}/status"
 //! );
 //! ```
+//!
+//! ### The service itself: `System`
+//!
+//! A scheduled task or an inbound event handler runs as a system principal, which is the
+//! entity `System::"my-notes/tasks"` rather than a `User`. The type is what tells them
+//! apart: a token whose `sub` is `my-notes/tasks`, or `System[my-notes/tasks]`, is still
+//! a `User` and matches none of the policies written for the service:
+//!
+//! ```cedar
+//! permit (principal == System::"my-notes/tasks", action == Action::"archive", resource is Note);
+//! permit (principal is System, action == Action::"GET", resource is Route);
+//! ```
+//!
+//! A system principal is a member of the roles the runtime configures under
+//! `system.roles`, like a user of the roles its token carries. With a schema, `System`
+//! has to be declared for a system principal to be authorized at all.
 //!
 //! ### With a schema
 //!
@@ -61,11 +77,14 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 use tracing::{debug, error, warn};
 
-use jenny_core::domain::{AuthorizationError, Principal};
+use jenny_core::domain::{AuthorizationError, Principal, PrincipalKind};
 use jenny_core::port::outbound::{AccessRequest, Authorizer, Resource};
 
-/// The entity type of the calling [`Principal`].
+/// The entity type of the calling [`Principal`] when it is a user.
 pub const PRINCIPAL_TYPE: &str = "User";
+/// The entity type of the calling [`Principal`] when it is the service itself
+/// ([`PrincipalKind::System`]).
+pub const SYSTEM_TYPE: &str = "System";
 /// The entity type of each of the principal's roles.
 pub const ROLE_TYPE: &str = "Role";
 /// The entity type of actions. Cedar requires actions to be of a type named `Action`.
@@ -129,6 +148,8 @@ struct Schema {
     schema: cedar::Schema,
     /// The attributes the schema declares for the principal type: the claims that are kept.
     principal_attributes: HashSet<String>,
+    /// The same, for `System`.
+    system_attributes: HashSet<String>,
 }
 
 impl CedarAuthorizer {
@@ -213,11 +234,9 @@ impl CedarAuthorizer {
             .ok()
             .and_then(|json| serde_json::from_str::<Value>(&json).ok())
             .unwrap_or_default();
-        let principal_attributes = declared_attributes(
-            &described,
-            self.namespace.as_deref().unwrap_or_default(),
-            PRINCIPAL_TYPE,
-        );
+        let namespace = self.namespace.as_deref().unwrap_or_default();
+        let principal_attributes = declared_attributes(&described, namespace, PRINCIPAL_TYPE);
+        let system_attributes = declared_attributes(&described, namespace, SYSTEM_TYPE);
         let schema = cedar::Schema::from_schema_fragments([fragment])
             .map_err(|e| PolicyError::Schema(e.to_string()))?;
 
@@ -237,6 +256,7 @@ impl CedarAuthorizer {
         self.schema = Some(Schema {
             schema,
             principal_attributes,
+            system_attributes,
         });
         self.rebuild_entities()?;
         Ok(self)
@@ -315,7 +335,12 @@ impl CedarAuthorizer {
     ) -> Result<(cedar::Request, cedar::Entities), String> {
         let schema = self.schema();
 
-        let principal_uid = self.uid(PRINCIPAL_TYPE, principal.id())?;
+        // The kind picks the entity type, so no id can pass a user off as the service.
+        let principal_type = match principal.kind() {
+            PrincipalKind::User => PRINCIPAL_TYPE,
+            PrincipalKind::System => SYSTEM_TYPE,
+        };
+        let principal_uid = self.uid(principal_type, principal.id())?;
         let roles = principal
             .roles()
             .iter()
@@ -329,7 +354,11 @@ impl CedarAuthorizer {
             .collect();
         attributes.insert("id".to_string(), Value::String(principal.id().to_string()));
         if let Some(schema) = &self.schema {
-            attributes.retain(|key, _| schema.principal_attributes.contains(key));
+            let declared = match principal.kind() {
+                PrincipalKind::User => &schema.principal_attributes,
+                PrincipalKind::System => &schema.system_attributes,
+            };
+            attributes.retain(|key, _| declared.contains(key));
         }
 
         let mut contributed = vec![self.entity(&principal_uid, attributes, &roles)?];
@@ -594,6 +623,91 @@ mod tests {
         action "GET", "DELETE" appliesTo { principal: [User], resource: [Route], context: Http };
         action archive appliesTo { principal: [User], resource: [Note] };
     "#;
+
+    #[tokio::test]
+    async fn a_system_principal_is_a_system_entity_that_no_user_id_can_forge() {
+        let authorizer = CedarAuthorizer::new(
+            r#"permit (principal == System::"my-notes/tasks", action == Action::"archive", resource is Note);"#,
+        )
+        .unwrap();
+        let archive = || AccessRequest::new("archive", Resource::new("Note", 7));
+
+        let tasks = Principal::system("my-notes", "tasks");
+        assert!(allows(&authorizer, &tasks, archive()).await);
+        // Another component of the same service is another entity.
+        assert!(
+            !allows(
+                &authorizer,
+                &Principal::system("my-notes", "events"),
+                archive()
+            )
+            .await
+        );
+
+        // A token can carry any `sub`, but not the entity type.
+        for forged in ["my-notes/tasks", "System[my-notes/tasks]"] {
+            let user = Principal::builder(forged).build();
+            assert!(!allows(&authorizer, &user, archive()).await, "{forged}");
+        }
+        let claimed: Principal =
+            serde_json::from_value(json!({ "sub": "my-notes/tasks", "kind": "System" })).unwrap();
+        assert!(!allows(&authorizer, &claimed, archive()).await);
+    }
+
+    #[tokio::test]
+    async fn a_system_principal_holds_the_roles_it_was_given() {
+        let authorizer = CedarAuthorizer::new(
+            r#"permit (principal in Role::"Maintenance", action == Action::"archive", resource);
+               permit (principal is System, action == Action::"GET", resource is Route);"#,
+        )
+        .unwrap();
+        let archive = || AccessRequest::new("archive", Resource::new("Note", 7));
+
+        let bare = Principal::system("my-notes", "tasks");
+        assert!(
+            !allows(&authorizer, &bare, archive()).await,
+            "no roles by default"
+        );
+        let maintainer = Principal::system("my-notes", "tasks").with_roles(["Maintenance"]);
+        assert!(allows(&authorizer, &maintainer, archive()).await);
+
+        let get = || AccessRequest::new("GET", route("/api/orders"));
+        assert!(allows(&authorizer, &bare, get()).await);
+        assert!(!allows(&authorizer, &principal("u-1", &["Maintenance"]), get()).await);
+    }
+
+    #[tokio::test]
+    async fn with_a_schema_a_system_principal_needs_the_system_type() {
+        let with_system = format!(
+            "{SCHEMA}\nentity System in [Role] {{ id: String }};\n\
+             action tidy appliesTo {{ principal: [System], resource: [Note] }};"
+        );
+        let authorizer = CedarAuthorizer::new(
+            r#"permit (principal is System, action == Action::"tidy", resource);"#,
+        )
+        .unwrap()
+        .with_schema(&with_system)
+        .unwrap();
+        let tidy = || {
+            AccessRequest::new(
+                "tidy",
+                Resource::new("Note", 1).with_attribute("owner", "u-1"),
+            )
+        };
+        assert!(allows(&authorizer, &Principal::system("my-notes", "tasks"), tidy()).await);
+
+        // Without `System` in the schema, the request cannot be evaluated: denied.
+        let without =
+            CedarAuthorizer::new(r#"permit (principal, action == Action::"archive", resource);"#)
+                .unwrap()
+                .with_schema(SCHEMA)
+                .unwrap();
+        let archive = AccessRequest::new(
+            "archive",
+            Resource::new("Note", 1).with_attribute("owner", "u-1"),
+        );
+        assert!(!allows(&without, &Principal::system("my-notes", "tasks"), archive).await);
+    }
 
     #[tokio::test]
     async fn membership_grants_a_whole_resource_but_only_the_named_actions() {
