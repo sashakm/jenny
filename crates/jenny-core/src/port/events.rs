@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::domain::DomainEvent;
 
 use super::context::Context;
+use super::headers::{Enrich, Headers};
 use super::outbound::{EventEnvelope, EventPublisher, PublishError};
 
 /// What a use case holds to publish events: the [`EventPublisher`] port, plus the three
@@ -43,14 +44,48 @@ use super::outbound::{EventEnvelope, EventPublisher, PublishError};
 /// miniature. For events that report a store write, hand them to the write instead —
 /// [`StoreExt::change`](super::StoreExt::change)`(…).raising(&events, cx)` — and a store
 /// with an outbox records them in the same transaction (ADR-016).
+///
+/// ### Enrichers
+///
+/// [`enriched_with`](Self::enriched_with) adds an [`Enrich`]er, which writes headers from
+/// the [`Context`] into every event this encodes, in the order they were added: in
+/// [`publish`](Self::publish), in `change(…).raising(…)` (with `announcing_changes`) and
+/// in `add(…).raising(…)`, before the store writes, so an outbox keeps the enriched
+/// envelope. [`deliver`](Self::deliver) hands envelopes on as they are. Under the runtime,
+/// `JennyServer::events()` returns an `Events` already carrying what
+/// `messaging.events.headers` turns on.
 #[derive(Clone)]
 pub struct Events {
     publisher: Arc<dyn EventPublisher>,
+    enrichers: Vec<Arc<dyn Enrich>>,
 }
 
 impl Events {
     pub fn new(publisher: Arc<dyn EventPublisher>) -> Self {
-        Self { publisher }
+        Self {
+            publisher,
+            enrichers: Vec::new(),
+        }
+    }
+
+    /// The same, with `enricher` running after the ones already added.
+    pub fn enriched_with(mut self, enricher: impl Enrich) -> Self {
+        self.enrichers.push(Arc::new(enricher));
+        self
+    }
+
+    /// Run every enricher over the headers of `envelopes`, which see nothing else.
+    pub(crate) fn enrich(&self, envelopes: &mut [EventEnvelope], cx: &Context) {
+        if self.enrichers.is_empty() {
+            return;
+        }
+        for envelope in envelopes {
+            let mut headers = Headers::from(std::mem::take(envelope.headers_mut()));
+            for enricher in &self.enrichers {
+                enricher.enrich(cx, &mut headers);
+            }
+            *envelope.headers_mut() = headers.into();
+        }
     }
 
     /// Encode `event`, correlate it with `cx`, and hand it to the port.
@@ -58,7 +93,7 @@ impl Events {
     where
         E: DomainEvent + Serialize,
     {
-        let envelope = match EventEnvelope::json(event.name(), event) {
+        let mut envelope = match EventEnvelope::json(event.name(), event) {
             // Listeners can trace the event back to the request that raised it.
             Ok(envelope) => envelope.correlated_with(cx),
             Err(e) => {
@@ -70,10 +105,13 @@ impl Events {
                 return;
             }
         };
+        self.enrich(std::slice::from_mut(&mut envelope), cx);
         self.deliver(vec![envelope], cx).await;
     }
 
-    /// Hand already-built envelopes to the port, logging any that fail.
+    /// Hand already-built envelopes to the port, logging any that fail. They are not
+    /// enriched: a store returns what it did not send, already enriched when it was
+    /// encoded.
     pub async fn deliver(&self, envelopes: Vec<EventEnvelope>, cx: &Context) {
         for envelope in envelopes {
             let name = envelope.name().to_string();
@@ -136,7 +174,9 @@ impl Raised for () {
 
 impl std::fmt::Debug for Events {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Events").finish_non_exhaustive()
+        f.debug_struct("Events")
+            .field("enrichers", &self.enrichers.len())
+            .finish_non_exhaustive()
     }
 }
 
