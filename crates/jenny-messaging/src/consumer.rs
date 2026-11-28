@@ -525,6 +525,11 @@ impl JetStreamConsumer {
                 }
             }
         }
+        // Acks are sent without waiting for the server; flush so that "stopped" means the
+        // server has them, ahead of anything this connection sends next.
+        if let Err(e) = this.jetstream.client().flush().await {
+            tracing::warn!(consumer = this.name, error = %e, "flushing the last acks");
+        }
         tracing::info!(consumer = this.name, "jetstream consumer stopped");
     }
 
