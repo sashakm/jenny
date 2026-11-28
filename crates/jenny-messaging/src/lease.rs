@@ -92,6 +92,9 @@ impl NatsLease {
                                 "setting the lease bucket's max_age to the lease ttl"
                             );
                             existing.max_age = self.ttl;
+                            // JetStream refuses a duplicate window longer than max_age, and
+                            // a bucket made for a longer ttl has one.
+                            existing.duplicate_window = existing.duplicate_window.min(self.ttl);
                             jetstream
                                 .update_stream(&existing)
                                 .await
