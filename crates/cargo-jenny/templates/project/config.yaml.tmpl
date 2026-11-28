@@ -38,6 +38,23 @@ telemetry:
 
 messaging:
   buffer_size: 64
+  # Headers every event `server.events()` raises carries. Off by default: a caller's id
+  # is personal data, and a stream keeps it for as long as its retention says.
+  # events:
+  #   headers:
+  #     caller: true                  # caller-subject, and caller-actor when delegated
+  #     source: true                  # source-service, source-version
+  # How event handlers (`server.handle(…)`, `MessagingAdapter::on(…)`) run, and what
+  # becomes of a JetStream message whose handler fails.
+  # inbound:
+  #   principal: system               # or envelope: run as the event's caller
+  #   max_deliver: 5
+  #   backoff: [1, 5, 30]             # seconds before each redelivery; the last repeats
+  #   dead_letter: {{project_snake}}.dead
+  #   max_in_flight: 1                # per consumer; 1 keeps order
+  #   subscriptions:                  # overrides, matched on the full subject
+  #     - subject: orders.created
+  #       max_deliver: 10
   # The service's NATS connection: key-value stores (`server.nats()`) and the gateway
   # (`nats.gateway(…)`) share it. With `url` set the runtime connects at startup;
   # compose.yaml starts a NATS.
