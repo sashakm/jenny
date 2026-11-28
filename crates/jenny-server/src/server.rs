@@ -1175,7 +1175,9 @@ impl JennyServer {
         }
         #[cfg(feature = "telemetry-prometheus")]
         if let (Some(registry), Some(route)) = (registry, path(Group::Metrics)) {
-            let mut metrics = crate::metrics::metrics_router(registry, &route);
+            // The 405 fallback first, so the credentials guard it too.
+            let mut metrics = crate::metrics::metrics_router(registry, &route)
+                .method_not_allowed_fallback(jenny_rest::method_not_allowed);
             if let Some(auth) = config.server.endpoints.metrics.auth.as_ref() {
                 info!("metrics endpoint requires basic authentication");
                 metrics = metrics.layer(
@@ -1651,7 +1653,7 @@ mod tests {
                 RestAdapter::new("slow")
                     .unwrap()
                     .mount(Routes::new("slow").get("/slow", || async {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                         "done"
                     }))
                     .unwrap(),
@@ -2902,6 +2904,7 @@ mod tests {
         use base64::Engine as _;
         let credential = base64::engine::general_purpose::STANDARD.encode("prometheus:s3cret");
         let authorized = metrics
+            .clone()
             .oneshot(
                 http::Request::get("/j/metrics")
                     .header(http::header::AUTHORIZATION, format!("Basic {credential}"))
@@ -2911,6 +2914,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::OK);
+
+        // A wrong method is challenged too, rather than answered.
+        let wrong_method = metrics
+            .oneshot(
+                http::Request::post("/j/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_method.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[cfg(feature = "telemetry-prometheus")]

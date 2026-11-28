@@ -91,6 +91,10 @@ pub(crate) struct Available {
 }
 
 /// A REST adapter's claim on the API listener's paths.
+///
+/// Mounted at a path, it claims everything under it. Mounted at the root, it claims its
+/// route templates by string, so a group at `/status` beside an adapter's `/{slug}` is
+/// not a clash: the static route wins, and that one value of `slug` is shadowed.
 pub(crate) struct AdapterRoutes {
     pub name: String,
     /// Its mount path; empty when mounted at the root.
@@ -109,14 +113,17 @@ impl Layout {
     }
 }
 
-/// The configured key of a group, `.path` included when the path came from there.
+/// The configured key of a group: `.path` when the path came from there, else the
+/// group and `server.framework_path`, which its default path is under.
 fn key_of(group: Group, server: &HttpConfig) -> String {
-    let suffix = if group.config(server).path.is_some() {
-        ".path"
+    if group.config(server).path.is_some() {
+        format!("`server.endpoints.{}.path`", group.key())
     } else {
-        ""
-    };
-    format!("`server.endpoints.{}{suffix}`", group.key())
+        format!(
+            "`server.endpoints.{}` (at its default path under `server.framework_path`)",
+            group.key()
+        )
+    }
 }
 
 /// Leading slash on, trailing slash off. A single route keeps `/` for the root; a
@@ -165,14 +172,26 @@ pub(crate) fn resolve(
         let listener = listener_of(group)?;
         let path = match config.path.as_deref() {
             Some(path) => {
-                if path.contains(['{', '}', '*']) {
+                // axum reads these as parameters, or panics on them.
+                if path.contains(['{', '}', '*'])
+                    || path.contains("//")
+                    || path.split('/').any(|segment| segment.starts_with(':'))
+                {
                     anyhow::bail!(
                         "`server.endpoints.{}.path` (`{path}`) must be a literal path, \
-                         without `{{…}}` or `*`",
+                         without `{{…}}`, `*`, `:` segments or `//`",
                         group.key()
                     );
                 }
-                normalize(path, group.is_prefix())
+                let path = normalize(path, group.is_prefix());
+                // Everything under the root would include the document it loads.
+                if group == Group::Swagger && path.is_empty() {
+                    anyhow::bail!(
+                        "`server.endpoints.swagger.path` cannot be `/`: Swagger UI would \
+                         claim every path, the `openapi` document's among them"
+                    );
+                }
+                path
             }
             None => normalize(
                 &format!("{framework_path}{}", group.default_path()),
@@ -557,9 +576,37 @@ mod tests {
 
     #[test]
     fn a_path_must_be_literal() {
+        for path in ["/status/{id}", "/:health", "/a//b", "/docs/*"] {
+            let mut server = HttpConfig::default();
+            server.endpoints.status.path = Some(path.into());
+            let err = resolve(&server, EVERYTHING, &[]).unwrap_err().to_string();
+            assert!(
+                err.contains("`server.endpoints.status.path`"),
+                "{path}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn swagger_cannot_take_the_root() {
         let mut server = HttpConfig::default();
-        server.endpoints.status.path = Some("/status/{id}".into());
+        server.endpoints.swagger.path = Some("/".into());
         let err = resolve(&server, EVERYTHING, &[]).unwrap_err().to_string();
-        assert!(err.contains("`server.endpoints.status.path`"), "{err}");
+        assert!(
+            err.contains("`server.endpoints.swagger.path` cannot be `/`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_clash_at_a_default_path_names_the_framework_path() {
+        let server = HttpConfig {
+            framework_path: "/api".into(),
+            ..HttpConfig::default()
+        };
+        let err = resolve(&server, EVERYTHING, &[notes_at("/api")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`server.framework_path`"), "{err}");
     }
 }

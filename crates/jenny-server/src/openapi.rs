@@ -28,12 +28,11 @@ async fn document_handler(State(document): State<OpenApi>) -> impl IntoResponse 
     Json(document)
 }
 
-/// Swagger UI under `prefix` (empty for the root), loading the document from
-/// `document_url`.
+/// Swagger UI under `prefix`, never the root (`endpoints::resolve` refuses it),
+/// loading the document from `document_url`.
 #[cfg(feature = "swagger-ui")]
 pub(crate) fn swagger_router(prefix: &str, document_url: &str) -> Router {
-    let path = if prefix.is_empty() { "/" } else { prefix };
-    utoipa_swagger_ui::SwaggerUi::new(path.to_string())
+    utoipa_swagger_ui::SwaggerUi::new(prefix.to_string())
         .config(utoipa_swagger_ui::Config::from(document_url.to_string()))
         .into()
 }
